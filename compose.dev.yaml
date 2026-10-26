@@ -1,0 +1,42 @@
+# Dev: live reload for API (uvicorn --reload) and web (Vite HMR) behind nginx on :8080.
+#   docker compose -f compose.yaml -f compose.dev.yaml up --build   (or: make dev)
+services:
+  api:
+    build: {context: ., dockerfile: api/Dockerfile, target: dev}
+    environment:
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fake}
+    volumes:
+      - ./api/app:/app/app
+      - ./api/alembic:/app/alembic
+      - ./api/alembic.ini:/app/alembic.ini
+      - ./api/tests:/app/tests
+      - ./shared:/shared:ro
+      - ./data:/data:ro
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app"]
+    ports: ["127.0.0.1:8000:8000"]
+
+  web:
+    image: node:22-alpine
+    working_dir: /web
+    command: ["sh", "-c", "npm ci --no-audit --no-fund && npm run dev -- --host 0.0.0.0 --port 5173"]
+    volumes:
+      - ./web:/web
+      - ./shared:/shared:ro
+      - webmodules:/web/node_modules
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+
+  nginx:
+    image: nginx:1.29-alpine
+    volumes: [./nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro]
+    ports: ["127.0.0.1:8080:80"]
+    depends_on: [api, web]
+
+  postgres:
+    ports: ["127.0.0.1:5432:5432"]
+
+  mongo:
+    ports: ["127.0.0.1:27017:27017"]
+
+volumes:
+  webmodules:

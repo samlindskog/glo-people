@@ -1,0 +1,51 @@
+# Base services shared by dev (compose.dev.yaml) and prod (compose.prod.yaml).
+name: glo-people
+
+x-api-env: &api-env
+  DATABASE_URL: postgresql+asyncpg://glo:${POSTGRES_PASSWORD:-glo}@postgres:5432/glo
+  MONGO_URL: mongodb://mongo:27017
+  MONGO_DB: glo
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_USER: glo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glo}
+      POSTGRES_DB: glo
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=8MB",
+              "-c", "max_connections=40"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glo -d glo"]
+      interval: 5s
+      retries: 20
+    mem_limit: 320m
+
+  mongo:
+    image: mongo:8.0
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25", "--bind_ip_all"]
+    volumes: [mongodata:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      retries: 20
+    mem_limit: 400m
+
+  api:
+    environment:
+      <<: *api-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      mongo: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      retries: 10
+    mem_limit: 300m
+
+volumes:
+  pgdata:
+  mongodata:

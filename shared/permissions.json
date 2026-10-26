@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "people:read": "Browse, view and search people",
+    "people:write": "Create, edit, delete and import people; change field settings",
+    "searches:read_own": "View my own search history",
+    "searches:read_all": "View every user's searches",
+    "activity:read": "View the app-wide activity log",
+    "accounts:manage": "Create users, change roles, reset passwords, deactivate",
+    "api_keys:manage_own": "Issue and revoke my own MCP API keys",
+    "api_keys:manage_all": "Issue and revoke MCP API keys for any account"
+  },
+  "roles": {
+    "reader": {
+      "label": "Reader",
+      "permissions": [
+        "people:read",
+        "searches:read_own",
+        "searches:read_all",
+        "activity:read",
+        "accounts:manage",
+        "api_keys:manage_own",
+        "api_keys:manage_all"
+      ]
+    },
+    "writer": {
+      "label": "Writer",
+      "permissions": [
+        "people:read",
+        "people:write",
+        "searches:read_own",
+        "searches:read_all",
+        "activity:read",
+        "accounts:manage",
+        "api_keys:manage_own",
+        "api_keys:manage_all"
+      ]
+    }
+  }
+}
