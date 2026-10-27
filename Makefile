@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields psql mongosh
+.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields psql mongosh prod-create-user prod-import prod-embed prod-status
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -55,3 +55,24 @@ psql:
 
 mongosh:
 	$(DEV) exec mongo mongosh glo
+
+# --- production (glousfr1, via your `sam` SSH alias) -----------------------------------------
+PROD_SSH ?= glousfr1
+PROD_EXEC = ssh -t $(PROD_SSH) sudo docker exec -it glo-people-api-1
+
+# make prod-create-user USER=sam ROLE=writer   (prompts for the password on the server)
+prod-create-user:
+	$(PROD_EXEC) python -m app.cli create-user $(USER) --role $(or $(ROLE),reader)
+
+# make prod-import FILE=data/members.csv TIER=member
+prod-import:
+	scp -q "$(FILE)" $(PROD_SSH):/tmp/glo-import.csv
+	ssh $(PROD_SSH) 'sudo docker cp /tmp/glo-import.csv glo-people-api-1:/tmp/$(notdir $(FILE)) && rm /tmp/glo-import.csv'
+	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli import /tmp/$(notdir $(FILE)) --tier $(TIER)
+	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 rm /tmp/$(notdir $(FILE))
+
+prod-embed:
+	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
+
+prod-status:
+	ssh $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'
