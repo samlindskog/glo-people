@@ -150,3 +150,15 @@ async def test_prose_columns_stay_text_and_short_values_not_embedded(writer):
     assert fl["bio"]["embed"] and not fl["status"]["embed"]
     a = await db().people.find_one({"name": "A"})
     assert a["location"] == "Lagos, Nigeria" and a["tags"] == ["a", "b", "c"]
+
+
+async def test_switching_embedder_reembeds(writer):
+    await _import(writer, MEMBERS, "members.csv", "member")
+    ids = [str(d["_id"]) async for d in db().people.find({}, {"_id": 1})]
+    assert await embeddings.sync_people(ids) == 0  # up to date
+
+    class Other(embeddings.FakeEmbedder):
+        pass
+
+    embeddings.set_embedder(Other(512))
+    assert await embeddings.sync_people(ids) > 0

@@ -75,7 +75,10 @@ def set_embedder(e) -> None:
 
 
 def _hash(text: str) -> str:
-    return hashlib.sha256(f"{get_settings().embedding_model}:{text}".encode()).hexdigest()
+    # Includes the embedder identity so switching provider/model/dims re-embeds everything.
+    e = embedder()
+    who = f"{type(e).__name__}:{getattr(e, 'model', '')}:{e.dims}"
+    return hashlib.sha256(f"{who}:{text}".encode()).hexdigest()
 
 
 async def embed_query(text: str) -> list[float]:
