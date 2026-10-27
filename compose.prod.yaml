@@ -1,0 +1,26 @@
+# Production on glousfr1 (/opt/glo-people). Images are built in CI and loaded over SSH.
+#   docker compose -f compose.yaml -f compose.prod.yaml up -d
+services:
+  api:
+    image: glo-people-api:${IMAGE_TAG:-latest}
+    environment:
+      COOKIE_SECURE: "true"
+    ports: ["127.0.0.1:8000:8000"]
+    restart: unless-stopped
+
+  nginx:
+    image: glo-people-web:${IMAGE_TAG:-latest}
+    network_mode: host   # so nftables' input chain (Cloudflare-only :443) governs it
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+      - ./nginx/cloudflare-realip.conf:/etc/nginx/cloudflare-realip.conf:ro
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+    mem_limit: 64m
+
+  postgres:
+    restart: unless-stopped
+
+  mongo:
+    restart: unless-stopped

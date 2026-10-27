@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  COMPOSE: docker compose -f compose.yaml -f compose.dev.yaml
+  DEPLOY_HOST: 173.255.215.70
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: cd api && uv run ruff check app tests alembic
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json}
+      - run: cd web && npm ci --no-audit --no-fund && npx tsc -b && npx oxlint src && npm test
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start dev stack
+        run: |
+          printf 'POSTGRES_PASSWORD=glo\nEMBEDDING_PROVIDER=fake\n' > .env
+          mkdir -p data
+          $COMPOSE up -d --build
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8080/api/health && curl -sf -o /dev/null http://localhost:8080/ && exit 0
+            sleep 3
+          done
+          $COMPOSE logs --tail 100; exit 1
+      - name: API tests
+        run: |
+          $COMPOSE exec -T api env TEST_DATABASE_URL=postgresql+asyncpg://glo:glo@postgres:5432/glo_test \
+            TEST_MONGO_URL=mongodb://mongo:27017 pytest -q
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm, cache-dependency-path: e2e/package-lock.json}
+      - name: End-to-end tests
+        run: |
+          cd e2e && npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npx playwright test
+      - if: failure()
+        run: $COMPOSE logs --tail 200
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: playwright-report, path: e2e/playwright-report, retention-days: 7}
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: |
+          TAG=${GITHUB_SHA::12}
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          docker build -f api/Dockerfile --target prod -t glo-people-api:$TAG .
+          docker build -f web/Dockerfile -t glo-people-web:$TAG .
+      - name: SSH setup
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Ship images and deploy
+        run: |
+          SSH="ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o BatchMode=yes deploy@$DEPLOY_HOST"
+          tar -c compose.yaml compose.prod.yaml | $SSH config
+          docker save glo-people-api:$TAG glo-people-web:$TAG | gzip -1 | $SSH load
+          $SSH up $TAG
