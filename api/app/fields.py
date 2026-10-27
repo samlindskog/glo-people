@@ -40,8 +40,16 @@ def label_for(key: str) -> str:
     return key.replace("_", " ").capitalize()
 
 
-def default_embed(key: str, ftype: FieldType) -> bool:
-    return ftype in ("text", "list") and not _NOT_EMBEDDED.search(key)
+MIN_EMBED_CHARS = 15
+
+
+def default_embed(key: str, ftype: FieldType, values: list[Any] = ()) -> bool:
+    """Embed descriptive text by default; skip contact details, numbers, dates, and short
+    categorical values (status, tier, stage…) where similarity search is meaningless."""
+    if ftype not in ("text", "list") or _NOT_EMBEDDED.search(key):
+        return False
+    texts = [text_of(v) for v in values if v not in (None, "", [])]
+    return not texts or sum(map(len, texts)) / len(texts) >= MIN_EMBED_CHARS
 
 
 def infer_type(values: list[Any]) -> FieldType:
@@ -93,7 +101,7 @@ async def register(samples: dict[str, list[Any]]) -> list[str]:
         await db().fields.update_one(
             {"_id": key},
             {"$setOnInsert": {"label": label_for(key), "type": ftype,
-                              "embed": default_embed(key, ftype), "count": 0, "created_at": now}},
+                              "embed": default_embed(key, ftype, values), "count": 0, "created_at": now}},
             upsert=True)
         new.append(key)
     return new

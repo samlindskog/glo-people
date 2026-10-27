@@ -83,7 +83,7 @@ async def test_embeddings_created_per_field(writer):
 
 async def test_person_crud_and_reembed(writer, reader):
     r = await writer.post("/api/people", json={"tier": "plus_one",
-                                               "fields": {"name": "Zed", "bio": "robotics",
+                                               "fields": {"name": "Zed", "bio": "builds warehouse robotics",
                                                           "tags": ["a", "b"]}})
     assert r.status_code == 201, r.text
     pid = r.json()["id"]
@@ -99,7 +99,7 @@ async def test_person_crud_and_reembed(writer, reader):
             return (await conn.execute(select(fe.c.content_hash).where(
                 fe.c.mongo_id == pid, fe.c.field == "bio"))).scalar_one_or_none()
     h1 = await bio_hash()
-    r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "drones", "tags": None}})
+    r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones", "tags": None}})
     assert r.status_code == 200 and "tags" not in r.json()
     assert (await bio_hash()) not in (None, h1)
 
@@ -132,3 +132,21 @@ async def test_toggle_field_embed(writer):
 @pytest.fixture(autouse=True)
 def _fake_embedder():
     embeddings.set_embedder(embeddings.FakeEmbedder(512))
+
+
+PROSE = """Name,Location,Bio,Status,Notes,Tags
+A,"Lagos, Nigeria","Founder; previously at Stripe, Paystack.\nLoves chess",active,"Met at demo day;\nfollow up",a; b; c
+B,"Berlin, Germany","Investor, climate; ex-founder",active,,x; y
+C,"Austin, USA",Engineer,paused,"call back, maybe",z
+"""
+
+
+async def test_prose_columns_stay_text_and_short_values_not_embedded(writer):
+    await _import(writer, PROSE, "prose.csv", "member")
+    fl = {f["key"]: f for f in (await writer.get("/api/fields")).json()}
+    assert fl["location"]["type"] == "text" and fl["bio"]["type"] == "text"
+    assert fl["notes"]["type"] == "text"
+    assert fl["tags"]["type"] == "list"
+    assert fl["bio"]["embed"] and not fl["status"]["embed"]
+    a = await db().people.find_one({"name": "A"})
+    assert a["location"] == "Lagos, Nigeria" and a["tags"] == ["a", "b", "c"]

@@ -17,6 +17,10 @@ from app.mongo import db
 _NUMBER = re.compile(r"^-?\$?\d[\d,]*(\.\d+)?$")
 _NEVER_NUMERIC = re.compile(r"(^|_)(id|phone|phones|zip|postal|whatsapp)($|_)")
 _LIST_SEPARATORS = re.compile(r"\s*(?:\n|;|\s\|\s)\s*")
+# Free text that often contains commas/newlines but is never a list.
+_PROSE = re.compile(r"(^|_)(bio|bios|note|notes|description|message|messages|summary|liner|"
+                    r"comment|comments|about|location|address|city|country|region|name|title|"
+                    r"role|company|goals?|preferences)($|_)")
 WRITE_BATCH = 1000
 
 csv.field_size_limit(10_000_000)
@@ -44,12 +48,17 @@ def _to_number(s: str) -> int | float | None:
     return int(f) if f.is_integer() and "." not in s else f
 
 
-def _split_commas(values: list[str]) -> bool:
-    with_comma = [v for v in values if "," in v]
-    if len(with_comma) < 0.3 * len(values) or max(len(v) for v in values) > 300:
+def _looks_like_list(values: list[str], split) -> bool:
+    """A column is a list when a good share of values split into several short items."""
+    multi = [parts for v in values if len(parts := [p for p in split(v) if p.strip()]) > 1]
+    if len(multi) < 0.2 * len(values) or max(len(v) for v in values) > 600:
         return False
-    segments = [len(s.strip()) for v in with_comma for s in v.split(",")]
-    return statistics.median(segments) <= 25
+    lengths = sorted(len(p.strip()) for parts in multi for p in parts)
+    return statistics.median(lengths) <= 30 and lengths[int(0.9 * (len(lengths) - 1))] <= 80
+
+
+def _split_commas(values: list[str]) -> bool:
+    return _looks_like_list(values, lambda v: v.split(","))
 
 
 def _column_kind(key: str, values: list[str], registered: str | None) -> str:
@@ -63,7 +72,9 @@ def _column_kind(key: str, values: list[str], registered: str | None) -> str:
     if not _NEVER_NUMERIC.search(key) and \
             sum(_to_number(v) is not None for v in values) >= 0.9 * len(values):
         return "number"
-    if sum(bool(_LIST_SEPARATORS.search(v)) for v in values) >= 0.2 * len(values):
+    if _PROSE.search(key):
+        return "text"
+    if _looks_like_list(values, _LIST_SEPARATORS.split):
         return "list"
     if _split_commas(values):
         return "list_comma"
