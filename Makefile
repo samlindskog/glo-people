@@ -69,7 +69,7 @@ prod-import:
 	scp -q "$(FILE)" $(PROD_SSH):/tmp/glo-import.csv
 	ssh $(PROD_SSH) 'sudo docker cp /tmp/glo-import.csv glo-people-api-1:/tmp/$(notdir $(FILE)) && rm /tmp/glo-import.csv'
 	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli import /tmp/$(notdir $(FILE)) --tier $(TIER)
-	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 rm /tmp/$(notdir $(FILE))
+	ssh $(PROD_SSH) sudo docker exec -u 0 glo-people-api-1 rm /tmp/$(notdir $(FILE))
 
 prod-embed:
 	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
