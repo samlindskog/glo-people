@@ -6,7 +6,7 @@ const DEFAULT_SEMANTIC: SemanticQuery = {
   query: '',
   fields: [],
   mode: 'avg',
-  threshold: 0.2,
+  threshold: 0.4,
   require_all_fields: false,
 }
 
@@ -215,7 +215,7 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
                 <div className="flex items-center gap-2">
                   <input
                     type="range"
-                    min={-0.2}
+                    min={0}
                     max={1}
                     step={0.01}
                     aria-label="Threshold slider"

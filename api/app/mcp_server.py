@@ -30,7 +30,8 @@ Search and read the GLO people database. People are schema-less documents in two
 ('member' and 'plus_one'). Call list_fields first to see which field keys exist, their types,
 coverage, and which are embedded for semantic search. search_people combines literal per-field
 filters (AND) with optional semantic similarity over one or more embedded fields, aggregated by
-avg or max and cut off at a threshold (cosine similarity, typically 0.15-0.5)."""
+avg or max and cut off at a threshold (cosine similarity; default 0.4. Unrelated text scores
+around 0.2-0.3, so 0.35-0.5 is the useful range)."""
 
 
 class GloMCP(MCPServer):

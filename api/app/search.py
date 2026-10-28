@@ -38,7 +38,7 @@ class SemanticQuery(BaseModel):
     mode: Literal["avg", "max"] = Field(
         "avg", description="avg: mean cosine similarity over the listed fields the person has; "
                            "max: best single field")
-    threshold: float = Field(0.2, ge=-1, le=1,
+    threshold: float = Field(0.4, ge=-1, le=1,
                              description="Only return people whose aggregate score >= threshold")
     require_all_fields: bool = Field(
         False, description="Only consider people who have every listed field")
