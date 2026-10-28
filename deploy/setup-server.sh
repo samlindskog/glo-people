@@ -19,6 +19,7 @@ install -d -m 755 /etc/nftables.d
 touch /etc/nftables.d/cloudflare.nft
 install -m 755 "$SRC/nftables.conf" /etc/nftables.conf
 nft -c -f /etc/nftables.conf
+systemctl enable nftables >/dev/null
 systemctl reload nftables
 
 # Docker CE
@@ -45,8 +46,44 @@ install -m 755 "$SRC/deploy.sh" /usr/local/bin/glo-deploy
 install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
 echo "restrict,command=\"/usr/local/bin/glo-deploy\" $DEPLOY_PUBKEY" > /home/deploy/.ssh/authorized_keys
 chown deploy:deploy /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
-sed -i 's/^AllowUsers .*/AllowUsers sam deploy/' /etc/ssh/sshd_config.d/00-hardening.conf
-sshd -t && systemctl reload ssh
+# sshd: `sam` administers over port 22, CI deploys over port 2222, which nftables opens only to the
+# GitHub Actions runner ranges. Splitting the two is the point: the forced-command deploy key is then
+# unusable from anywhere but a runner. The Match blocks go at the END of the main sshd_config, not in a
+# drop-in: drop-ins are included from the top, and a Match there would swallow the `Subsystem` line
+# that follows it, which sshd rejects inside a Match block.
+HARDENING=/etc/ssh/sshd_config.d/00-hardening.conf
+sed -i 's/^AllowUsers .*/AllowUsers sam deploy/' $HARDENING
+# The drop-in is provisioned out of band, so every key is set idempotently and appended when absent;
+# a bare `sed -i s/^Key .*/` would silently no-op on a host whose drop-in never had the key.
+set_sshd_key() {  # set_sshd_key <keyword> <value>
+  if grep -qiE "^[[:space:]]*$1[[:space:]]" $HARDENING; then
+    sed -i -E "s|^[[:space:]]*$1[[:space:]]+.*|$1 $2|I" $HARDENING
+  else
+    printf '%s %s\n' "$1" "$2" >> $HARDENING
+  fi
+  grep -qxE "$1 $2" $HARDENING || { echo "sshd: failed to set '$1 $2' in $HARDENING" >&2; exit 1; }
+}
+grep -qE '^[[:space:]]*Port[[:space:]]+22$'   $HARDENING || echo 'Port 22'   >> $HARDENING
+grep -qE '^[[:space:]]*Port[[:space:]]+2222$' $HARDENING || echo 'Port 2222' >> $HARDENING
+# uscentral1's grace time; the rest of this drop-in is already stricter than the hub
+# (MaxAuthTries 3, publickey-only, no agent forwarding, no X11).
+set_sshd_key LoginGraceTime 20
+if ! grep -q '^# BEGIN glo-people' /etc/ssh/sshd_config; then
+  cat >> /etc/ssh/sshd_config <<'SSHD'
+
+# BEGIN glo-people (managed by deploy/setup-server.sh; keep last, Match swallows what follows)
+Match LocalPort 2222
+  AllowUsers deploy
+Match LocalPort 22
+  AllowUsers sam
+# END glo-people
+SSHD
+fi
+sshd -t
+# Prove the split before reloading: deploy must be refused on 22 and sam refused on 2222.
+sshd -T -C user=sam,addr=192.0.2.1,lport=22      | grep -qx 'allowusers sam'    || { echo "sshd: port 22 is not sam-only" >&2; exit 1; }
+sshd -T -C user=deploy,addr=192.0.2.1,lport=2222 | grep -qx 'allowusers deploy' || { echo "sshd: port 2222 is not deploy-only" >&2; exit 1; }
+systemctl reload ssh
 
 # App directory
 install -d -m 755 -o deploy -g deploy $APP $APP/nginx
@@ -74,7 +111,7 @@ fi
 install -m 755 "$SRC/cf-ips.sh" /usr/local/sbin/glo-cf-ips
 cat > /etc/systemd/system/glo-cf-ips.service <<UNIT
 [Unit]
-Description=Refresh Cloudflare IP ranges for glo-people
+Description=Refresh the Cloudflare and GitHub Actions IP ranges for glo-people
 After=network-online.target nftables.service
 Wants=network-online.target
 [Service]
@@ -83,10 +120,10 @@ ExecStart=/usr/local/sbin/glo-cf-ips
 UNIT
 cat > /etc/systemd/system/glo-cf-ips.timer <<UNIT
 [Unit]
-Description=Weekly Cloudflare IP refresh
+Description=Daily Cloudflare + GitHub Actions IP refresh
 [Timer]
-OnCalendar=weekly
-RandomizedDelaySec=6h
+OnCalendar=daily
+RandomizedDelaySec=3h
 Persistent=true
 [Install]
 WantedBy=timers.target

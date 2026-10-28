@@ -57,6 +57,8 @@ mongosh:
 	$(DEV) exec mongo mongosh glo
 
 # --- production (glousfr1, via your `sam` SSH alias) -----------------------------------------
+# sudo on glousfr1 requires sam's password (as on uscentral1), so every helper here allocates a
+# tty with `ssh -t` for sudo to prompt on.
 PROD_SSH ?= glousfr1
 PROD_EXEC = ssh -t $(PROD_SSH) sudo docker exec -it glo-people-api-1
 
@@ -67,19 +69,19 @@ prod-create-user:
 # make prod-import FILE=data/members.csv TIER=member
 prod-import:
 	scp -q "$(FILE)" $(PROD_SSH):/tmp/glo-import.csv
-	ssh $(PROD_SSH) 'sudo docker cp /tmp/glo-import.csv glo-people-api-1:/tmp/$(notdir $(FILE)) && rm /tmp/glo-import.csv'
-	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli import /tmp/$(notdir $(FILE)) --tier $(TIER)
-	ssh $(PROD_SSH) sudo docker exec -u 0 glo-people-api-1 rm /tmp/$(notdir $(FILE))
+	ssh -t $(PROD_SSH) 'sudo docker cp /tmp/glo-import.csv glo-people-api-1:/tmp/$(notdir $(FILE)) && rm /tmp/glo-import.csv'
+	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli import /tmp/$(notdir $(FILE)) --tier $(TIER)
+	ssh -t $(PROD_SSH) sudo docker exec -u 0 glo-people-api-1 rm /tmp/$(notdir $(FILE))
 
 prod-embed:
-	ssh $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
+	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
 
 prod-status:
-	ssh $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'
+	ssh -t $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'
 
 # Authenticated Origin Pulls: enforce only after AOP is enabled for the zone in Cloudflare.
 prod-aop-on:
-	ssh $(PROD_SSH) 'echo "ssl_verify_client on;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'
+	ssh -t $(PROD_SSH) 'echo "ssl_verify_client on;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'
 
 prod-aop-off:
-	ssh $(PROD_SSH) 'echo "ssl_verify_client optional;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'
+	ssh -t $(PROD_SSH) 'echo "ssl_verify_client optional;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'

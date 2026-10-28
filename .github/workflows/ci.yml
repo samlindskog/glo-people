@@ -11,7 +11,6 @@ concurrency:
 
 env:
   COMPOSE: docker compose -f compose.yaml -f compose.dev.yaml
-  DEPLOY_HOST: 173.255.215.70
 
 jobs:
   lint:
@@ -71,14 +70,23 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           docker build -f api/Dockerfile --target prod -t glo-people-api:$TAG .
           docker build -f web/Dockerfile -t glo-people-web:$TAG .
+      # Secrets reach the shell through env, never by ${{ }} interpolation into the script body.
+      # DEPLOY_PORT is the deploy-only sshd port, which the host firewalls to the GitHub Actions
+      # ranges, so DEPLOY_KNOWN_HOSTS must carry the `[host]:port` form of the host key.
       - name: SSH setup
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
         run: |
           install -m 700 -d ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
-          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
       - name: Ship images and deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
         run: |
-          SSH="ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o BatchMode=yes deploy@$DEPLOY_HOST"
+          SSH="ssh -i ~/.ssh/deploy -o IdentitiesOnly=yes -o BatchMode=yes -p ${DEPLOY_PORT:?} deploy@${DEPLOY_HOST:?}"
           tar -c compose.yaml compose.prod.yaml | $SSH config
           docker save glo-people-api:$TAG glo-people-web:$TAG | gzip -1 | $SSH load
           $SSH up $TAG
