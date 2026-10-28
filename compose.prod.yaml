@@ -14,6 +14,7 @@ services:
     volumes:
       - ./certs:/etc/nginx/certs:ro
       - ./nginx/cloudflare-realip.conf:/etc/nginx/cloudflare-realip.conf:ro
+      - ./nginx/aop.conf:/etc/nginx/aop.conf:ro
     depends_on:
       api: {condition: service_healthy}
     restart: unless-stopped

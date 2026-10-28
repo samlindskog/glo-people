@@ -63,6 +63,13 @@ ENV
   chown deploy:deploy $APP/.env
 fi
 
+# Authenticated Origin Pulls: certs/aop-ca.pem is the CA that signed the client cert uploaded to
+# Cloudflare. Start in `optional` mode; switch to `on` once AOP is enabled for the zone.
+if [ ! -f $APP/nginx/aop.conf ]; then
+  printf '# Authenticated Origin Pulls: optional until enabled in Cloudflare, then on\nssl_verify_client optional;\n' \
+    > $APP/nginx/aop.conf
+fi
+
 # Cloudflare ranges → nftables sets + nginx real-IP, refreshed weekly
 install -m 755 "$SRC/cf-ips.sh" /usr/local/sbin/glo-cf-ips
 cat > /etc/systemd/system/glo-cf-ips.service <<UNIT

@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields psql mongosh prod-create-user prod-import prod-embed prod-status
+.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields psql mongosh prod-create-user prod-import prod-embed prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -76,3 +76,10 @@ prod-embed:
 
 prod-status:
 	ssh $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'
+
+# Authenticated Origin Pulls: enforce only after AOP is enabled for the zone in Cloudflare.
+prod-aop-on:
+	ssh $(PROD_SSH) 'echo "ssl_verify_client on;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'
+
+prod-aop-off:
+	ssh $(PROD_SSH) 'echo "ssl_verify_client optional;" | sudo tee /opt/glo-people/nginx/aop.conf >/dev/null && sudo docker exec glo-people-nginx-1 nginx -s reload'
