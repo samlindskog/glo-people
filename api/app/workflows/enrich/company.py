@@ -6,8 +6,7 @@ from app.workflows.context import WorkflowDeps
 from app.workflows.enrich.agents_common import budgeted_fetch, run_agent
 from app.workflows.enrich.models import CompanySummary
 from app.workflows.enrich.urls import host_of, is_social, registrable
-from app.workflows.firecrawl import SearchHit
-from app.workflows.firecrawl import BudgetExceeded, FirecrawlError
+from app.workflows.firecrawl import BudgetExceeded, FirecrawlError, SearchHit
 
 AGENT_NAME = "company"
 
