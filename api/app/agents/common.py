@@ -52,9 +52,10 @@ async def run_agent(agent: Agent, prompt: str, deps: Any = None,
     return result.output
 
 
-def catalog_prompt(props: Sequence[Property], max_values: int = 8) -> str:
+def catalog_prompt(props: Sequence[Property], max_values: int = 12) -> str:
     """The property catalog as an agent reads it: one line per property with type, whether it is
-    embeddable (searchable by passage) and the canonical values of enum types."""
+    embeddable (searchable by passage), the canonical values of enum types and, when the caller
+    passed coverage, how many people have a value."""
     lines = []
     for p in props:
         bits = [p.type]
@@ -63,6 +64,8 @@ def catalog_prompt(props: Sequence[Property], max_values: int = 8) -> str:
         if p.values:
             more = ", …" if len(p.values) > max_values else ""
             bits.append("values: " + ", ".join(p.values[:max_values]) + more)
+        if p.count:
+            bits.append(f"{p.count} people")
         lines.append(f"- {p.key} ({'; '.join(bits)}): {p.label}")
     return "\n".join(lines)
 

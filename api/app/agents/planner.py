@@ -46,19 +46,24 @@ agent = Agent(
     output_type=SearchPlan,
     instructions="""\
 You plan a search over a database of people (founders, investors, operators). You are given a
-question and the catalog of properties each person may have. Decide which properties to search
-and how:
+question and the catalog of properties each person may have, with how many people have each.
+Decide which properties to search and how:
 
-- For properties marked embeddable, write a short passage (a few words to one sentence) phrased
-  like the text you expect to find in that property; it is compared by meaning. Pick the one or
-  two properties most likely to hold the answer (bio and one_liner describe the person,
-  company_description the company, notes are internal remarks, sectors are tags).
-- For typed properties (number, date, boolean, enum, enum list) and short text properties
-  (keyword, url, contact) write a literal filter. Enum filters must use one of the canonical
-  values listed; number filters take numbers (e.g. 10000, not "10k"); dates are ISO (YYYY-MM-DD).
-  Text properties support contains / starts_with / regex / eq / ne / in / exists.
-- Do not filter on a property for vague wording; prefer a passage. Do not invent properties.
-- Give at least one passage or one filter. Keep the plan small.""",
+- First look for typed properties that encode what the question asks for: a role or seniority
+  (seniority, role), a place (region, location), a stage, a sector or community, an amount
+  (mrr, raised_funds), a date. When one does, write a literal filter on it: enum filters use one
+  of the canonical values listed; number filters take numbers (10000, not "10k"); dates are ISO
+  (YYYY-MM-DD); keyword/url/contact properties support contains / starts_with / regex / eq / ne
+  / in / exists. Prefer the property most people have.
+- Add a passage only for the part of the question that no typed property covers (a topic, a
+  product, a need, a background): a few words to one sentence phrased like the text you expect
+  to find, on the one or two embeddable properties most likely to hold it (bio and one_liner
+  describe the person, company_description the company, notes are internal remarks, sectors
+  are tags). A passage is compared by meaning and drops everyone below a similarity cut-off, so
+  do not add one when a filter already answers the question ("name three founders" is a
+  seniority filter, not a passage).
+- Never invent properties or values. A request for N people is not a filter. Give at least one
+  filter or passage; keep the plan small.""",
 )
 
 
