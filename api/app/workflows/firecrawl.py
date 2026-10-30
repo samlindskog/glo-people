@@ -3,9 +3,8 @@
 Uses httpx directly: the official SDK pulls in requests, aiohttp, websockets and nest_asyncio for
 features this app never calls, and a two-method client is trivial to fake in tests.
 
-Credits: Firecrawl bills 1 credit per scraped page, 2 per search call, and for LinkedIn URLs the
-cost of the third-party data provider that answered (`metadata.provider.creditsCost`); a provider
-with no record charges nothing and the request fails with THIRD_PARTY_DATA_NOT_FOUND.
+Credits: Firecrawl bills 1 credit per scraped page, 2 per search call, and each Alexandria data
+tool at its listed price per record found (an empty result costs nothing).
 """
 
 import asyncio
@@ -45,6 +44,14 @@ class NotConfigured(FirecrawlError):
     """FIRECRAWL_API_KEY is not set."""
 
 
+class TermsRequired(FirecrawlError):
+    """An org admin must accept a data provider's terms first (`url` says where)."""
+
+    def __init__(self, message: str, url: str | None = None) -> None:
+        super().__init__(message)
+        self.url = url
+
+
 @dataclass
 class ScrapeResult:
     url: str
@@ -54,6 +61,16 @@ class ScrapeResult:
     title: str
     credits: int
     provider: str | None = None     # third-party provider id for LinkedIn URLs
+
+
+@dataclass
+class AlexandriaResult:
+    """One Alexandria tool call: the provider's payload (None when it had no record)."""
+
+    provider: str
+    capability: str
+    data: Any
+    credits: int
 
 
 @dataclass
@@ -133,6 +150,9 @@ class AsyncFirecrawl:
             data = resp.json()
         except ValueError:
             data = {}
+        if isinstance(data, dict) and data.get("code") == "THIRD_PARTY_DATA_TERMS_REQUIRED":
+            raise TermsRequired(str(data.get("error") or data["code"]),
+                                (data.get("requiresAction") or {}).get("url"))
         if resp.status_code == 404 or (isinstance(data, dict) and
                                        data.get("code") == "THIRD_PARTY_DATA_NOT_FOUND"):
             raise NotFound(str(data.get("error") or data.get("code") or "not found"))
@@ -162,6 +182,35 @@ class AsyncFirecrawl:
                             links=[x for x in (d.get("links") or []) if isinstance(x, str)],
                             status_code=meta.get("statusCode"), title=meta.get("title") or "",
                             credits=credits, provider=provider.get("id"))
+
+    async def alexandria(self, provider: str, capability: str, options: dict[str, Any],
+                         expected_credits: int) -> AlexandriaResult:
+        """Run one catalogued data-provider tool (Firecrawl Alexandria) instead of scraping.
+
+        Billed at the tool's listed price per record found; an empty result costs nothing. A
+        tool whose terms the org has not accepted raises TermsRequired; a provider-side
+        not_found raises NotFound; other tool errors raise FirecrawlError.
+        """
+        if self.budget:
+            self.budget.check_scrape(expected_credits)
+        data = await self._post("/v2/scrape", {"alexandria": {
+            "provider": provider, "capability": capability, "options": options}})
+        items = (data.get("data") or {}).get("alexandria") or []
+        item = items[0] if items else {}
+        credits = int(item.get("creditsCost") or 0)
+        if self.budget:
+            self.budget.charge("scrape", f"{provider}/{capability}", credits)
+        err = item.get("error")
+        if err:
+            code = str(err.get("code") or "")
+            if code == "THIRD_PARTY_DATA_TERMS_REQUIRED":
+                raise TermsRequired(str(err.get("message") or code),
+                                    (err.get("requiresAction") or {}).get("url"))
+            if code in ("not_found", "THIRD_PARTY_DATA_NOT_FOUND"):
+                raise NotFound(str(err.get("message") or code))
+            raise FirecrawlError(f"{provider}/{capability}: {code} {err.get('message') or ''}")
+        return AlexandriaResult(provider=provider, capability=capability,
+                                data=item.get("data"), credits=credits)
 
     async def search(self, query: str, limit: int = 5) -> list[SearchHit]:
         if self.budget:

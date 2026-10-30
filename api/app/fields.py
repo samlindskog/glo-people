@@ -19,6 +19,9 @@ TIERS = ("member", "plus_one")
 _NOT_EMBEDDED = re.compile(
     r"(^|_)(id|email|emails|phone|phones|whatsapp|linkedin|instagram|twitter|website|url|"
     r"github|related_links|do_not_contact|in_whatsapp|linkedin_connected)($|_)")
+# `github_summary` is prose and stays embeddable: the pattern above matches `github` only as a
+# whole key segment, and `github_summary`'s segments are `github` and `summary`... so exempt it.
+_EMBED_ANYWAY = frozenset({"github_summary"})
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?")
 _URLISH = re.compile(r"^(https?://|www\.)", re.IGNORECASE)
 _KEY_OK = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -47,7 +50,7 @@ MIN_EMBED_CHARS = 15
 def default_embed(key: str, ftype: FieldType, values: list[Any] = ()) -> bool:
     """Embed descriptive text by default; skip contact details, numbers, dates, and short
     categorical values (status, tier, stage…) where similarity search is meaningless."""
-    if ftype not in ("text", "list") or _NOT_EMBEDDED.search(key):
+    if ftype not in ("text", "list") or (_NOT_EMBEDDED.search(key) and key not in _EMBED_ANYWAY):
         return False
     texts = [text_of(v) for v in values if v not in (None, "", [])]
     return not texts or sum(map(len, texts)) / len(texts) >= MIN_EMBED_CHARS

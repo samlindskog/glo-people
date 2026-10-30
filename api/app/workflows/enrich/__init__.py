@@ -8,10 +8,12 @@ from app.workflows.enrich.workflow import WORKFLOW, run_item
 SPEC = register(WorkflowSpec(
     key=WORKFLOW,
     label="Enrich from LinkedIn and the web",
-    description=("Reads the person's LinkedIn profile through Firecrawl's data providers, then "
-                 "their personal site(s), and records headline, GitHub, websites, related links, "
-                 "and a short summary of their current company. Fallbacks at every step; frugal "
-                 "mode never searches the web for missing LinkedIn or GitHub links."),
+    description=("Resolves the person's LinkedIn profile through FullEnrich (Firecrawl "
+                 "Alexandria, 5 credits per match), reads their personal site(s), summarises a "
+                 "known GitHub account (github-com data tool, 5 credits), and records headline, "
+                 "current company, websites, related links and a short summary of the company's "
+                 "website. Fallbacks at every step; frugal mode never searches the web for "
+                 "missing LinkedIn or GitHub links."),
     selector_field="linkedin",
     options_model=EnrichOptions,
     run_item=run_item,

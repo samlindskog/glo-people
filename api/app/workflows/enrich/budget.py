@@ -3,9 +3,10 @@
 from app.workflows.enrich.models import EnrichOptions
 from app.workflows.firecrawl import Budget
 
-# Worst-case provider cost for one LinkedIn profile (Data Legion premium); used to reserve credits
-# before the call so the per-item cap is honoured even when the provider is expensive.
-LINKEDIN_EXPECTED_CREDITS = 40
+# Listed prices of the Alexandria tools the ladder uses (per record found; a miss costs nothing).
+FULLENRICH_MATCH_CREDITS = 5      # fullenrich/people/match: exact LinkedIn URL
+FULLENRICH_LOOKUP_CREDITS = 10    # fullenrich/people/lookup: name + company domain (thorough only)
+GITHUB_USER_CREDITS = 5           # github-com/repositories/user
 
 CAPS = {
     "frugal": {"max_scrapes": 4, "max_searches": 1, "max_credits": 60,

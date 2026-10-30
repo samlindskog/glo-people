@@ -19,17 +19,17 @@ class Company(BaseModel):
     name: str = Field(description="Company name as written")
     linkedin_url: str | None = Field(None, description="linkedin.com/company/... if present")
     website: str | None = Field(None, description="Company website if the record states it")
+    description: str | None = Field(None, description="The provider's own description")
 
 
 class LinkedInProfile(BaseModel):
-    """What the LinkedIn data-provider record says about the person."""
+    """What the data-provider record (FullEnrich) says about the person."""
 
     headline: str | None = Field(None, description="Profile headline / tagline, verbatim")
     location: str | None = None
-    summary: str | None = Field(None, description="Two or three sentences about the person")
-    current_company: Company | None = Field(
-        None, description="Where the person works now (most recent position without an end "
-                          "date). None if unclear.")
+    summary: str | None = Field(None, description="The profile's about text")
+    current_title: str | None = None
+    current_company: Company | None = Field(None, description="Current employer, if any")
     personal_sites: list[str] = Field(
         default_factory=list, description="Personal or portfolio websites listed on the profile "
                                           "(not the employer's site, not social networks)")
@@ -55,6 +55,35 @@ class SiteFindings(BaseModel):
                                              description="Outbound links about the person")
     one_liner: str | None = Field(None, description="One sentence describing the person, from "
                                                     "the site's own words")
+
+
+class GitHubProfile(BaseModel):
+    """What the GitHub data tool says about an account."""
+
+    url: str
+    login: str
+    name: str | None = None
+    bio: str | None = None
+    company: str | None = None
+    location: str | None = None
+    blog: str | None = None
+    followers: int = 0
+    public_repos: int = 0
+    top_repos: list[str] = Field(default_factory=list, description="'name (★stars)' entries")
+    languages: list[str] = Field(default_factory=list)
+
+    def summary(self) -> str:
+        bits = [b for b in (self.name, self.bio) if b]
+        head = " — ".join(bits) if bits else self.login
+        facts = [f"{self.public_repos} public repos", f"{self.followers} followers"]
+        if self.company:
+            facts.append(f"at {self.company}")
+        out = f"{head}. {', '.join(facts)}."
+        if self.top_repos:
+            out += " Top repos: " + ", ".join(self.top_repos[:5]) + "."
+        if self.languages:
+            out += " Languages: " + ", ".join(self.languages[:5]) + "."
+        return out
 
 
 class CompanySummary(BaseModel):

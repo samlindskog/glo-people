@@ -1,0 +1,6 @@
+{"login": "adaok", "source_url": "https://github.com/adaok", "repos_sampled": 6, "source_repos_sampled": 4,
+ "repos_sample_complete": true,
+ "user": {"login": "adaok", "name": "Ada Okafor", "bio": "payments rails", "company": "PayRail",
+          "location": "Lagos", "blog": "https://adaokafor.dev", "followers": 120, "public_repos": 6},
+ "top_repos": [{"name": "rails-sdk", "stars": 48, "language": "Python"}, {"name": "settle", "stars": 12, "language": "Go"}],
+ "languages": [{"language": "Python", "repos": 3}, {"language": "Go", "repos": 1}]}

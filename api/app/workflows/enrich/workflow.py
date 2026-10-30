@@ -1,5 +1,5 @@
-"""The enrichment ladder: LinkedIn → personal sites → GitHub and links → company, one function per
-step, cheapest step first.
+"""The enrichment ladder: LinkedIn (FullEnrich via Alexandria) → personal sites → GitHub (github-com
+via Alexandria) and links → company, one function per step, cheapest step first.
 
 Every paid call is preceded by a free check; a missing input skips the step instead of searching
 for it (frugal mode) or allows one bounded search (thorough mode). Nothing is overwritten: all
@@ -18,8 +18,8 @@ from app.config import get_settings
 from app.workflows import runner
 from app.workflows.context import WorkflowDeps
 from app.workflows.enrich import company as company_agent
-from app.workflows.enrich import linkedin_reader, site_reader
-from app.workflows.enrich.budget import LINKEDIN_EXPECTED_CREDITS, MIN_PAGE_CHARS, caps
+from app.workflows.enrich import github, linkedin_reader, site_reader
+from app.workflows.enrich.budget import MIN_PAGE_CHARS, caps
 from app.workflows.enrich.models import EnrichOptions, LinkedInProfile
 from app.workflows.enrich.urls import (
     github_profile,
@@ -31,7 +31,13 @@ from app.workflows.enrich.urls import (
     normalize_url,
     url_key,
 )
-from app.workflows.firecrawl import BudgetExceeded, FirecrawlError, NotConfigured, NotFound
+from app.workflows.firecrawl import (
+    BudgetExceeded,
+    FirecrawlError,
+    NotConfigured,
+    NotFound,
+    TermsRequired,
+)
 
 log = logging.getLogger(__name__)
 WORKFLOW = "enrich"
@@ -102,57 +108,76 @@ async def _recently_enriched(deps: WorkflowDeps, options: EnrichOptions) -> dict
             "skipped": deps.skipped}
 
 
+async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
+    """Run one Alexandria call with the ladder's error policy: a miss is `not_found`, unaccepted
+    provider terms or a provider error are `error` (the rest of the ladder still runs)."""
+    try:
+        return await call()
+    except NotFound:
+        st.result[step] = "not_found"
+        st.result["not_found"].append(step)
+        deps.skip(step, "the data provider has no record")
+    except BudgetExceeded as e:
+        st.result[step] = "skipped"
+        deps.skip(step, str(e))
+    except TermsRequired as e:
+        st.result[step] = "error"
+        deps.skip(step, f"{e}" + (f" Accept them at {e.url}" if e.url else ""))
+    except NotConfigured:
+        raise
+    except FirecrawlError as e:
+        st.result[step] = "error"
+        deps.skip(step, str(e))
+    return None
+
+
 async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
-    """Step 1: the provider record for the person's LinkedIn URL, read by one agent call."""
+    """Step 1: the person's FullEnrich record (exact LinkedIn URL, 5 credits; a miss is free)."""
     li = linkedin_profile(deps.current("linkedin"))
-    if not li:
+    company_domain = host_of(deps.current("company_website")) if isinstance(
+        deps.current("company_website"), str) else ""
+    if not li and not (st.options.mode == "thorough" and st.name and company_domain):
         deps.skip("linkedin", "no linkedin.com/in URL on the record" + st.frugal_note)
         return
     if "linkedin" in st.previously_missing:
         deps.skip("linkedin", "no provider record last time; not retried within the TTL")
         st.result["linkedin"] = "not_found"
         return
-    try:
-        page = await deps.firecrawl.scrape(li, formats=("markdown",),
-                                           expected_credits=LINKEDIN_EXPECTED_CREDITS)
-    except NotFound:
-        st.result["linkedin"] = "not_found"
-        st.result["not_found"].append("linkedin")
-        deps.skip("linkedin", "no data provider has a record for this profile")
-        return
-    except BudgetExceeded as e:
-        deps.skip("linkedin", str(e))
-        return
-    except NotConfigured:
-        raise
-    except FirecrawlError as e:
-        if "[exchange]" in str(e):
-            # The data-provider route ran and came back empty-handed (Firecrawl reports this as a
-            # 500 rather than THIRD_PARTY_DATA_NOT_FOUND): same outcome as "no record".
+    profile = None
+    with logfire.span("linkedin_reader"):
+        if li:
+            found = await _provider_call(deps, st, "linkedin",
+                                         lambda: linkedin_reader.match(deps, li))
+            if found:
+                profile, st.result["linkedin_provider"] = found
+        if profile is None and st.options.mode == "thorough" and st.name and company_domain \
+                and st.result.get("linkedin") not in ("error",):
+            profile = await _provider_call(
+                deps, st, "linkedin", lambda: linkedin_reader.lookup(deps, st.name, company_domain))
+            if profile:
+                st.result["linkedin_provider"] = linkedin_reader.PROVIDER
+    if profile is None:
+        if st.result["linkedin"] == "absent":
             st.result["linkedin"] = "not_found"
             st.result["not_found"].append("linkedin")
-            deps.skip("linkedin", "the enrichment providers could not resolve this profile")
-            return
-        # e.g. 403 "Enrichment is not enabled for person profiles": the rest of the ladder still
-        # has the record's own website and company to work with.
-        st.result["linkedin"] = "error"
-        deps.skip("linkedin", str(e))
+            deps.skip("linkedin", "no data provider has a record for this profile")
         return
     st.result["linkedin"] = "matched"
-    st.result["linkedin_provider"] = page.provider
-    if len(page.markdown) < MIN_PAGE_CHARS:
-        deps.skip("linkedin", "provider record too short to read")
-        return
-    with logfire.span("linkedin_reader"):
-        st.profile = await linkedin_reader.read(page.markdown)
-    github = github_profile(st.profile.github_url)
-    if github:
-        st.github_urls.append(github)
-    st.related.extend(st.profile.other_links)
-    await deps.write(linkedin_reader.AGENT_NAME, {
-        "linkedin_headline": _clip(st.profile.headline, MAX_HEADLINE_CHARS),
-        "github": github,
-    })
+    st.profile = profile
+    github_url = github_profile(profile.github_url)
+    if github_url:
+        st.github_urls.append(github_url)
+    st.related.extend(profile.other_links)
+    values: dict[str, Any] = {"linkedin_headline": _clip(profile.headline, MAX_HEADLINE_CHARS),
+                              "github": github_url}
+    if not deps.current("location") and profile.location:
+        values["location"] = profile.location
+    company = profile.current_company.name if profile.current_company else None
+    current_company = deps.current("company")
+    if company and (not isinstance(current_company, str)
+                    or current_company.strip().lower() != company.strip().lower()):
+        values["company"] = company        # a new employer: appended, the old one stays in history
+    await deps.write(linkedin_reader.AGENT_NAME, values)
 
 
 def split_urls(value: Any) -> list[str]:
@@ -214,11 +239,17 @@ async def _step_sites(deps: WorkflowDeps, st: State) -> None:
 
 
 async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
-    """Step 3: GitHub and related links come only from what the pages gave us (no searching)."""
+    """Step 3: GitHub and related links come only from what the record and pages gave us (no
+    searching); a known GitHub account is summarised through the github-com data tool."""
     github_urls = list(dict.fromkeys(g for g in st.github_urls if g))
+    current_github = github_profile(deps.current("github")) if isinstance(
+        deps.current("github"), str) else None
+    if not github_urls and current_github:
+        github_urls = [current_github]
     if github_urls:
         if not _has_url(deps, "github", github_urls[0]):
             await deps.write(site_reader.AGENT_NAME, {"github": github_urls[0]})
+        await _github_facts(deps, st, github_urls[0])
     else:
         st.result["not_found"].append("github")
         deps.skip("github", "no GitHub link on the profile or sites" + st.frugal_note)
@@ -232,6 +263,24 @@ async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
     merged = list(dict.fromkeys([*current, *links]))[:MAX_RELATED_LINKS]
     if len(merged) > len(current):
         await deps.write(site_reader.AGENT_NAME, {"related_links": merged})
+
+
+async def _github_facts(deps: WorkflowDeps, st: State, github_url: str) -> None:
+    if deps.current("github_summary") and url_key(deps.current("github")) == url_key(github_url) \
+            and not st.options.refresh:
+        deps.skip("github", "already summarised for this account")
+        return
+    with logfire.span("github {url}", url=github_url):
+        found = await _provider_call(deps, st, "github",
+                                     lambda: github.lookup(deps, github_url))
+    if not found:
+        return
+    st.result["github"] = "matched"
+    values: dict[str, Any] = {"github_summary": _clip(found.summary(), MAX_SUMMARY_CHARS)}
+    if found.blog and not is_social(found.blog) and is_html_candidate(found.blog) \
+            and not _has_url(deps, "website", found.blog):
+        values["website"] = found.blog       # the account's blog field is usually the personal site
+    await deps.write(github.AGENT_NAME, values)
 
 
 def _company_candidate(deps: WorkflowDeps, st: State, company: str) -> str | None:
@@ -260,6 +309,9 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
         return
     context = ", ".join(str(x) for x in (deps.current("location"), deps.current("sectors"),
                                           deps.current("role")) if x)
+    if st.profile and st.profile.current_company and st.profile.current_company.description:
+        context += f". The data provider describes the company as: " \
+                   f"{_clip(st.profile.current_company.description, 400)}"
     try:
         with logfire.span("company {company}", company=company):
             summary = await company_agent.research(
