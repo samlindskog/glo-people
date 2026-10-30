@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from app import db, history, jobs, mongo, observability, workflows
+from app import auth, db, history, jobs, mongo, observability, workflows
+from app.config import get_settings
 from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
@@ -20,9 +21,20 @@ mcp_app = build_mcp_app()
 workflows.load_all()
 
 
+def check_dev_auto_login() -> None:
+    """DEV_AUTO_LOGIN must never reach production: refuse to start with secure cookies on."""
+    s = get_settings()
+    if s.dev_auto_login and s.cookie_secure:
+        raise RuntimeError("DEV_AUTO_LOGIN=1 with COOKIE_SECURE=true: refusing to start")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     load_contract()
+    check_dev_auto_login()
+    if get_settings().dev_auto_login:
+        await auth.ensure_dev_user()
+        logging.getLogger(__name__).warning("DEV_AUTO_LOGIN is on: every request acts as 'dev'")
     await mongo.ensure_indexes()
     await history.migrate_legacy()
     await runner.reconcile()

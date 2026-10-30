@@ -104,3 +104,26 @@ async def test_activity_logged(writer):
 def test_key_format():
     key, prefix, h = auth.new_api_key()
     assert key.startswith(f"glo_{prefix}_") and h == auth.sha256(key)
+
+
+async def test_dev_auto_login(client_factory, reader, monkeypatch):
+    from app.config import get_settings
+    from app.main import check_dev_auto_login
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "dev_auto_login", True)
+    await auth.ensure_dev_user()
+    await auth.ensure_dev_user()                       # idempotent
+    anon = await client_factory()
+    me = (await anon.get("/api/auth/me")).json()
+    assert me["username"] == "dev" and me["role"] == "writer" and "people:write" in me["permissions"]
+    r = await anon.post("/api/people", json={"tier": "member", "fields": {"name": "Via Dev"}})
+    assert r.status_code == 201
+    assert r.json()["history"]["name"][0]["src"] == {"kind": "ui", "by": "dev"}
+    # A real session still wins over the auto-login.
+    assert (await reader.get("/api/auth/me")).json()["username"] == "rita"
+    # Never in production.
+    monkeypatch.setattr(settings, "cookie_secure", True)
+    import pytest
+    with pytest.raises(RuntimeError):
+        check_dev_auto_login()

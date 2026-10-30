@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     logfire_include_content: bool = True   # record prompts/page text in spans (PII): off in prod
     logfire_project_url: str = ""          # e.g. https://logfire-us.pydantic.dev/<org>/<project>
 
+    # Dev only: every request without a key or cookie acts as the local `dev` writer account.
+    # Refused at startup when COOKIE_SECURE is on (prod).
+    dev_auto_login: bool = False
+
     session_days: int = 14
     cookie_secure: bool = False
     login_max_failures: int = 10

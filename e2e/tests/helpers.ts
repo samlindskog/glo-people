@@ -1,10 +1,11 @@
 import { expect, type Page } from '@playwright/test'
 
 export async function login(page: Page, user: { username: string; password: string }) {
-  await page.goto('/login')
-  await page.getByLabel('Username').fill(user.username)
-  await page.getByLabel('Password').fill(user.password)
-  await page.getByRole('button', { name: 'Sign in' }).click()
+  // Through the API so it also works on a dev stack with DEV_AUTO_LOGIN=1, where the login
+  // page is skipped; the session cookie lands in the page's browser context.
+  const r = await page.request.post('/api/auth/login', { data: user })
+  expect(r.ok(), `login as ${user.username}: ${r.status()}`).toBeTruthy()
+  await page.goto('/people')
   await expect(page.getByTestId('whoami')).toContainText(user.username)
 }
 

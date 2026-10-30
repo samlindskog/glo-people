@@ -5,6 +5,8 @@ services:
     build: {context: ., dockerfile: api/Dockerfile, target: dev}
     environment:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fake}
+      # DEV_AUTO_LOGIN=1 in .env: no login screen, every request acts as the `dev` writer.
+      DEV_AUTO_LOGIN: ${DEV_AUTO_LOGIN:-0}
     volumes:
       - ./api/app:/app/app
       - ./api/alembic:/app/alembic

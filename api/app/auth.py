@@ -128,17 +128,43 @@ def bearer_token(request: Request) -> str | None:
 
 # --- dependencies -----------------------------------------------------------------------------
 
+DEV_USER = "dev"
+
+
 async def current_principal(request: Request) -> Principal:
     ip = client_ip(request)
     if token := bearer_token(request):
         principal = await principal_from_api_key(token, ip)
     elif cookie := request.cookies.get(SESSION_COOKIE):
         principal = await principal_from_session(cookie, ip)
+    elif get_settings().dev_auto_login:
+        principal = await dev_principal(ip)
     else:
         principal = None
     if principal is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
     return principal
+
+
+async def ensure_dev_user() -> None:
+    """Create the `dev` writer account the auto-login uses (no usable password)."""
+    async with db.engine().begin() as conn:
+        exists = (await conn.execute(select(db.users.c.id).where(
+            db.users.c.username == DEV_USER))).first()
+        if not exists:
+            await conn.execute(db.users.insert().values(
+                username=DEV_USER, role="writer",
+                password_hash=hash_password(secrets.token_urlsafe(32))))
+
+
+async def dev_principal(ip: str | None) -> Principal | None:
+    async with db.engine().connect() as conn:
+        row = (await conn.execute(select(db.users.c.id, db.users.c.role).where(
+            db.users.c.username == DEV_USER, db.users.c.is_active))).first()
+    if row is None:
+        return None
+    return Principal(user_id=row.id, username=DEV_USER, role=row.role,
+                     permissions=frozenset(permissions_for(row.role)), ip=ip)
 
 
 def require(*permissions: str):

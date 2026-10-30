@@ -2,7 +2,9 @@ import { expect, test } from '@playwright/test'
 import { READER, WRITER } from '../users'
 import { login, uid } from './helpers'
 
-test('login is required and wrong passwords are rejected', async ({ page }) => {
+test('login is required and wrong passwords are rejected', async ({ page, request }) => {
+  // A local dev stack may run with DEV_AUTO_LOGIN=1, where nothing requires a login.
+  test.skip((await request.get('/api/auth/me')).ok(), 'dev auto-login is on')
   await page.goto('/people')
   await expect(page).toHaveURL(/\/login/)
   await page.getByLabel('Username').fill(WRITER.username)

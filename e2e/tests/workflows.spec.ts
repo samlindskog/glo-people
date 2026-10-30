@@ -2,7 +2,8 @@ import { expect, test } from '@playwright/test'
 import { READER, WRITER } from '../users'
 import { login, uid } from './helpers'
 
-// The CI/dev stack has no FIRECRAWL_API_KEY, so a run fails fast per person with a clear error.
+// Without FIRECRAWL_API_KEY (CI) the item fails fast with a clear error; with real keys (a local
+// dev stack) the made-up profile is simply not found. Either way the run must finish 1/1.
 test('writer starts an enrichment run for one person; reader can only watch', async ({ page, browser }) => {
   const tag = uid()
   await login(page, WRITER)
@@ -22,8 +23,9 @@ test('writer starts an enrichment run for one person; reader can only watch', as
   await card.getByRole('button', { name: 'Run' }).click()
 
   const detail = page.getByTestId('run-detail')
-  await expect(detail.getByTestId('run-items')).toContainText('FIRECRAWL_API_KEY is not set', { timeout: 20_000 })
-  await expect(detail).toContainText('failed')
+  const items = detail.getByTestId('run-items')
+  await expect(items).toContainText(/FIRECRAWL_API_KEY is not set|could not resolve this profile|no data provider/, { timeout: 60_000 })
+  await expect(items.locator('tbody tr').first()).toContainText(/done|failed/)
   await expect(page.getByTestId('runs-table')).toContainText('1/1')
 
   const readerCtx = await browser.newContext()
