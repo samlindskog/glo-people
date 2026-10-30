@@ -12,4 +12,4 @@ __all__ = ["REGISTRY", "Budget", "StopRun", "WorkflowSpec", "load_all", "registe
 
 def load_all() -> None:
     """Import every workflow package so it registers itself."""
-    from app.workflows import enrich  # noqa: F401
+    from app.workflows import enrich, normalize  # noqa: F401

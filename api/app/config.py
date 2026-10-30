@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     firecrawl_api_url: str = "https://api.firecrawl.dev"
     firecrawl_max_age_s: int = 172_800   # reuse Firecrawl's cached copy of a page up to 2 days old
     agent_model: str = "openai:gpt-6-luna"
+    fake_agents: bool = False            # deterministic stand-ins for every agent (e2e, demos)
     workflow_concurrency: int = 3
     enrich_ttl_days: int = 90
 

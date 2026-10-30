@@ -337,11 +337,13 @@ async def run_search(req: SearchRequest) -> SearchResponse:
 
 
 async def record_search(principal: Principal, req: SearchRequest, resp: SearchResponse,
-                        source: str) -> int:
+                        source: str, extra: dict[str, Any] | None = None) -> int:
+    """Save an executed search in the user's history. `extra` (e.g. the question an agent
+    planned this search for) is stored beside the request; re-running ignores it."""
     async with db.engine().begin() as conn:
         row = await conn.execute(db.searches.insert().values(
             user_id=principal.user_id, api_key_id=principal.api_key_id, source=source,
-            params=req.model_dump(mode="json", exclude_none=True),
+            params={**req.model_dump(mode="json", exclude_none=True), **(extra or {})},
             result_ids=[r.id for r in resp.results], result_count=resp.total,
         ).returning(db.searches.c.id))
         return row.scalar_one()

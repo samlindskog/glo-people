@@ -1,6 +1,8 @@
-"""Shared plumbing for every pydantic-ai agent in the app: the model to run on, usage limits, the
-dependencies tools receive, and a budgeted page-fetch helper for tools that read the web."""
+"""Shared plumbing for every pydantic-ai agent in the app: the model to run on (or its fake),
+usage limits, the dependencies web-reading tools receive, a budgeted page-fetch helper, and the
+property catalog rendered for prompts."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,6 +11,7 @@ from pydantic_ai.usage import UsageLimits
 
 from app.config import get_settings
 from app.integrations.firecrawl import AsyncFirecrawl, BudgetExceeded, FirecrawlError
+from app.properties import Property
 
 REQUEST_LIMIT = 6
 MAX_PROMPT_CHARS = 8000       # page text handed to an agent
@@ -16,14 +19,15 @@ MAX_PROMPT_CHARS = 8000       # page text handed to an agent
 
 @dataclass
 class AgentDeps:
-    """What agent tools can reach: a budgeted Firecrawl client and a scratch space for per-run
-    counters. Callers that need more (workflows) subclass it."""
+    """What web-reading agent tools can reach: a budgeted Firecrawl client and a scratch space
+    for per-run counters. Callers that need more (workflows) subclass it."""
 
-    firecrawl: AsyncFirecrawl
+    firecrawl: AsyncFirecrawl | None = None
     notes: dict[str, Any] = field(default_factory=dict)
 
     async def aclose(self) -> None:
-        await self.firecrawl.aclose()
+        if self.firecrawl is not None:
+            await self.firecrawl.aclose()
 
 
 def model_settings() -> dict[str, Any]:
@@ -33,12 +37,34 @@ def model_settings() -> dict[str, Any]:
     return {}
 
 
-async def run_agent(agent: Agent, prompt: str, deps: AgentDeps | None = None) -> Any:
-    """Run an agent with the configured model and this app's usage limits; returns `.output`."""
-    result = await agent.run(prompt, deps=deps, model=get_settings().agent_model,
-                             usage_limits=UsageLimits(request_limit=REQUEST_LIMIT),
+async def run_agent(agent: Agent, prompt: str, deps: Any = None,
+                    request_limit: int = REQUEST_LIMIT) -> Any:
+    """Run an agent with the configured model (or its deterministic fake under FAKE_AGENTS) and
+    this app's usage limits; returns `.output`."""
+    if get_settings().fake_agents:
+        from app.agents import fakes
+        model: Any = fakes.model_for(agent)
+    else:
+        model = get_settings().agent_model
+    result = await agent.run(prompt, deps=deps, model=model,
+                             usage_limits=UsageLimits(request_limit=request_limit),
                              model_settings=model_settings())
     return result.output
+
+
+def catalog_prompt(props: Sequence[Property], max_values: int = 8) -> str:
+    """The property catalog as an agent reads it: one line per property with type, whether it is
+    embeddable (searchable by passage) and the canonical values of enum types."""
+    lines = []
+    for p in props:
+        bits = [p.type]
+        if p.embeddable:
+            bits.append("embeddable")
+        if p.values:
+            more = ", …" if len(p.values) > max_values else ""
+            bits.append("values: " + ", ".join(p.values[:max_values]) + more)
+        lines.append(f"- {p.key} ({'; '.join(bits)}): {p.label}")
+    return "\n".join(lines)
 
 
 def excerpt(text: str, limit: int = MAX_PROMPT_CHARS) -> str:

@@ -7,10 +7,15 @@ from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
+from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import activity, auth, properties
 from app import people as people_svc
+from app.agents import normalize_person as normalize_person_op
+from app.agents import store
+from app.agents.ask import AskOptions, ask
+from app.agents.store import StoreOptions
 from app.auth import Principal
 from app.history import Source
 from app.search import (
@@ -24,7 +29,8 @@ from app.search import (
     run_search,
 )
 
-WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person"})
+WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
+                         "normalize_person"})
 
 INSTRUCTIONS = """\
 Search and read the GLO people database. People are documents in two tiers ('member' and
@@ -36,9 +42,13 @@ similarity; default 0.4. Unrelated text scores around 0.2-0.3, so 0.35-0.5 is th
 A property's semantic score is its best-matching passage across its history. Values are never
 overwritten: create_person and update_person append time-stamped entries (with their source) to
 each property's history, and the latest entry is the current value; get_person returns the
-current values plus `history`. Only existing properties can be written; this server creates
-none. Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to
-your key (kind "mcp") with the agent name noted in its reference."""
+current values plus `history`. Only existing properties can be written directly; new properties
+come only from store_about_person, which has an agent split a passage into statements and file
+each under the best-matching property. ask_people plans a search from a question (passages per
+property plus typed filters), runs it and answers with citations. normalize_person re-parses a
+person's typed values and asks an agent about what the parser could not map. Pass `agent` when
+you write on behalf of an automated agent: the entry stays attributed to your key (kind "mcp")
+with the agent name noted in its reference."""
 
 
 class GloMCP(MCPServer):
@@ -181,6 +191,76 @@ async def update_person(
     if not person:
         raise ToolError("person not found")
     return person
+
+
+@mcp.tool()
+async def ask_people(
+    ctx: Context,
+    question: Annotated[str, Field(min_length=1, max_length=2000,
+                                   description="A question about who is in the database")],
+    tier: Annotated[Literal["member", "plus_one"] | None, Field(description="Restrict to one "
+                                                                            "tier")] = None,
+    filters: Annotated[list[FieldFilter] | None,
+                       Field(description="Extra literal filters, ANDed with the plan")] = None,
+    options: Annotated[AskOptions | None, Field(description="k, mode, threshold")] = None,
+) -> dict:
+    """Answer a question about people: an agent plans a search over the property catalog (a
+    passage per embeddable property, typed filters), the search runs, and an agent answers from
+    the hits with citations. Returns answer, citations, the plan, the executed search request
+    (re-runnable with search_people) and the hits."""
+    principal = await _principal(ctx, "people:read")
+    try:
+        result = await ask(question, options or AskOptions(), principal, tier, filters or [],
+                           source="mcp")
+    except (ValueError, AgentRunError) as e:
+        raise ToolError(str(e)) from e
+    await activity.record("mcp.ask", principal, str(result.search_id),
+                          {"question": question, "total": result.total})
+    return json.loads(result.model_dump_json())
+
+
+@mcp.tool()
+async def store_about_person(
+    ctx: Context,
+    id: str,
+    passage: Annotated[str, Field(min_length=1, max_length=20_000,
+                                  description="Free text about the person (notes, a message, "
+                                              "a profile)")],
+    agent: Annotated[str | None, Field(description="Name of the automated agent supplying the "
+                                                   "passage, if any")] = None,
+    options: Annotated[StoreOptions | None,
+                       Field(description="threshold, near_duplicate, max_new")] = None,
+) -> dict:
+    """Store what a passage says about a person (requires people:write). An agent splits it into
+    tagged statements; each lands on the existing property whose name fits best, or on a new
+    free-text property (at most `max_new` per passage). Returns what was written and why."""
+    principal = await _principal(ctx, "people:write")
+    src = Source.for_mcp(principal, f"store{'/' + agent.strip() if agent and agent.strip() else ''}")
+    try:
+        report = await store.store(id, passage, options or StoreOptions(), principal, src)
+    except (ValueError, AgentRunError) as e:
+        raise ToolError(str(e)) from e
+    if report is None:
+        raise ToolError("person not found")
+    await activity.record("mcp.store", principal, id, {
+        "items": [{"tag": i.tag, "action": i.action, "key": i.key} for i in report.items],
+        "created": report.created})
+    return json.loads(report.model_dump_json())
+
+
+@mcp.tool()
+async def normalize_person(ctx: Context, id: str) -> dict:
+    """Re-parse a person's typed properties and have an agent decide the values the parser could
+    not map (requires people:write). Returns what was parsed, mapped and left."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        report = await normalize_person_op.run(
+            id, principal, Source("agent", "normalizer", f"key:{principal.api_key_id}"))
+    except (ValueError, AgentRunError) as e:
+        raise ToolError(str(e)) from e
+    if report is None:
+        raise ToolError("person not found")
+    return json.loads(report.model_dump_json())
 
 
 @mcp.tool()

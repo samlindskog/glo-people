@@ -11,6 +11,7 @@ from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
 from app.routers import accounts
+from app.routers import agents as agents_router
 from app.routers import auth as auth_router
 from app.routers import people as people_router
 from app.routers import properties as properties_router
@@ -63,6 +64,7 @@ api = FastAPI(title="glo-people", lifespan=lifespan, docs_url="/api/docs",
 api.include_router(auth_router.router)
 api.include_router(people_router.router)
 api.include_router(properties_router.router)
+api.include_router(agents_router.router)
 api.include_router(accounts.router)
 api.include_router(workflows_router.router)
 observability.instrument_app(api)

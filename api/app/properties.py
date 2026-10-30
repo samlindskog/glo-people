@@ -275,6 +275,14 @@ async def name_vectors() -> dict[str, list[float]]:
     return vectors
 
 
+async def similarity(vector: Sequence[float], key: str) -> float | None:
+    """Cosine similarity between a vector and one property's name; None if the name has none."""
+    name = (await name_vectors()).get(key)
+    if name is None:
+        return None
+    return sum(a * b for a, b in zip(_unit(vector), name, strict=True))
+
+
 async def nearest(vectors: Sequence[Sequence[float]], k: int = 5) -> list[list[tuple[str, float]]]:
     """For each query vector, the k most similar property names as (key, cosine), best first."""
     names = await name_vectors()
