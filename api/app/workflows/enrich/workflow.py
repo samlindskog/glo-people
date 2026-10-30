@@ -253,6 +253,9 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
         deps.skip("company", f"could not corroborate a website for {company!r}")
         return
     st.result["company"] = "resolved"
+    # Kept on the run item (not the person) so a reviewer can see what the summary rests on.
+    st.result["company_evidence"] = {"confidence": summary.confidence,
+                                     "evidence_url": summary.evidence_url}
     values = {"company_website": normalize_url(summary.website),
               "company_summary": _clip(summary.summary, MAX_SUMMARY_CHARS)}
     if not deps.current("company"):
