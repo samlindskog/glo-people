@@ -7,6 +7,8 @@ services:
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-fake}
       # DEV_AUTO_LOGIN=1 in .env: no login screen, every request acts as the `dev` writer.
       DEV_AUTO_LOGIN: ${DEV_AUTO_LOGIN:-0}
+      # FAKE_AGENTS=1: deterministic stand-ins for the pydantic-ai agents (CI, offline demos).
+      FAKE_AGENTS: ${FAKE_AGENTS:-0}
     volumes:
       - ./api/app:/app/app
       - ./api/alembic:/app/alembic

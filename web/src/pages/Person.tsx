@@ -5,8 +5,9 @@ import { api } from '../api'
 import { useAuth } from '../auth'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import PersonEditor from '../components/PersonEditor'
+import StoreBox from '../components/StoreBox'
 import { formatDate, formatValue } from '../lib'
-import type { FieldEntry, NormFlag } from '../types'
+import type { FieldEntry, NormFlag, NormalizeReport } from '../types'
 import { TierBadge } from './People'
 
 const SYSTEM = new Set(['id', 'tier', 'name', 'source', 'created_at', 'updated_at', 'schema_version', 'history', 'norm', 'norm_flags', 'history_norm'])
@@ -28,6 +29,14 @@ export default function PersonPage() {
       navigate('/people')
     },
   })
+  const normalise = useMutation({
+    mutationFn: () => api.normalizePerson(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['person', id] })
+      qc.invalidateQueries({ queryKey: ['properties'] })
+    },
+  })
+  const hasTyped = properties.data?.some((pr) => pr.normalisable && person.data && pr.key in person.data) ?? false
 
   if (person.error) return <ErrorNote error={person.error} />
   if (!person.data || !properties.data) return <p className="text-sm text-slate-500">Loading…</p>
@@ -46,6 +55,11 @@ export default function PersonPage() {
         <TierBadge tier={p.tier} />
         {can('people:write') && !editing && (
           <>
+            {hasTyped && (
+              <button className="btn-secondary" disabled={normalise.isPending} onClick={() => normalise.mutate()} title="Re-parse typed values; an agent decides the ones the parser cannot read">
+                {normalise.isPending ? 'Normalising…' : 'Normalise'}
+              </button>
+            )}
             <button className="btn-secondary" onClick={() => setEditing(true)}>
               Edit
             </button>
@@ -60,7 +74,8 @@ export default function PersonPage() {
           </>
         )}
       </PageHeader>
-      <ErrorNote error={remove.error} />
+      <ErrorNote error={remove.error ?? normalise.error} />
+      {normalise.data && <NormaliseNote report={normalise.data} />}
 
       {editing ? (
         <PersonEditor
@@ -102,6 +117,19 @@ export default function PersonPage() {
         </div>
       )}
 
+      {can('people:write') && !editing && (
+        <div className="mt-4">
+          <StoreBox
+            personId={id}
+            onStored={(updated) => {
+              qc.setQueryData(['person', id], updated)
+              qc.invalidateQueries({ queryKey: ['search'] })
+              qc.invalidateQueries({ queryKey: ['properties'] })
+            }}
+          />
+        </div>
+      )}
+
       <p className="mt-4 text-xs text-slate-400">
         {p.source && `Imported from ${p.source.file} (row ${p.source.row}) · `}
         Created {formatDate(p.created_at)} · Updated {formatDate(p.updated_at)} · id {p.id}
@@ -131,6 +159,20 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
     )
   }
   return <div className="whitespace-pre-wrap break-words">{s}</div>
+}
+
+function NormaliseNote({ report }: { report: NormalizeReport }) {
+  const parts: string[] = []
+  if (report.parsed.length) parts.push(`parsed ${report.parsed.join(', ')}`)
+  for (const [k, v] of Object.entries(report.mapped)) parts.push(`${k} → ${formatValue(v)}`)
+  if (report.non_normalizable.length) parts.push(`no value: ${report.non_normalizable.join(', ')}`)
+  if (report.unmapped.length) parts.push(`still unmapped: ${report.unmapped.join(', ')}`)
+  return (
+    <p className="mb-3 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600" data-testid="normalise-report">
+      {parts.length ? `Normalised: ${parts.join(' · ')}` : 'Everything was already normalised.'}
+      {report.agent_called && <span className="ml-1 text-xs text-slate-400">(agent consulted)</span>}
+    </p>
+  )
 }
 
 /** The normalised value of a typed property, or why there is none. */

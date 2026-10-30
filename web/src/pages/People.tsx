@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
+import Ask from '../components/Ask'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import SearchForm from '../components/SearchForm'
 import { decodeSearch, describeSearch, encodeSearch, formatValue } from '../lib'
@@ -63,6 +64,9 @@ export default function PeoplePage() {
         )}
       </PageHeader>
 
+      <div className="mb-4">
+        <Ask tier={req.tier ?? null} />
+      </div>
       {propsQ.isSuccess && <SearchForm key={encoded ?? ''} initial={req} properties={properties} onSearch={run} />}
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3">

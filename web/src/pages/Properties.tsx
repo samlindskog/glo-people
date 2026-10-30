@@ -1,23 +1,44 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router'
 import { api } from '../api'
+import { useAuth } from '../auth'
 import { ErrorNote, PageHeader } from '../components/Layout'
-import type { Property } from '../types'
+import type { Property, WorkflowRun } from '../types'
 
 const SHOWN_VALUES = 6
 
 export default function PropertiesPage() {
+  const { can } = useAuth()
   const props = useQuery({ queryKey: ['properties'], queryFn: api.properties })
   const total = Math.max(1, ...(props.data ?? []).map((p) => p.count))
+  const normalise = useMutation({
+    mutationFn: (key: string) => api.startRun('normalize', { all_with_field: key }),
+  })
+  const started: WorkflowRun | undefined = normalise.data
 
   return (
     <div>
-      <PageHeader title="Properties" />
+      <PageHeader title="Properties">
+        {can('people:write') && (
+          <button className="btn-secondary" disabled={normalise.isPending} onClick={() => normalise.mutate('name')} title="Run the normalise workflow for everyone">
+            Normalise all
+          </button>
+        )}
+      </PageHeader>
       <p className="mb-4 max-w-3xl text-sm text-slate-600">
         Every property a person can have. Properties come into existence through CSV imports and the storage agent;
         their type and canonical values are defined in the source code. Text and list properties (◆) are embedded for
         semantic search; typed properties (number, date, boolean, enum) get a normalised value for filters.
       </p>
-      <ErrorNote error={props.error} />
+      <ErrorNote error={props.error ?? normalise.error} />
+      {started && (
+        <p className="mb-3 rounded-md bg-brand-50 px-3 py-2 text-sm text-brand-800" data-testid="normalise-started">
+          Normalise run #{started.id} started for {started.total} {started.total === 1 ? 'person' : 'people'} ·{' '}
+          <Link to="/workflows" className="underline">
+            follow it on Workflows
+          </Link>
+        </p>
+      )}
       <div className="card overflow-x-auto">
         <table className="data-table" data-testid="properties-table">
           <thead>
@@ -29,6 +50,7 @@ export default function PropertiesPage() {
               <th>Coverage</th>
               <th>Not normalised</th>
               <th>Origin</th>
+              {can('people:write') && <th />}
             </tr>
           </thead>
           <tbody>
@@ -69,6 +91,15 @@ export default function PropertiesPage() {
                   )}
                 </td>
                 <td className="text-xs text-slate-500">{ORIGIN[p.source]}</td>
+                {can('people:write') && (
+                  <td>
+                    {p.normalisable && (
+                      <button className="btn-ghost" aria-label={`Normalise ${p.key}`} disabled={normalise.isPending || p.count === 0} onClick={() => normalise.mutate(p.key)} title={`Re-parse ${p.key} for everyone who has it; an agent decides the unmapped values`}>
+                        Normalise
+                      </button>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>

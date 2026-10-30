@@ -173,9 +173,71 @@ export interface SearchRecord {
   username: string
   api_key_id: number | null
   source: 'ui' | 'api' | 'mcp'
-  params: SearchRequest
+  /** The executed request; `ask` is the question when the ask agent planned it. */
+  params: SearchRequest & { ask?: string }
   result_count: number
   created_at: string
+}
+
+// --- agent operations -------------------------------------------------------------------------
+
+export interface AskOptions {
+  k: number
+  mode: 'avg' | 'max'
+  threshold: number
+}
+
+export interface Citation {
+  person_id: string
+  field: string
+  value: string
+}
+
+export interface SearchPlan {
+  semantic: FieldQuery[]
+  filters: FieldFilter[]
+  rationale: string
+}
+
+export interface AskResult {
+  answer: string
+  citations: Citation[]
+  plan: SearchPlan
+  /** The search that was executed; re-runnable as an ordinary search. */
+  request: SearchRequest
+  total: number
+  results: SearchHit[]
+  search_id: number | null
+}
+
+export interface StoreOptions {
+  threshold: number
+  near_duplicate: number
+  max_new: number
+}
+
+export interface StoredItem {
+  tag: string
+  text: string
+  action: 'existing' | 'created' | 'dropped'
+  key: string | null
+  similarity: number | null
+  reason: string | null
+}
+
+export interface StoreReport {
+  items: StoredItem[]
+  written: Record<string, unknown>
+  created: string[]
+  person: Person
+}
+
+export interface NormalizeReport {
+  parsed: string[]
+  mapped: Record<string, unknown>
+  non_normalizable: string[]
+  unmapped: string[]
+  agent_called: boolean
 }
 
 export interface ActivityItem {

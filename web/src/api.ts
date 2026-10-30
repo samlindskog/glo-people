@@ -1,16 +1,22 @@
 import type {
   ActivityItem,
   ApiKey,
+  AskOptions,
+  AskResult,
+  FieldFilter,
   ImportPreview,
   ImportResult,
   Job,
   Me,
+  NormalizeReport,
   Page,
   Person,
   Property,
   SearchRecord,
   SearchRequest,
   SearchResponse,
+  StoreOptions,
+  StoreReport,
   Tier,
   User,
   WorkflowRun,
@@ -83,6 +89,17 @@ export const api = {
   jobs: () => request<Job[]>('GET', '/api/jobs'),
 
   properties: () => request<Property[]>('GET', '/api/properties'),
+
+  ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<AskOptions> }) =>
+    request<AskResult>('POST', '/api/ask', body),
+  store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
+    request<StoreReport>('POST', `/api/people/${id}/store`, { passage, options }),
+  storeFile: (id: string, file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<StoreReport>('POST', `/api/people/${id}/store/file`, fd)
+  },
+  normalizePerson: (id: string) => request<NormalizeReport>('POST', `/api/people/${id}/normalize`),
 
   searches: (params: { all?: boolean; user_id?: number; limit?: number; offset?: number }) =>
     request<Page<SearchRecord>>('GET', `/api/searches${qs(params)}`),

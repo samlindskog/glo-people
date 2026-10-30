@@ -72,7 +72,8 @@ observability.instrument_app(api)
 
 @api.get("/api/health")
 async def health() -> dict:
-    return {"ok": True}
+    # fake_agents lets end-to-end tests know whether agent flows are deterministic here.
+    return {"ok": True, "fake_agents": get_settings().fake_agents}
 
 
 async def app(scope: Scope, receive: Receive, send: Send) -> None:

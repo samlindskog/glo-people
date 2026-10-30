@@ -27,6 +27,7 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
 
   const embeddable = properties.filter((p) => p.embeddable)
   const fieldKeys = properties.map((p) => p.key)
+  const byKey = new Map(properties.map((p) => [p.key, p]))
 
   function submit(e?: FormEvent) {
     e?.preventDefault()
@@ -35,7 +36,7 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
     const semantic = semOn && (single || perField) ? { ...sem, query: sem.query.trim(), queries: perField } : null
     onSearch({
       tier: tier ? (tier as SearchRequest['tier']) : null,
-      filters: filters.filter((f) => f.field).map(normalizeFilter),
+      filters: filters.filter((f) => f.field).map((f) => normalizeFilter(f, byKey.get(f.field))),
       semantic,
       sort: !semantic && sort === 'score' ? 'score' : sort,
       limit,
@@ -45,6 +46,14 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
 
   const updateFilter = (i: number, patch: Partial<FieldFilter>) =>
     setFilters(filters.map((f, j) => (j === i ? { ...f, ...patch } : f)))
+
+  /** Changing the property keeps the operator when the new property supports it. */
+  const changeField = (i: number, key: string) => {
+    const prop = byKey.get(key)
+    const ops = prop ? FILTER_OPS.filter((o) => prop.filter_ops.includes(o.op)) : FILTER_OPS
+    const op = ops.some((o) => o.op === filters[i].op) ? filters[i].op : ops[0].op
+    updateFilter(i, { field: key, op, value: op === 'exists' ? true : '' })
+  }
 
   return (
     <form onSubmit={submit} className="card space-y-4 p-4" aria-label="Search people">
@@ -95,13 +104,16 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
 
       <fieldset className="space-y-2">
         <legend className="label mb-1">Property filters (all must match)</legend>
-        {filters.map((f, i) => (
+        {filters.map((f, i) => {
+          const prop = byKey.get(f.field)
+          const ops = prop ? FILTER_OPS.filter((o) => prop.filter_ops.includes(o.op)) : FILTER_OPS
+          return (
           <div key={i} className="flex flex-wrap items-center gap-2" data-testid="filter-row">
             <select
               className="input w-52"
               aria-label="Filter field"
               value={f.field}
-              onChange={(e) => updateFilter(i, { field: e.target.value })}
+              onChange={(e) => changeField(i, e.target.value)}
             >
               <option value="">Property…</option>
               {properties.map((p) => (
@@ -116,36 +128,19 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
               value={f.op}
               onChange={(e) => updateFilter(i, { op: e.target.value as FieldFilter['op'], value: e.target.value === 'exists' ? true : f.value })}
             >
-              {FILTER_OPS.map((o) => (
+              {ops.map((o) => (
                 <option key={o.op} value={o.op}>
                   {o.label}
                 </option>
               ))}
             </select>
-            {f.op === 'exists' ? (
-              <select
-                className="input w-32"
-                aria-label="Filter value"
-                value={f.value === false ? 'no' : 'yes'}
-                onChange={(e) => updateFilter(i, { value: e.target.value === 'yes' })}
-              >
-                <option value="yes">yes</option>
-                <option value="no">no (empty)</option>
-              </select>
-            ) : (
-              <input
-                className="input w-64"
-                aria-label="Filter value"
-                placeholder={f.op === 'in' ? 'a, b, c' : 'value'}
-                value={Array.isArray(f.value) ? f.value.join(', ') : ((f.value as string) ?? '')}
-                onChange={(e) => updateFilter(i, { value: e.target.value })}
-              />
-            )}
+            <FilterValue filter={f} prop={prop} onChange={(value) => updateFilter(i, { value })} />
             <button type="button" className="btn-ghost" aria-label="Remove filter" onClick={() => setFilters(filters.filter((_, j) => j !== i))}>
               ✕
             </button>
           </div>
-        ))}
+          )
+        })}
         <button type="button" className="btn-secondary" onClick={() => setFilters([...filters, { field: '', op: 'contains', value: '' }])}>
           + Add filter
         </button>
@@ -280,11 +275,72 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
   )
 }
 
-function normalizeFilter(f: FieldFilter): FieldFilter {
+const TYPED_OPS = new Set(['eq', 'ne', 'in', 'gt', 'gte', 'lt', 'lte'])
+
+/** The value input for one filter, by the property's type: enum values as a list, numbers,
+ * dates and booleans as such; text otherwise. */
+function FilterValue({ filter: f, prop, onChange }: { filter: FieldFilter; prop?: Property; onChange: (value: unknown) => void }) {
+  if (f.op === 'exists') {
+    return (
+      <select className="input w-32" aria-label="Filter value" value={f.value === false ? 'no' : 'yes'} onChange={(e) => onChange(e.target.value === 'yes')}>
+        <option value="yes">yes</option>
+        <option value="no">no (empty)</option>
+      </select>
+    )
+  }
+  const typed = !!prop?.normalisable && TYPED_OPS.has(f.op)
+  const text = Array.isArray(f.value) ? f.value.join(', ') : f.value === undefined || f.value === null ? '' : String(f.value)
+  if (typed && (prop!.type === 'enum' || prop!.type === 'enum_list')) {
+    if (f.op === 'in') {
+      return (
+        <>
+          <input className="input w-64" aria-label="Filter value" list={`values-${prop!.key}`} placeholder="a, b, c" value={text} onChange={(e) => onChange(e.target.value)} />
+          <datalist id={`values-${prop!.key}`}>
+            {prop!.values.map((v) => (
+              <option key={v} value={v} />
+            ))}
+          </datalist>
+        </>
+      )
+    }
+    return (
+      <select className="input w-64" aria-label="Filter value" value={text} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Value…</option>
+        {prop!.values.map((v) => (
+          <option key={v} value={v}>
+            {v}
+          </option>
+        ))}
+      </select>
+    )
+  }
+  if (typed && prop!.type === 'boolean') {
+    return (
+      <select className="input w-32" aria-label="Filter value" value={text} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Value…</option>
+        <option value="true">yes</option>
+        <option value="false">no</option>
+      </select>
+    )
+  }
+  if (typed && prop!.type === 'number' && f.op !== 'in') {
+    return <input type="number" className="input w-40" aria-label="Filter value" value={text} onChange={(e) => onChange(e.target.value)} />
+  }
+  if (typed && prop!.type === 'date' && f.op !== 'in') {
+    return <input type="date" className="input w-44" aria-label="Filter value" value={text} onChange={(e) => onChange(e.target.value)} />
+  }
+  return <input className="input w-64" aria-label="Filter value" placeholder={f.op === 'in' ? 'a, b, c' : 'value'} value={text} onChange={(e) => onChange(e.target.value)} />
+}
+
+function normalizeFilter(f: FieldFilter, prop?: Property): FieldFilter {
   if (f.op === 'in' && typeof f.value === 'string') {
     return { ...f, value: f.value.split(',').map((s) => s.trim()).filter(Boolean) }
   }
-  if (['gt', 'gte', 'lt', 'lte'].includes(f.op) && typeof f.value === 'string' && f.value.trim() !== '' && !Number.isNaN(Number(f.value))) {
+  if (prop?.type === 'boolean' && TYPED_OPS.has(f.op) && (f.value === 'true' || f.value === 'false')) {
+    return { ...f, value: f.value === 'true' }
+  }
+  const numeric = prop?.type === 'number' ? TYPED_OPS.has(f.op) && f.op !== 'in' : ['gt', 'gte', 'lt', 'lte'].includes(f.op)
+  if (numeric && typeof f.value === 'string' && f.value.trim() !== '' && !Number.isNaN(Number(f.value))) {
     return { ...f, value: Number(f.value) }
   }
   return f

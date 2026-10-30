@@ -32,7 +32,7 @@ jobs:
       - name: Start dev stack
         run: |
           uname -r
-          printf 'POSTGRES_PASSWORD=glo\nEMBEDDING_PROVIDER=fake\n' > .env
+          printf 'POSTGRES_PASSWORD=glo\nEMBEDDING_PROVIDER=fake\nFAKE_AGENTS=1\n' > .env
           mkdir -p data
           $COMPOSE up -d --build || { $COMPOSE logs mongo postgres --tail 60; exit 1; }
           for i in $(seq 1 60); do

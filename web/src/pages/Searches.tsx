@@ -55,7 +55,14 @@ export default function SearchesPage() {
                 <td>
                   <span className="badge bg-slate-100 uppercase text-slate-600">{s.source}</span>
                 </td>
-                <td>{describeSearch(s.params)}</td>
+                <td>
+                  {s.params.ask && (
+                    <span className="badge mr-1 bg-violet-50 text-violet-700" title={s.params.ask}>
+                      ask
+                    </span>
+                  )}
+                  {describeSearch(s.params)}
+                </td>
                 <td className="text-right tabular-nums">{s.result_count.toLocaleString()}</td>
                 <td>
                   <Link className="btn-ghost" to={`/people?s=${encodeSearch({ ...s.params, page: 1 })}`}>
