@@ -1,12 +1,13 @@
-"""People search: literal per-field filters (Mongo) combined with per-field semantic similarity
-(pgvector). The same `SearchRequest` model backs the REST endpoint, the UI and the MCP tool."""
+"""People search: literal per-property filters (Mongo) combined with per-property semantic
+similarity (pgvector). The one engine: the same `SearchRequest` backs the REST endpoint, the UI,
+the MCP tool and the planner agent, and `run_search` validates it against the property catalog."""
 
 import json
 import re
 from typing import Annotated, Any, Literal
 
 from bson import ObjectId
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import text
 
 from app import db, embeddings, fields, normalize, people, properties
@@ -33,21 +34,55 @@ class FieldFilter(BaseModel):
                                          "'exists'; a number or ISO date string for gt/gte/lt/lte.")
 
 
-class SemanticQuery(BaseModel):
-    """Similarity search against per-field embeddings."""
+class FieldQuery(BaseModel):
+    """A passage compared with one embeddable property."""
 
-    query: str = Field(min_length=1, max_length=2000, description="Natural-language query")
-    fields: list[str] = Field(min_length=1, max_length=20,
-                              description="Embeddable property keys to compare against, e.g. "
-                                          "['bio'] (see list_properties)")
+    field: str = Field(description="Embeddable property key, e.g. 'bio'")
+    query: str = Field(min_length=1, max_length=2000, description="Passage to compare with it")
+
+
+class SemanticQuery(BaseModel):
+    """Similarity search against per-property embeddings: one passage for several properties
+    (`query` + `fields`), a passage per property (`queries`), or both."""
+
+    query: str | None = Field(None, min_length=1, max_length=2000,
+                              description="Natural-language passage compared with every "
+                                          "property in `fields`")
+    fields: list[str] = Field(default_factory=list, max_length=20,
+                              description="Embeddable property keys `query` is compared with, "
+                                          "e.g. ['bio'] (see list_properties)")
+    queries: list[FieldQuery] = Field(default_factory=list, max_length=20,
+                                      description="A passage per property, e.g. "
+                                                  "[{field: 'bio', query: 'payments founder'}]")
     mode: Literal["avg", "max"] = Field(
-        "avg", description="avg: mean cosine similarity over the listed fields the person has; "
-                           "max: best single field. A field's own score is its best-matching "
-                           "passage across the field's history entries.")
+        "avg", description="avg: mean cosine similarity over the compared properties the person "
+                           "has; max: best single property. A property's own score is its "
+                           "best-matching passage across its history entries.")
     threshold: float = Field(0.4, ge=-1, le=1,
                              description="Only return people whose aggregate score >= threshold")
     require_all_fields: bool = Field(
-        False, description="Only consider people who have every listed field")
+        False, description="Only consider people who have every compared property")
+
+    @model_validator(mode="after")
+    def _some_passage(self) -> "SemanticQuery":
+        if bool(self.query) != bool(self.fields):
+            raise ValueError("semantic.query and semantic.fields go together")
+        if not self.query and not self.queries:
+            raise ValueError("semantic needs query + fields and/or queries")
+        seen = set()
+        for key in self.compared_fields():
+            if key in seen:
+                raise ValueError(f"property {key!r} is compared more than once")
+            seen.add(key)
+        return self
+
+    def compared_fields(self) -> list[str]:
+        return [*self.fields, *(q.field for q in self.queries)]
+
+    def passages(self) -> list[tuple[str, str]]:
+        """(property, passage) pairs, one per compared property."""
+        return [*((f, self.query) for f in self.fields if self.query),
+                *((q.field, q.query) for q in self.queries)]
 
 
 class SortSpec(BaseModel):
@@ -166,9 +201,13 @@ async def _lookup(prop: properties.Property | None) -> dict[str, str] | None:
 
 
 async def mongo_query(req: SearchRequest) -> dict:
+    """The Mongo filter for a request's literal part; ValueError names an unknown property."""
     cat = {p.key: p for p in await properties.catalog()}
-    clauses = [filter_to_mongo(f, cat.get(f.field), await _lookup(cat.get(f.field)))
-               for f in req.filters]
+    clauses = []
+    for f in req.filters:
+        if f.field not in cat:
+            raise ValueError(f"unknown property {f.field!r} in filters (see the catalog)")
+        clauses.append(filter_to_mongo(f, cat[f.field], await _lookup(cat[f.field])))
     if req.tier:
         clauses.append({"tier": req.tier})
     return {"$and": clauses} if clauses else {}
@@ -182,14 +221,19 @@ def sort_path(key: str, cat: dict[str, properties.Property]) -> str:
 
 # --- semantic scoring ---------------------------------------------------------------------------
 
+# Each compared property has its own passage vector (`q`); a property's score is its best passage
+# across the person's history entries; the person's score aggregates over the compared properties
+# they have.
 _SCORE_SQL = """
-WITH per_field AS (
-    SELECT mongo_id, field, max(1 - (embedding <=> CAST(:q AS halfvec))) AS sim
-    FROM field_embeddings
-    WHERE field = ANY(:fields)
+WITH q(field, qvec) AS (VALUES {values}),
+per_field AS (
+    SELECT fe.mongo_id, fe.field, max(1 - (fe.embedding <=> q.qvec)) AS sim
+    FROM field_embeddings fe
+    JOIN q ON q.field = fe.field
+    WHERE TRUE
       {tier_clause}
       {ids_clause}
-    GROUP BY mongo_id, field
+    GROUP BY fe.mongo_id, fe.field
 )
 SELECT mongo_id,
        {agg}(sim) AS score,
@@ -205,21 +249,26 @@ ORDER BY score DESC, mongo_id
 
 async def semantic_scores(sem: SemanticQuery, tier: str | None,
                           ids: list[str] | None) -> list[tuple[str, float, dict]]:
-    vector = await embeddings.embed_query(sem.query)
+    pairs = sem.passages()
+    vectors = await embeddings.embed_queries([p for _, p in pairs])
+    params: dict[str, Any] = {"threshold": sem.threshold}
+    values = []
+    for i, ((field, _), vec) in enumerate(zip(pairs, vectors, strict=True)):
+        params[f"f{i}"], params[f"v{i}"] = field, str(vec)
+        values.append(f"(CAST(:f{i} AS text), CAST(:v{i} AS halfvec))")
     sql = _SCORE_SQL.format(
+        values=", ".join(values),
         agg="avg" if sem.mode == "avg" else "max",
-        tier_clause="AND tier = :tier" if tier else "",
-        ids_clause="AND mongo_id = ANY(:ids)" if ids is not None else "",
+        tier_clause="AND fe.tier = :tier" if tier else "",
+        ids_clause="AND fe.mongo_id = ANY(:ids)" if ids is not None else "",
         all_clause="AND count(*) = :nfields" if sem.require_all_fields else "",
     )
-    params: dict[str, Any] = {"q": str(vector), "fields": list(dict.fromkeys(sem.fields)),
-                              "threshold": sem.threshold}
     if tier:
         params["tier"] = tier
     if ids is not None:
         params["ids"] = ids
     if sem.require_all_fields:
-        params["nfields"] = len(params["fields"])
+        params["nfields"] = len(pairs)
     async with db.engine().connect() as conn:
         rows = (await conn.execute(text(sql), params)).all()
     out = []
@@ -231,10 +280,26 @@ async def semantic_scores(sem: SemanticQuery, tier: str | None,
 
 # --- orchestration ------------------------------------------------------------------------------
 
+async def validate(req: SearchRequest, cat: dict[str, properties.Property]) -> None:
+    """Everything the request names must be in the catalog: filter and sort properties exist,
+    compared properties are embeddable. Filter operators and values are checked in mongo_query."""
+    if req.semantic is not None:
+        for key in req.semantic.compared_fields():
+            prop = cat.get(key)
+            if prop is None:
+                raise ValueError(f"unknown property {key!r} in semantic (see the catalog)")
+            if not prop.embeddable:
+                raise ValueError(f"property {key!r} is {prop.type}, not embeddable; semantic "
+                                 "search compares text and list properties")
+    if req.sort != "score" and req.sort.field not in cat:
+        raise ValueError(f"unknown property {req.sort.field!r} in sort")
+
+
 async def run_search(req: SearchRequest) -> SearchResponse:
+    cat = {p.key: p for p in await properties.catalog()}
+    await validate(req, cat)
     query = await mongo_query(req)
     skip = (req.page - 1) * req.limit
-    cat = {p.key: p for p in await properties.catalog()}
 
     if req.semantic is None:
         sort = [("name.v", 1)] if req.sort == "score" else \
@@ -290,6 +355,10 @@ def describe(req: SearchRequest) -> dict:
     if req.filters:
         out["filters"] = [f"{f.field} {f.op} {f.value!r}" for f in req.filters]
     if req.semantic:
-        out["semantic"] = {"query": req.semantic.query, "fields": req.semantic.fields,
-                           "mode": req.semantic.mode, "threshold": req.semantic.threshold}
+        sem = req.semantic
+        out["semantic"] = {"mode": sem.mode, "threshold": sem.threshold}
+        if sem.query:
+            out["semantic"].update(query=sem.query, fields=sem.fields)
+        if sem.queries:
+            out["semantic"]["queries"] = [f"{q.field}: {q.query}" for q in sem.queries]
     return out

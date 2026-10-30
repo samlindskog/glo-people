@@ -30,7 +30,9 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
 
   function submit(e?: FormEvent) {
     e?.preventDefault()
-    const semantic = semOn && sem.query.trim() && sem.fields.length ? { ...sem, query: sem.query.trim() } : null
+    const perField = sem.queries?.length ? sem.queries : undefined
+    const single = sem.query.trim() && sem.fields.length
+    const semantic = semOn && (single || perField) ? { ...sem, query: sem.query.trim(), queries: perField } : null
     onSearch({
       tier: tier ? (tier as SearchRequest['tier']) : null,
       filters: filters.filter((f) => f.field).map(normalizeFilter),
@@ -158,6 +160,15 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
         </legend>
         {semOn && (
           <>
+            {sem.queries && sem.queries.length > 0 && (
+              <ul className="space-y-0.5 text-sm text-slate-600" aria-label="Per-property passages">
+                {sem.queries.map((q) => (
+                  <li key={q.field}>
+                    <span className="font-mono text-xs">{q.field}</span>: “{q.query}”
+                  </li>
+                ))}
+              </ul>
+            )}
             <label className="block space-y-1">
               <span className="label">Query</span>
               <input

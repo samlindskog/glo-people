@@ -132,3 +132,50 @@ async def test_search_history(reader, writer):
     assert detail["result_ids"] == [h["id"] for h in r.json()["results"]]
     acts = (await writer.get("/api/activity?action=search")).json()["items"]
     assert acts and acts[0]["meta"]["semantic"]["query"] == "payments"
+
+
+async def test_per_field_passages(reader):
+    one = {"semantic": {"query": "fintech payments founder", "fields": ["bio", "one_liner"],
+                        "threshold": -1}}
+    split = {"semantic": {"queries": [{"field": "bio", "query": "fintech payments founder"},
+                                      {"field": "one_liner", "query": "fintech payments founder"}],
+                          "threshold": -1}}
+    a = (await reader.post("/api/search", json=one)).json()
+    b = (await reader.post("/api/search", json=split)).json()
+    assert [(h["id"], h["score"], h["field_scores"]) for h in a["results"]] == \
+        [(h["id"], h["score"], h["field_scores"]) for h in b["results"]]
+
+    # a different passage per property: each property is scored against its own passage
+    r = await reader.post("/api/search", json={"semantic": {
+        "queries": [{"field": "bio", "query": "climate venture investor"},
+                    {"field": "one_liner", "query": "robotics engineer"}],
+        "mode": "max", "threshold": 0.5}})
+    by = {h["person"]["name"]: h for h in r.json()["results"]}
+    assert by["Bo"]["field_scores"]["bio"] == pytest.approx(1.0, abs=1e-3)
+    assert by["Di"]["field_scores"]["one_liner"] == pytest.approx(1.0, abs=1e-3)
+    assert "Ada" not in by
+    # both forms together
+    r = await reader.post("/api/search", json={"semantic": {
+        "query": "payments", "fields": ["bio"],
+        "queries": [{"field": "one_liner", "query": "climate investor"}], "threshold": -1}})
+    assert set(r.json()["results"][0]["field_scores"]) <= {"bio", "one_liner"}
+    acts = (await reader.get("/api/searches")).json()["items"]
+    assert acts[0]["params"]["semantic"]["queries"][0]["field"] == "one_liner"
+
+
+async def test_requests_are_validated_against_the_catalog(reader):
+    s = lambda body: reader.post("/api/search", json=body)
+    r = await s({"filters": [{"field": "nonexistent", "op": "eq", "value": 1}]})
+    assert r.status_code == 422 and "unknown property" in r.text
+    r = await s({"semantic": {"query": "x", "fields": ["mrr"]}})
+    assert r.status_code == 422 and "not embeddable" in r.text
+    r = await s({"semantic": {"query": "x", "fields": ["nonexistent"]}})
+    assert r.status_code == 422
+    r = await s({"semantic": {"query": "x", "fields": ["bio"],
+                              "queries": [{"field": "bio", "query": "y"}]}})
+    assert r.status_code == 422 and "more than once" in r.text
+    assert (await s({"semantic": {"fields": ["bio"]}})).status_code == 422
+    assert (await s({"semantic": {"query": "x"}})).status_code == 422
+    assert (await s({"semantic": {"mode": "max"}})).status_code == 422
+    r = await s({"sort": {"field": "nonexistent", "dir": "asc"}})
+    assert r.status_code == 422 and "sort" in r.text

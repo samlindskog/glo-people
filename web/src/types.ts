@@ -30,9 +30,18 @@ export interface FieldFilter {
   value?: unknown
 }
 
+/** A passage compared with one embeddable property (the planner agent writes these). */
+export interface FieldQuery {
+  field: string
+  query: string
+}
+
 export interface SemanticQuery {
+  /** One passage compared with every property in `fields`. */
   query: string
   fields: string[]
+  /** A passage per property; may be combined with query + fields. */
+  queries?: FieldQuery[]
   mode: 'avg' | 'max'
   threshold: number
   require_all_fields: boolean

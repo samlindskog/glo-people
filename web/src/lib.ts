@@ -56,7 +56,10 @@ export function describeSearch(req: Partial<SearchRequest>): string {
   for (const f of req.filters ?? []) parts.push(describeFilter(f))
   if (req.semantic) {
     const s = req.semantic
-    parts.push(`“${s.query}” in ${s.fields.join(', ')} (${s.mode ?? 'avg'} ≥ ${s.threshold ?? 0.4}${s.require_all_fields ? ', all fields' : ''})`)
+    const passages: string[] = []
+    if (s.query) passages.push(`“${s.query}” in ${(s.fields ?? []).join(', ')}`)
+    for (const q of s.queries ?? []) passages.push(`${q.field}: “${q.query}”`)
+    parts.push(`${passages.join(' + ')} (${s.mode ?? 'avg'} ≥ ${s.threshold ?? 0.4}${s.require_all_fields ? ', all fields' : ''})`)
   }
   return parts.join(' · ') || 'Everyone'
 }

@@ -103,9 +103,13 @@ async def search_people(
     """Search people. Same parameters as the web UI and POST /api/search.
 
     Examples:
-      filters=[{"field":"name","op":"contains","value":"okafor"}]
+      filters=[{"field":"name","op":"contains","value":"okafor"},
+               {"field":"mrr","op":"gte","value":10000}, {"field":"stage","op":"in","value":["Seed","Series A"]}]
       semantic={"query":"fintech founder","fields":["bio","one_liner"],"mode":"avg","threshold":0.25}
-    Each result has id, tier, score (semantic only), field_scores and the person's fields.
+      semantic={"queries":[{"field":"bio","query":"payments infrastructure"},
+                           {"field":"company_description","query":"merchant acquiring"}],"threshold":0.3}
+    Each result has id, tier, score (semantic only), field_scores and the person's properties
+    (plus `norm`, the normalised values of typed properties).
     """
     principal = await _principal(ctx, "people:read")
     try:

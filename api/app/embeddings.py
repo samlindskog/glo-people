@@ -28,6 +28,11 @@ async def embed_query(text: str) -> list[float]:
     return (await embedder.embed_texts([text]))[0]
 
 
+async def embed_queries(texts: list[str]) -> list[list[float]]:
+    """Vectors for several passages (identical passages are embedded once)."""
+    return await embedder.embed_texts(texts)
+
+
 async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -> int:
     """Bring field_embeddings in line with the current documents of these people.
 

@@ -30,6 +30,11 @@ test('describeSearch summarises filters and semantic options', () => {
       semantic: { query: 'q', fields: ['bio', 'one_liner'], mode: 'avg', threshold: 0.2, require_all_fields: false },
     }),
   ).toBe('city in Lagos | Accra · bio is empty · “q” in bio, one_liner (avg ≥ 0.2)')
+  expect(
+    describeSearch({
+      semantic: { query: '', fields: [], queries: [{ field: 'bio', query: 'payments' }, { field: 'role', query: 'CTO' }], mode: 'max', threshold: 0.3, require_all_fields: false },
+    }),
+  ).toBe('bio: “payments” + role: “CTO” (max ≥ 0.3)')
 })
 
 test('roles from the shared contract: readers cannot grant writer', () => {
