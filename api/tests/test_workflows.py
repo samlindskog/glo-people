@@ -263,6 +263,8 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert ("search", "Leafy official website") in FakeFirecrawl.calls
     person = (await reader.get(f"/api/people/{people['Bo Chen']}")).json()
     assert "company_summary" not in person and "github" not in person
+    assert "related_links" not in person          # links on a non-personal site are not his
+    assert any("not the person's own site" in s["reason"] for s in res["skipped"])
 
 
 async def test_provider_route_failure_counts_as_not_found(writer, people):
@@ -321,6 +323,8 @@ async def test_run_cap_above_one_item_lets_a_bigger_batch_finish(writer, people)
                                  people["Dee Evans"]], max_credits=100)
     assert {it["status"] for it in run["items"]} == {"done"}, run["items"]
     assert "stopped_reason" not in run["summary"]
+    traces = {it["trace_id"] for it in run["items"]}
+    assert None not in traces and len(traces) == 4    # one Logfire trace per person
 
 
 def test_split_urls_handles_lists_and_separators():

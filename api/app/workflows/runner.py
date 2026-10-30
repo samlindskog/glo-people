@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import logfire
+from opentelemetry import context as otel_context
 from sqlalchemy import func, select, update
 
 from app import activity, db
@@ -155,6 +156,9 @@ async def _finish(run_id: int, status: str, error: str | None = None,
 
 
 async def _run(run_id: int, principal: Principal) -> None:
+    # Detach from the HTTP request's trace (this task owns a copy of the request context), so
+    # every item span below starts its own trace: one Logfire link per person.
+    otel_context.attach(otel_context.Context())
     run = await get_run(run_id)
     spec = REGISTRY.get(run["workflow"]) if run else None
     if spec is None:

@@ -29,7 +29,8 @@ Procedure:
    summary None. Never guess a domain. Never summarise a different company with the same name.
 
 The summary is two or three plain sentences: what the company does, for whom, anything notable
-(stage, location, scale) stated on the page. No marketing language.""",
+(stage, location, scale) stated on the page. No marketing language. Leave out figures that look
+like unrendered placeholders (a count of 0, "{{n}}", "N/A") rather than commenting on them.""",
 )
 
 

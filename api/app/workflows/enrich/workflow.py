@@ -199,13 +199,17 @@ async def _step_sites(deps: WorkflowDeps, st: State) -> None:
         if (page.status_code and page.status_code >= 400) or len(page.markdown) < MIN_PAGE_CHARS:
             deps.skip("sites", f"{site}: HTTP {page.status_code}, {len(page.markdown)} chars")
             continue
-        st.github_urls += [g for g in map(github_profile, page.links) if g]
         with logfire.span("site_reader {site}", site=site):
             findings = await site_reader.read(deps, st.name, site, page.markdown, page.links,
                                               st.caps["follow"])
-        if findings.is_personal and not _has_url(deps, "website", site):
+        if not findings.is_personal:
+            # A company or unrelated site: its links are about the company, not the person.
+            deps.skip("sites", f"{site}: not the person's own site")
+            continue
+        if not _has_url(deps, "website", site):
             await deps.write(site_reader.AGENT_NAME, {"website": site})
-        st.github_urls += [g for g in map(github_profile, findings.github_urls) if g]
+        st.github_urls += [g for g in map(github_profile, [*page.links, *findings.github_urls])
+                           if g]
         st.related += [link.url for link in findings.related_links]
 
 
