@@ -9,6 +9,8 @@ APP = Path(__file__).resolve().parents[1] / "app"
 FORBIDDEN = {
     "people": {"embeddings", "search", "agents", "workflows", "importer"},
     "properties": {"people", "embeddings", "search", "agents", "workflows", "importer", "normalize"},
+    "normalize": {"people", "embeddings", "search", "agents", "workflows", "importer"},
+    "mongo": {"properties", "people", "embeddings", "search", "agents", "workflows", "normalize"},
     "property_specs": {"properties", "people", "embeddings", "search", "agents", "workflows",
                        "fields", "history", "mongo", "db", "config"},
     "history": {"people", "embeddings", "search", "agents", "workflows", "properties", "mongo"},

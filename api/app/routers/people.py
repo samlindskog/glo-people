@@ -29,6 +29,8 @@ class PersonPatch(BaseModel):
 
 
 def _bad_request(e: Exception) -> HTTPException:
+    if isinstance(e, people_svc.ConflictError):
+        return HTTPException(status.HTTP_409_CONFLICT, str(e))
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e))
 
 
@@ -109,7 +111,7 @@ async def import_people(file: Annotated[UploadFile, File()],
     text = await _read_upload(file)
     try:
         result = await importer.import_csv(text, file.filename or "upload.csv", tier)
-    except ValueError as e:
+    except ValueError as e:                      # includes people.ConflictError
         raise _bad_request(e) from e
     summary = {"file": file.filename, "tier": tier, "rows": result.rows,
                "inserted": result.inserted, "updated": result.updated,

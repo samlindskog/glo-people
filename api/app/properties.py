@@ -19,7 +19,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 
 from app import db, embedder, fields, mongo
-from app.property_specs import EMBEDDABLE, NORMALISABLE, SPECS, PropertyType, Spec
+from app.property_specs import EMBEDDABLE, NORMALISABLE, SPECS, PropertyType, Spec, filter_ops
 
 log = logging.getLogger(__name__)
 
@@ -39,12 +39,19 @@ class Property(BaseModel):
     values: list[str] = []            # canonical values (enum, enum_list), seeds first
     embeddable: bool
     normalisable: bool
+    filter_ops: list[str]
     source: CreatedBy                 # how the property came to exist
     created_at: datetime | None = None
-    count: int = 0                    # people holding a current value (when the caller supplies it)
+    # Coverage, filled when the caller passes people.coverage(): people holding a current value,
+    # and how many of those could not be (fully) normalised.
+    count: int = 0
+    unmapped: int = 0
+    non_normalizable: int = 0
 
 
 _catalog: tuple[float, list[Property]] | None = None
+_aliases: dict[str, dict[str, list[str]]] = {}      # key -> canonical value -> aliases
+_lookups: dict[str, dict[str, str]] = {}            # key -> folded text -> canonical value
 _names: tuple[float, dict[str, list[float]]] | None = None
 
 
@@ -52,6 +59,8 @@ def reset() -> None:
     """Drop the caches (every writer here; tests after touching the stores directly)."""
     global _catalog, _names
     _catalog = _names = None
+    _aliases.clear()
+    _lookups.clear()
 
 
 def spec(key: str) -> Spec | None:
@@ -63,11 +72,14 @@ def _property(key: str, doc: dict | None) -> Property:
     sp = SPECS.get(key)
     ptype = sp.type if sp else "text"
     seeds = list(sp.values) if sp else []
-    extra = [e["v"] for e in ((doc or {}).get("enum") or {}).get("values", [])]
+    entries = ((doc or {}).get("enum") or {}).get("values", [])
+    extra = [e["v"] for e in entries]
     values = list(dict.fromkeys([*seeds, *extra])) if ptype in ("enum", "enum_list") else []
+    if values:
+        _aliases[key] = {e["v"]: list(e.get("aliases") or []) for e in entries}
     return Property(key=key, label=(sp.label if sp else None) or fields.label_for(key),
                     type=ptype, values=values, embeddable=ptype in EMBEDDABLE,
-                    normalisable=ptype in NORMALISABLE,
+                    normalisable=ptype in NORMALISABLE, filter_ops=list(filter_ops(ptype)),
                     source=(doc or {}).get("source") or ("import" if doc else "spec"),
                     created_at=(doc or {}).get("created_at"))
 
@@ -78,6 +90,8 @@ async def _load() -> list[Property]:
         return _catalog[1]
     docs = {d["_id"]: d async for d in mongo.db().fields.find({})}
     keys = sorted({*docs, *SPECS})      # a spec declares existence even before sync_specs ran
+    _aliases.clear()
+    _lookups.clear()
     props = [_property(k, docs.get(k)) for k in keys if fields.valid_key(k)]
     _catalog = (time.monotonic(), props)
     return props
@@ -85,12 +99,12 @@ async def _load() -> list[Property]:
 
 # --- reads ----------------------------------------------------------------------------------------
 
-async def catalog(counts: dict[str, int] | None = None) -> list[Property]:
-    """Every property, sorted by key. `counts` (from `people.coverage()`) fills `count`."""
+async def catalog(coverage: dict[str, dict[str, int]] | None = None) -> list[Property]:
+    """Every property, sorted by key. `coverage` (from `people.coverage()`) fills the counts."""
     props = await _load()
-    if counts is None:
+    if coverage is None:
         return list(props)
-    return [p.model_copy(update={"count": counts.get(p.key, 0)}) for p in props]
+    return [p.model_copy(update=coverage.get(p.key, {})) for p in props]
 
 
 async def get(key: str) -> Property | None:
@@ -112,6 +126,21 @@ async def embeddable_keys() -> frozenset[str]:
 async def enum_values(key: str) -> list[str]:
     prop = await get(key)
     return list(prop.values) if prop else []
+
+
+async def enum_lookup(key: str) -> dict[str, str]:
+    """{fields.fold(text): canonical value} over an enum property's values and their aliases;
+    what app.normalize matches entered text against."""
+    prop = await get(key)
+    if prop is None or not prop.values:
+        return {}
+    if key not in _lookups:
+        lookup: dict[str, str] = {}
+        for value in prop.values:
+            for alias in (*_aliases.get(key, {}).get(value, []), value):
+                lookup[fields.fold(alias)] = value
+        _lookups[key] = lookup
+    return _lookups[key]
 
 
 # --- writes ---------------------------------------------------------------------------------------

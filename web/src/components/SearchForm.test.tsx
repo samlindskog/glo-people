@@ -7,8 +7,11 @@ import SearchForm from './SearchForm'
 const prop = (p: Partial<Property> & Pick<Property, 'key' | 'label' | 'type' | 'embeddable' | 'count'>): Property => ({
   values: [],
   normalisable: false,
+  filter_ops: ['eq', 'ne', 'contains', 'starts_with', 'regex', 'in', 'exists'],
   source: 'spec',
   created_at: null,
+  unmapped: 0,
+  non_normalizable: 0,
   ...p,
 })
 const PROPERTIES: Property[] = [

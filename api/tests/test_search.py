@@ -3,7 +3,7 @@ import pytest
 from app import embedder, jobs
 from app.search import FieldFilter, filter_to_mongo
 
-PEOPLE = """Name,Role,Bio,One-liner,City,Score
+PEOPLE = """Name,Role,Bio,One-liner,City,MRR
 Ada,founder,payments infrastructure for merchants,fintech payments founder,Lagos,9
 Bo,investor,climate venture investor,climate investor,Berlin,4
 Cy,founder,payments and lending,,Lagos,7
@@ -30,7 +30,7 @@ async def test_literal_filters(reader):
         "Ada"]
     assert names(await s({"filters": [{"field": "city", "op": "eq", "value": "lagos"}]})) == [
         "Ada", "Cy"]
-    assert names(await s({"filters": [{"field": "score", "op": "gte", "value": 7}]})) == [
+    assert names(await s({"filters": [{"field": "mrr", "op": "gte", "value": 7}]})) == [
         "Ada", "Cy"]
     assert names(await s({"filters": [{"field": "bio", "op": "exists", "value": False}]})) == [
         "Di"]
@@ -39,7 +39,7 @@ async def test_literal_filters(reader):
     assert names(await s({"filters": [{"field": "name", "op": "starts_with", "value": "c"},
                                       {"field": "city", "op": "regex", "value": "^lag"}]})) == [
         "Cy"]
-    r = await s({"sort": {"field": "score", "dir": "desc"}, "limit": 2})
+    r = await s({"sort": {"field": "mrr", "dir": "desc"}, "limit": 2})
     assert names(r) == ["Ada", "Cy"] and r.json()["total"] == 4
     assert (await s({"filters": [{"field": "x y", "op": "eq", "value": 1}]})).status_code == 422
     assert (await s({"filters": [{"field": "name", "op": "regex", "value": "("}]})

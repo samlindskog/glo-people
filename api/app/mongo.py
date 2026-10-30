@@ -2,6 +2,7 @@ from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.config import get_settings
+from app.property_specs import NORMALISABLE, SPECS
 
 _client: AsyncMongoClient | None = None
 
@@ -20,6 +21,9 @@ async def ensure_indexes() -> None:
                               partialFilterExpression={"source.source_id": {"$exists": True}})
     await people.create_index([("tier", ASCENDING)])
     await people.create_index([("name.v", ASCENDING)])
+    for key, spec in SPECS.items():        # filters and sorts on typed properties use norm.v
+        if spec.type in NORMALISABLE:
+            await people.create_index([(f"{key}.norm.v", ASCENDING)])
 
 
 async def close() -> None:

@@ -1,5 +1,5 @@
 """Admin commands: python -m app.cli {create-user,set-password,import,embed,properties,classify,
-migrate-history}."""
+normalize,migrate-history}."""
 
 import argparse
 import asyncio
@@ -68,6 +68,12 @@ async def embed(only: list[str] | None) -> None:
     keys = set(only) if only else None
     n = await embeddings.backfill(keys, progress=lambda n: print(f"  {n} vectors", end="\r"))
     print(f"\nembedded {n} field values and {names} property names")
+
+
+async def normalize_people() -> None:
+    await properties.sync_specs()
+    n = await people.normalize_all(progress=lambda n: print(f"  {n} documents", end="\r"))
+    print(f"\nnormalised {n} people documents")
 
 
 async def migrate_history(dry_run: bool) -> None:
@@ -160,6 +166,8 @@ def main() -> None:
     sub.add_parser("properties", help="the property catalog with coverage")
     cl = sub.add_parser("classify", help="suggest property_specs entries from the data")
     cl.add_argument("--all", action="store_true", help="include properties that have a spec")
+    nz = sub.add_parser("normalize", help="(re)parse the normalised values of typed properties")
+    nz.add_argument("--all", action="store_true", required=True, help="every document")
     mh = sub.add_parser("migrate-history", help="wrap legacy flat field values into histories")
     mh.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
@@ -179,6 +187,8 @@ def main() -> None:
                     await list_properties()
                 case "classify":
                     await classify(args.all)
+                case "normalize":
+                    await normalize_people()
                 case "migrate-history":
                     await migrate_history(args.dry_run)
         finally:

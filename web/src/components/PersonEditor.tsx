@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import type { Person, Property, Tier } from '../types'
 
-const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at', 'schema_version', 'history'])
+const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at', 'schema_version', 'history', 'norm', 'norm_flags', 'history_norm'])
 
 interface Row {
   key: string

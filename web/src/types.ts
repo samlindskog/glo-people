@@ -49,13 +49,20 @@ export interface SearchRequest {
 
 export type FieldValue = string | number | boolean | Array<string | number | boolean>
 
-export type SourceKind = 'ui' | 'api' | 'mcp' | 'agent' | 'import' | 'legacy'
+export type SourceKind = 'ui' | 'api' | 'mcp' | 'agent' | 'import' | 'legacy' | 'system'
+export type NormFlag = 'unmapped' | 'non_normalizable'
 
 /** One history entry of a field: the value written, when, and by whom. */
 export interface FieldEntry {
   v: FieldValue | null
   ts?: string
   src?: { kind: SourceKind; by?: string; ref?: string }
+}
+
+/** One normalised-value entry: the typed value, when, by whom, and `of`, a hash of the text it derives from. */
+export interface NormEntry extends FieldEntry {
+  of: string
+  flag?: NormFlag
 }
 
 export interface Person {
@@ -66,8 +73,13 @@ export interface Person {
   created_at?: string
   updated_at?: string
   schema_version?: number
+  /** Normalised values of typed properties (number, boolean, ISO date, canonical enum values). */
+  norm: Record<string, unknown>
+  /** Typed properties whose text could not be (fully) normalised. */
+  norm_flags: Record<string, NormFlag>
   /** Present on GET /api/people/:id; every field's entries, oldest first. */
   history?: Record<string, FieldEntry[]>
+  history_norm?: Record<string, NormEntry[]>
   [key: string]: unknown
 }
 
@@ -98,9 +110,13 @@ export interface Property {
   values: string[]
   embeddable: boolean
   normalisable: boolean
+  filter_ops: FilterOp[]
   source: 'import' | 'agent' | 'spec'
   created_at: string | null
+  /** People holding a current value, and how many of those could not be normalised. */
   count: number
+  unmapped: number
+  non_normalizable: number
 }
 
 export interface ImportColumn {

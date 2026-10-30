@@ -9,8 +9,9 @@ from bson import ObjectId
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
-from app import db, embeddings, fields, people, properties
+from app import db, embeddings, fields, normalize, people, properties
 from app.auth import Principal
+from app.property_specs import TEXT_OPS
 
 FilterOp = Literal["eq", "ne", "contains", "starts_with", "regex", "in", "exists",
                    "gt", "gte", "lt", "lte"]
@@ -19,11 +20,15 @@ MAX_LIMIT = 200
 
 
 class FieldFilter(BaseModel):
-    """A literal condition on one field. String matching (eq, contains, starts_with, regex, in)
-    is case-insensitive; on list fields it matches any element."""
+    """A literal condition on one property. contains/starts_with/regex match the text as entered
+    (case-insensitive; on lists, any element). On a typed property (number, date, boolean, enum,
+    enum list) eq/ne/in and gt/gte/lt/lte compare the normalised value: pass a number, an ISO
+    date, true/false or a canonical enum value (list_properties shows them). Text properties
+    compare case-insensitively."""
 
     field: str = Field(description="Property key, e.g. 'name'. See list_properties.")
-    op: FilterOp = Field("contains", description="Comparison operator")
+    op: FilterOp = Field("contains", description="Comparison operator; list_properties gives "
+                                                 "each property's filter_ops")
     value: Any = Field(None, description="Value to compare. A list for 'in'; true/false for "
                                          "'exists'; a number or ISO date string for gt/gte/lt/lte.")
 
@@ -91,31 +96,46 @@ def _ci(pattern: str) -> dict:
     return {"$regex": pattern, "$options": "i"}
 
 
-def _num_or_str(value: Any, ftype: str) -> Any:
-    if ftype == "number" and isinstance(value, str):
-        try:
-            return float(value)
-        except ValueError:
-            return value
-    return value
+_TEXT_ONLY = frozenset({"contains", "starts_with", "regex"})
 
 
-def filter_to_mongo(f: FieldFilter, ftype: str = "text") -> dict:
-    """Mongo condition for one filter, against the field's current value (`field.v`)."""
+def _typed(value: Any, prop: properties.Property, lookup: dict[str, str] | None) -> Any:
+    """A filter value as stored in `field.norm.v`; ValueError when it cannot be normalised."""
+    ptype = "enum" if prop.type == "enum_list" else prop.type
+    parsed = normalize.parse(value, ptype, lookup)
+    if parsed.value is None:
+        hint = f"; one of {prop.values}" if prop.values else ""
+        raise ValueError(f"{value!r} is not a {prop.type} value for {prop.key}{hint}")
+    return parsed.value
+
+
+def filter_to_mongo(f: FieldFilter, prop: properties.Property | None = None,
+                    lookup: dict[str, str] | None = None) -> dict:
+    """Mongo condition for one filter. Text operators (and `exists`) look at the text as entered
+    (`field.v`); on a normalisable property the other operators compare the normalised value
+    (`field.norm.v`) with the filter value normalised the same way. Without `prop` (a property
+    not in the catalog) every operator works on the text."""
     v = f.value
-    path = f"{f.field}.v"
+    allowed = prop.filter_ops if prop else TEXT_OPS
+    if f.op not in allowed:
+        raise ValueError(f"operator {f.op!r} is not available for {f.field} "
+                         f"({prop.type if prop else 'text'}); use one of {list(allowed)}")
+    typed = prop is not None and prop.normalisable and f.op not in _TEXT_ONLY and f.op != "exists"
+    text_path = f"{f.field}.v"
+    path = f"{f.field}.norm.v" if typed else text_path
     match f.op:
         case "exists":
             present = v is None or bool(v)
             return {path: {"$exists": True, "$nin": [None, "", []]}} if present else \
                 {"$or": [{path: {"$exists": False}}, {path: {"$in": [None, "", []]}}]}
         case "eq" | "ne":
-            if isinstance(v, str) and ftype != "number":
-                cond = _ci(f"^{re.escape(v)}$")
+            if typed:
+                cond: Any = _typed(v, prop, lookup)
             else:
-                cond = _num_or_str(v, ftype)
-            return {path: cond} if f.op == "eq" else {path: {"$not": cond} if
-                                                         isinstance(cond, dict) else {"$ne": cond}}
+                cond = _ci(f"^{re.escape(v)}$") if isinstance(v, str) else v
+            if f.op == "eq":
+                return {path: cond}
+            return {path: {"$not": cond} if isinstance(cond, dict) else {"$ne": cond}}
         case "contains":
             return {path: _ci(re.escape(str(v or "")))}
         case "starts_with":
@@ -128,20 +148,36 @@ def filter_to_mongo(f: FieldFilter, ftype: str = "text") -> dict:
             return {path: _ci(str(v))}
         case "in":
             values = v if isinstance(v, list) else [v]
-            ors = [_ci(f"^{re.escape(x)}$") if isinstance(x, str) and ftype != "number"
-                   else _num_or_str(x, ftype) for x in values]
-            return {"$or": [{path: o} for o in ors]} if ors else {"_id": None}
+            if not values:
+                return {"_id": None}
+            if typed:
+                return {path: {"$in": [_typed(x, prop, lookup) for x in values]}}
+            ors = [_ci(f"^{re.escape(x)}$") if isinstance(x, str) else x for x in values]
+            return {"$or": [{path: o} for o in ors]}
         case "gt" | "gte" | "lt" | "lte":
-            return {path: {f"${f.op}": _num_or_str(v, ftype)}}
+            return {path: {f"${f.op}": _typed(v, prop, lookup)}}
     raise ValueError(f"unsupported op {f.op}")
 
 
+async def _lookup(prop: properties.Property | None) -> dict[str, str] | None:
+    if prop is None or prop.type not in ("enum", "enum_list"):
+        return None
+    return await properties.enum_lookup(prop.key)
+
+
 async def mongo_query(req: SearchRequest) -> dict:
-    types = {p.key: p.type for p in await properties.catalog()}
-    clauses = [filter_to_mongo(f, types.get(f.field, "text")) for f in req.filters]
+    cat = {p.key: p for p in await properties.catalog()}
+    clauses = [filter_to_mongo(f, cat.get(f.field), await _lookup(cat.get(f.field)))
+               for f in req.filters]
     if req.tier:
         clauses.append({"tier": req.tier})
     return {"$and": clauses} if clauses else {}
+
+
+def sort_path(key: str, cat: dict[str, properties.Property]) -> str:
+    """Normalisable properties sort by their normalised value, the rest by the text."""
+    prop = cat.get(key)
+    return f"{key}.norm.v" if prop and prop.normalisable else f"{key}.v"
 
 
 # --- semantic scoring ---------------------------------------------------------------------------
@@ -198,10 +234,11 @@ async def semantic_scores(sem: SemanticQuery, tier: str | None,
 async def run_search(req: SearchRequest) -> SearchResponse:
     query = await mongo_query(req)
     skip = (req.page - 1) * req.limit
+    cat = {p.key: p for p in await properties.catalog()}
 
     if req.semantic is None:
         sort = [("name.v", 1)] if req.sort == "score" else \
-            [(f"{req.sort.field}.v", 1 if req.sort.dir == "asc" else -1), ("_id", 1)]
+            [(sort_path(req.sort.field, cat), 1 if req.sort.dir == "asc" else -1), ("_id", 1)]
         total = await people.count(query)
         docs = await people.find(query, sort=sort, skip=skip, limit=req.limit)
         return SearchResponse(total=total, page=req.page, limit=req.limit,
@@ -223,7 +260,7 @@ async def run_search(req: SearchRequest) -> SearchResponse:
     else:
         direction = 1 if req.sort.dir == "asc" else -1
         docs = await people.find({"_id": {"$in": [ObjectId(m) for m in by_id]}},
-                                 sort=[(f"{req.sort.field}.v", direction), ("_id", 1)],
+                                 sort=[(sort_path(req.sort.field, cat), direction), ("_id", 1)],
                                  skip=skip, limit=req.limit)
 
     results = []

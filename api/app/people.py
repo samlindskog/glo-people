@@ -1,11 +1,13 @@
 """The person document service: the only writer of the `people` collection.
 
 Field values are never overwritten: every write appends a time-stamped, source-tagged entry to the
-field's history (see app.history) and refreshes the cached current value. Writes accept only
-properties that exist (app.properties); the importer creates properties before it calls
-`upsert_imported`. Other systems read through the helpers here (`fetch`, `find`, `count`,
-`find_ids`, `coverage`, `value_counts`) and react to writes through `on_write` hooks that the
-composition root registers (e.g. embeddings).
+field's history (see app.history) and refreshes the cached current value; typed properties get
+their normalised value (app.normalize) in the same write. Writes accept only properties that exist
+(app.properties); the importer creates properties before it calls `upsert_imported`. Every write is
+compare-and-set on the document's `rev`, so concurrent writers never lose each other's entries.
+Other systems read through the helpers here (`fetch`, `find`, `count`, `find_ids`, `coverage`,
+`value_counts`) and react to value writes through `on_write` hooks that the composition root
+registers (e.g. embeddings).
 """
 
 import logging
@@ -15,16 +17,20 @@ from typing import Any
 
 from bson import ObjectId
 from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 
-from app import activity, fields, history, mongo, properties
+from app import activity, fields, history, mongo, normalize, properties
 from app.auth import Principal
 from app.history import Source
 from app.mongo import db
+from app.property_specs import NORMALISABLE
 
 log = logging.getLogger(__name__)
 
 Scalar = str | int | float | bool
 WRITE_BATCH = 1000
+CAS_RETRIES = 8      # a compare-and-set attempt fails only because another writer succeeded
+NORMALIZE_SRC = Source("system", "normalize")
 
 _hooks: list[Callable[[str], Awaitable[None]]] = []
 
@@ -33,23 +39,32 @@ class PersonError(ValueError):
     pass
 
 
+class ConflictError(PersonError):
+    """Another writer kept changing the document; the caller may retry."""
+
+
 def on_write(hook: Callable[[str], Awaitable[None]]) -> None:
-    """Register a coroutine called with the person id after every successful write."""
+    """Register a coroutine called with the person id after every successful value write."""
     _hooks.append(hook)
 
 
 # --- reads ----------------------------------------------------------------------------------------
 
 def public(doc: dict, include_history: bool = False) -> dict:
-    """Flat view (current values) of a person; with `history`, every field's entries too."""
+    """Flat view of a person: current values, `norm` (normalised values of typed properties) and
+    `norm_flags` (what could not be normalised); with `history`, every entry too."""
     out: dict[str, Any] = {"id": str(doc["_id"])}
     for k in ("tier", "source", "created_at", "updated_at", "schema_version"):
         if k in doc:
-            out[k] = doc[k].isoformat() if hasattr(doc[k], "isoformat") else doc[k]
+            out[k] = history.jsonable(doc[k])
     out.update(history.flatten(doc, fields.SYSTEM_FIELDS))
+    out["norm"] = history.jsonable(history.flatten_norm(doc, fields.SYSTEM_FIELDS))
+    out["norm_flags"] = history.norm_flags(doc, fields.SYSTEM_FIELDS)
     if include_history:
-        out["history"] = {k: history.public_entries(v) for k, v in doc.items()
-                          if k not in fields.SYSTEM_FIELDS}
+        props = {k: v for k, v in doc.items() if k not in fields.SYSTEM_FIELDS}
+        out["history"] = {k: history.public_entries(v) for k, v in props.items()}
+        out["history_norm"] = {k: history.public_norm_entries(v) for k, v in props.items()
+                               if history.norm_of(v)}
     return out
 
 
@@ -87,15 +102,23 @@ async def find_ids(query: dict, limit: int = 0) -> list[str]:
     return [str(d["_id"]) for d in docs]
 
 
-async def coverage() -> dict[str, int]:
-    """{property key: number of people whose current value is present (not a tombstone)}."""
+async def coverage() -> dict[str, dict[str, int]]:
+    """Per property: `count` of people whose current value is present (not a tombstone), and how
+    many of those are `unmapped` / `non_normalizable` (typed properties)."""
+    present = {"$and": [{"$ne": ["$kv.v.v", None]}, {"$ne": ["$kv.v.v", ""]},
+                        {"$ne": ["$kv.v.v", []]}]}
+    flagged = lambda flag: {"$cond": [{"$and": [present, {"$eq": ["$kv.v.norm.flag", flag]}]},
+                                      1, 0]}
     pipeline = [
         {"$project": {"kv": {"$objectToArray": "$$ROOT"}}},
         {"$unwind": "$kv"},
-        {"$match": {"kv.v.v": {"$exists": True, "$nin": [None, "", []]}}},
-        {"$group": {"_id": "$kv.k", "count": {"$sum": 1}}},
+        {"$match": {"kv.v.h": {"$exists": True}}},
+        {"$group": {"_id": "$kv.k",
+                    "count": {"$sum": {"$cond": [present, 1, 0]}},
+                    "unmapped": {"$sum": flagged("unmapped")},
+                    "non_normalizable": {"$sum": flagged("non_normalizable")}}},
     ]
-    return {d["_id"]: d["count"] async for d in await db().people.aggregate(pipeline)}
+    return {d.pop("_id"): d async for d in await db().people.aggregate(pipeline)}
 
 
 async def value_counts(key: str, limit: int = 200) -> list[tuple[Any, int]]:
@@ -156,6 +179,37 @@ def _check_tier(tier: str) -> None:
         raise PersonError(f"tier must be one of {fields.TIERS}")
 
 
+async def _normalize_into(doc: dict, to_set: dict[str, Any], now: datetime,
+                          src: Source = NORMALIZE_SRC) -> list[str]:
+    """Add norm entries to `to_set` for every typed property of the prospective document (`doc`
+    with `to_set` applied) whose text changed. Returns the keys normalised."""
+    prospective = {**doc, **to_set}
+    parsed = await normalize.document(prospective)
+    for key, p in parsed.items():
+        prop = prospective[key]
+        new = history.append_norm(prop, p.value, src, now,
+                                  normalize.text_hash(history.current(prop)), p.flag)
+        if new is not None:
+            to_set[key] = new
+    return list(parsed)
+
+
+def _rev_filter(doc: dict | None) -> dict[str, Any]:
+    """The revision condition of a compare-and-set write: the revision we read, or "no revision
+    yet" for a document that predates revisions or does not exist (an upsert must not copy a
+    `rev: null` into the new document)."""
+    if doc is not None and "rev" in doc:
+        return {"rev": doc["rev"]}
+    return {"rev": {"$exists": False}}
+
+
+async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any]) -> bool:
+    """Apply `to_set` if the document is still at the revision we read; False otherwise."""
+    res = await db().people.update_one({"_id": oid, **_rev_filter(doc)},
+                                       {"$set": to_set, "$inc": {"rev": 1}})
+    return res.matched_count == 1
+
+
 async def create(principal: Principal, tier: str, values: dict[str, Any],
                  source: Source | None = None) -> dict:
     _check_tier(tier)
@@ -164,14 +218,19 @@ async def create(principal: Principal, tier: str, values: dict[str, Any],
         raise PersonError("name is required")
     src = source or Source.for_rest(principal)
     now = datetime.now(UTC)
-    props = {k: history.new_prop(v, src, now) for k, v in cleaned.items() if v is not None}
-    res = await db().people.insert_one({**props, "tier": tier, "created_at": now,
-                                        "updated_at": now,
-                                        "schema_version": history.SCHEMA_VERSION})
+    doc: dict[str, Any] = {k: history.new_prop(v, src, now) for k, v in cleaned.items()
+                           if v is not None}
+    doc.update({"tier": tier, "created_at": now, "updated_at": now,
+                "schema_version": history.SCHEMA_VERSION, "rev": 1})
+    norm: dict[str, Any] = {}
+    await _normalize_into(doc, norm, now)
+    doc.update(norm)
+    res = await db().people.insert_one(doc)
     pid = str(res.inserted_id)
     await _after_write(pid)
     await activity.record("person.create", principal, pid,
-                          {"fields": sorted(props), "src": src.kind})
+                          {"fields": sorted(k for k in cleaned if cleaned[k] is not None),
+                           "src": src.kind})
     return await get(pid)
 
 
@@ -184,29 +243,94 @@ async def update(principal: Principal, person_id: str, values: dict[str, Any],
         raise PersonError("name cannot be removed")
     if tier is not None:
         _check_tier(tier)
-    doc = await db().people.find_one({"_id": oid})
-    if doc is None:
-        return None
     src = source or Source.for_rest(principal)
-    now = datetime.now(UTC)
 
-    to_set, changed, removed, unchanged = history.apply(doc, cleaned, src, now,
-                                                        fields.SYSTEM_FIELDS)
-    if tier is not None and tier != doc.get("tier"):
-        to_set["tier"] = tier
-        changed.append("tier")
-
-    if changed or removed:
-        to_set["updated_at"] = now
-    if to_set or doc.get("schema_version") != history.SCHEMA_VERSION:
+    for _ in range(CAS_RETRIES):
+        doc = await db().people.find_one({"_id": oid})
+        if doc is None:
+            return None
+        now = datetime.now(UTC)
+        to_set, changed, removed, unchanged = history.apply(doc, cleaned, src, now,
+                                                            fields.SYSTEM_FIELDS)
+        if tier is not None and tier != doc.get("tier"):
+            to_set["tier"] = tier
+            changed.append("tier")
+        if changed or removed:
+            to_set["updated_at"] = now
+        await _normalize_into(doc, to_set, now)
+        if not to_set and doc.get("schema_version") == history.SCHEMA_VERSION:
+            break
         to_set["schema_version"] = history.SCHEMA_VERSION
-        await db().people.update_one({"_id": oid}, {"$set": to_set})
+        if await _cas_write(oid, doc, to_set):
+            break
+    else:
+        raise ConflictError(f"person {person_id} is being modified concurrently; retry")
+
     if changed or removed:
         await _after_write(person_id)
     await activity.record("person.update", principal, person_id,
                           {"set": sorted(changed), "unset": sorted(removed),
                            "unchanged": sorted(unchanged), "src": src.kind})
     return await get(person_id)
+
+
+async def _write_norm(doc: dict, parsed: dict[str, normalize.Parsed], src: Source,
+                      now: datetime) -> dict[str, Any]:
+    """The `$set` that records `parsed` on `doc`'s typed properties (empty when nothing changes)."""
+    to_set: dict[str, Any] = {}
+    for key, p in parsed.items():
+        prop = doc.get(key)
+        sp = properties.spec(key)
+        if sp is None or sp.type not in NORMALISABLE or not history.is_prop(prop):
+            raise PersonError(f"{key!r} is not a typed property of this person")
+        new = history.append_norm(prop, p.value, src, now,
+                                  normalize.text_hash(history.current(prop)), p.flag)
+        if new is not None:
+            to_set[key] = new
+    return to_set
+
+
+async def update_norm(principal: Principal | None, person_id: str,
+                      parsed: dict[str, normalize.Parsed], source: Source) -> dict | None:
+    """Record normalised values (from the normaliser agent or a re-run of the parser) on a
+    person's typed properties. Returns the person, or None if not found. Value hooks do not run:
+    the text, and so the embeddings, are unchanged."""
+    oid = _oid(person_id)
+    for _ in range(CAS_RETRIES):
+        doc = await db().people.find_one({"_id": oid})
+        if doc is None:
+            return None
+        to_set = await _write_norm(doc, parsed, source, datetime.now(UTC))
+        if not to_set or await _cas_write(oid, doc, to_set):
+            break
+    else:
+        raise ConflictError(f"person {person_id} is being modified concurrently; retry")
+    await activity.record("person.normalize", principal, person_id,
+                          {"set": sorted(to_set), "src": source.kind})
+    return await get(person_id)
+
+
+async def normalize_all(page: int = 500, progress: Callable[[int], None] | None = None,
+                        force: bool = True) -> int:
+    """Run the parser over every document (free). With `force` (the default; a parser upgrade)
+    the parser's earlier results are redone and only writes that change something land; agent
+    decisions stay. Returns the number of documents written."""
+    written = 0
+    last = None
+    while True:
+        batch = await find({"_id": {"$gt": last}} if last else {}, sort=[("_id", 1)], limit=page)
+        if not batch:
+            return written
+        last = batch[-1]["_id"]
+        for doc in batch:
+            parsed = await normalize.document(doc, force=force)
+            if not parsed:
+                continue
+            to_set = await _write_norm(doc, parsed, NORMALIZE_SRC, datetime.now(UTC))
+            if to_set and await _cas_write(doc["_id"], doc, to_set):
+                written += 1
+        if progress:
+            progress(written)
 
 
 async def delete(principal: Principal, person_id: str) -> bool:
@@ -222,40 +346,92 @@ async def delete(principal: Principal, person_id: str) -> bool:
     return True
 
 
+# --- import -----------------------------------------------------------------------------------------
+
+async def _import_set(cur: dict | None, sid: str, rows: list[tuple[int, dict[str, Any]]],
+                      source_file: str, tier: str, now: datetime) -> dict[str, Any]:
+    """The `$set` that applies a source_id's rows (in file order) to its current document."""
+    set_doc: dict[str, Any] = {}
+    for row_no, values in rows:
+        src = Source("import", source_file, f"row {row_no}")
+        base = {**(cur or {}), **set_doc}
+        to_set, changed, _, _ = history.apply(base, values, src, now, fields.SYSTEM_FIELDS)
+        set_doc.update(to_set)
+        set_doc["source"] = {"file": source_file, "source_id": sid, "row": row_no}
+        if changed or cur is None:
+            set_doc["updated_at"] = now
+    set_doc.update({"tier": tier, "schema_version": history.SCHEMA_VERSION})
+    await _normalize_into(cur or {}, set_doc, now)
+    return set_doc
+
+
 async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_file: str,
                           tier: str, now: datetime) -> tuple[int, int]:
     """Bulk upsert of imported rows `(source_id, row_no, values)` keyed by (file, source_id).
     The caller has created the properties the rows use (`properties.ensure`).
 
     Rows sharing a source_id fold into one update applied in file order, so no row's entry is lost
-    to a later $set of the same property. Returns (inserted, updated). Values are appended to the
-    field histories like any other write; unchanged values append nothing and leave `updated_at`.
+    to a later $set of the same property. Each write is compare-and-set on the document's `rev`
+    (a concurrent edit makes the upsert collide on the unique source index, and that row is
+    redone on its own). Returns (inserted, updated). Values are appended to the field histories
+    like any other write; unchanged values append nothing and leave `updated_at`.
     """
     inserted = updated = 0
-    system = fields.SYSTEM_FIELDS
     for start in range(0, len(rows), WRITE_BATCH):
         chunk = rows[start:start + WRITE_BATCH]
-        existing = {d["source"]["source_id"]: d for d in await find(
-            {"source.file": source_file, "source.source_id": {"$in": [sid for sid, _, _ in chunk]}})}
-        pending: dict[str, dict[str, Any]] = {}
+        groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
         for source_id, row_no, values in chunk:
-            src = Source("import", source_file, f"row {row_no}")
-            cur = pending.get(source_id) or existing.get(source_id)
-            to_set, changed, _, _ = history.apply(cur or {}, values, src, now, system)
-            set_doc: dict[str, Any] = {
-                **(pending.get(source_id) or {}), **to_set, "tier": tier,
-                "source": {"file": source_file, "source_id": source_id, "row": row_no},
-                "schema_version": history.SCHEMA_VERSION}
-            if changed or cur is None:
-                set_doc["updated_at"] = now
-            pending[source_id] = set_doc
-        ops = [UpdateOne({"source.file": source_file, "source.source_id": sid},
-                         {"$set": set_doc, "$setOnInsert": {"created_at": now}}, upsert=True)
-               for sid, set_doc in pending.items()]
-        res = await db().people.bulk_write(ops, ordered=False)
-        inserted += res.upserted_count
-        updated += res.matched_count
+            groups.setdefault(source_id, []).append((row_no, values))
+        existing = {d["source"]["source_id"]: d for d in await find(
+            {"source.file": source_file, "source.source_id": {"$in": list(groups)}})}
+
+        ops, sids = [], []
+        for sid, group in groups.items():
+            cur = existing.get(sid)
+            set_doc = await _import_set(cur, sid, group, source_file, tier, now)
+            ops.append(UpdateOne({"source.file": source_file, "source.source_id": sid,
+                                  **_rev_filter(cur)},
+                                 {"$set": set_doc, "$setOnInsert": {"created_at": now},
+                                  "$inc": {"rev": 1}}, upsert=True))
+            sids.append(sid)
+        try:
+            res = await db().people.bulk_write(ops, ordered=False)
+            inserted += res.upserted_count
+            updated += res.matched_count
+            failed: list[str] = []
+        except BulkWriteError as e:
+            errors = e.details.get("writeErrors", [])
+            if any(we.get("code") != 11000 for we in errors):
+                raise
+            inserted += e.details.get("nUpserted", 0)
+            updated += e.details.get("nMatched", 0)
+            failed = [sids[we["index"]] for we in errors]
+        for sid in failed:   # lost the race with another writer: redo this source_id alone
+            inserted_now, updated_now = await _reimport_one(sid, groups[sid], source_file, tier,
+                                                            now)
+            inserted += inserted_now
+            updated += updated_now
     return inserted, updated
+
+
+async def _reimport_one(sid: str, group: list[tuple[int, dict[str, Any]]], source_file: str,
+                        tier: str, now: datetime) -> tuple[int, int]:
+    key = {"source.file": source_file, "source.source_id": sid}
+    for _ in range(CAS_RETRIES):
+        cur = await db().people.find_one(key)
+        set_doc = await _import_set(cur, sid, group, source_file, tier, now)
+        try:
+            res = await db().people.update_one(
+                {**key, **_rev_filter(cur)},
+                {"$set": set_doc, "$setOnInsert": {"created_at": now}, "$inc": {"rev": 1}},
+                upsert=True)
+        except DuplicateKeyError:   # the document changed or appeared meanwhile: read again
+            continue
+        if res.upserted_id is not None:
+            return 1, 0
+        if res.matched_count:
+            return 0, 1
+    raise ConflictError(f"row {sid!r} of {source_file} is being modified concurrently; retry")
 
 
 async def _after_write(person_id: str) -> None:
@@ -293,7 +469,8 @@ async def migrate_legacy(dry_run: bool = False, page: int = 500) -> int:
                 continue
             res = await people.update_one(
                 {"_id": doc["_id"], "schema_version": {"$ne": history.SCHEMA_VERSION}},
-                {"$set": {**upgrades, "schema_version": history.SCHEMA_VERSION}})
+                {"$set": {**upgrades, "schema_version": history.SCHEMA_VERSION},
+                 "$inc": {"rev": 1}})
             migrated += res.modified_count
     if migrated and not dry_run:
         log.info("migrated %d people documents to field history", migrated)

@@ -13,8 +13,6 @@ from typing import Any
 
 from app import fields, people, properties
 
-_NUMBER = re.compile(r"^-?\$?\d[\d,]*(\.\d+)?$")
-_NEVER_NUMERIC = re.compile(r"(^|_)(id|phone|phones|zip|postal|whatsapp)($|_)")
 _LIST_SEPARATORS = re.compile(r"\s*(?:\n|;|\s\|\s)\s*")
 # Free text that often contains commas/newlines but is never a list.
 _PROSE = re.compile(r"(^|_)(bio|bios|note|notes|description|message|messages|summary|liner|"
@@ -35,17 +33,6 @@ class ImportResult:
     ids: list[str] = field(default_factory=list)
 
 
-def _to_number(s: str) -> int | float | None:
-    if not _NUMBER.match(s):
-        return None
-    s = s.replace("$", "").replace(",", "")
-    try:
-        f = float(s)
-    except ValueError:
-        return None
-    return int(f) if f.is_integer() and "." not in s else f
-
-
 def _looks_like_list(values: list[str], split) -> bool:
     """A column is a list when a good share of values split into several short items."""
     multi = [parts for v in values if len(parts := [p for p in split(v) if p.strip()]) > 1]
@@ -60,21 +47,17 @@ def _split_commas(values: list[str]) -> bool:
 
 
 def _column_kind(key: str, values: list[str], ptype: str | None) -> str:
-    """How to coerce a column: number | list | list_comma | text. A typed property decides; a
-    free-text column (no spec) is inspected for numbers and lists."""
+    """How a column's cells are stored: list | list_comma | text. Cells keep their text as
+    entered (typed properties get a normalised value from app.normalize at write time); list
+    types are split into items, and a free-text column (no spec) is inspected for lists."""
     if not values:
         return "text"
-    if ptype == "number":
-        return "number"
     if ptype in ("list", "enum_list"):
         return "list_comma" if _split_commas(values) else "list"
     if ptype in ("url", "contact"):      # several per cell is common: "a@x.io; b@x.io"
         return "list" if _looks_like_list(values, _LIST_SEPARATORS.split) else "text"
     if ptype is not None:
         return "text"
-    if not _NEVER_NUMERIC.search(key) and \
-            sum(_to_number(v) is not None for v in values) >= 0.9 * len(values):
-        return "number"
     if _PROSE.search(key):
         return "text"
     if _looks_like_list(values, _LIST_SEPARATORS.split):
@@ -85,9 +68,6 @@ def _column_kind(key: str, values: list[str], ptype: str | None) -> str:
 
 
 def _coerce(value: str, kind: str) -> Any:
-    if kind == "number":
-        n = _to_number(value)
-        return value if n is None else n
     if kind == "list":
         return [p for p in _LIST_SEPARATORS.split(value) if p]
     if kind == "list_comma":

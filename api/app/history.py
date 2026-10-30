@@ -4,8 +4,14 @@ Every non-system field on a person is a *property*: `{"v": <current value>, "h":
 `h` is append-only (oldest first) and `v` is a cached copy of `h[-1]["v"]` so Mongo queries, sorts
 and indexes work on `field.v`. An entry is `{"v": value | None, "ts": datetime, "src": {...}}`;
 `v: None` is a tombstone (the field was removed). `src` records where the value came from:
-`{"kind": ui|api|mcp|agent|import|legacy, "by": <user, agent or file>, "ref": <key/run/row>}`.
+`{"kind": ui|api|mcp|agent|import|legacy|system, "by": <user, agent or file>, "ref": <key/run/row>}`.
 Not to be confused with the document-level `source` sub-document the CSV importer writes.
+
+A typed property (app.property_specs) also carries the normalised form of its text:
+`"norm": {"v": <typed value | None>, "flag"?: unmapped | non_normalizable, "h": [entries]}` with
+the same append-only history; each norm entry has `of`, a hash of the text it was derived from
+(app.normalize), so a re-normalisation is only needed when the text changes. `v` is always the
+text as entered; `norm.v` is what filters and sorts use.
 
 Documents written before this module existed hold bare scalars; every reader here tolerates them
 (`entries()` synthesises one entry) and `upgrade_doc()` (run by `people.migrate_legacy`) wraps them
@@ -22,7 +28,8 @@ from app.auth import Principal
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
-SourceKind = Literal["ui", "api", "mcp", "agent", "import", "legacy"]
+SourceKind = Literal["ui", "api", "mcp", "agent", "import", "legacy", "system"]
+NormFlag = Literal["unmapped", "non_normalizable"]
 
 
 @dataclass(frozen=True)
@@ -101,7 +108,7 @@ def append(prop: Any, value: Any, src: Source, ts: datetime) -> dict | None:
         prop = {"v": prop, "h": [{"v": prop}]}
     if same(prop.get("v"), value):
         return None
-    return {"v": value, "h": [*prop["h"], new_entry(value, src, ts)]}
+    return {**prop, "v": value, "h": [*prop["h"], new_entry(value, src, ts)]}   # keeps `norm`
 
 
 def apply(doc: dict, changes: dict[str, Any], src: Source, now: datetime,
@@ -161,13 +168,81 @@ def flatten(doc: dict, system: frozenset[str]) -> dict[str, Any]:
     return out
 
 
+def jsonable(value: Any) -> Any:
+    """Values as the API returns them: datetimes as ISO strings, containers element-wise."""
+    if isinstance(value, list):
+        return [jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: jsonable(v) for k, v in value.items()}
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
+def _public_entry(e: dict) -> dict:
+    pub = dict(e)
+    pub["v"] = jsonable(pub.get("v"))
+    if "ts" in pub:
+        pub["ts"] = jsonable(pub["ts"])
+    return pub
+
+
 def public_entries(prop: Any) -> list[dict]:
-    out = []
-    for e in entries(prop):
-        pub = dict(e)
-        ts = pub.get("ts")
-        if hasattr(ts, "isoformat"):
-            pub["ts"] = ts.isoformat()
-        out.append(pub)
+    return [_public_entry(e) for e in entries(prop)]
+
+
+# --- normalised values ----------------------------------------------------------------------------
+
+def norm_of(prop: Any) -> dict | None:
+    return prop.get("norm") if is_prop(prop) else None
+
+
+def norm_value(prop: Any) -> Any:
+    n = norm_of(prop)
+    return n.get("v") if n else None
+
+
+def norm_flag(prop: Any) -> str | None:
+    n = norm_of(prop)
+    return n.get("flag") if n else None
+
+
+def norm_entries(prop: Any) -> list[dict]:
+    n = norm_of(prop)
+    return list(n.get("h", [])) if n else []
+
+
+def append_norm(prop: dict, value: Any, src: Source, ts: datetime, of: str,
+                flag: str | None = None) -> dict | None:
+    """The property with a normalised value appended, or None when the last norm entry already
+    derives from the same text (`of`) with the same value and flag."""
+    norm = prop.get("norm") or {}
+    h = list(norm.get("h", []))
+    if h and h[-1].get("of") == of and same(norm.get("v"), value) and norm.get("flag") == flag:
+        return None
+    entry: dict[str, Any] = {"v": value, "ts": ts, "src": src.doc(), "of": of}
+    new: dict[str, Any] = {"v": value, "h": [*h, entry]}
+    if flag:
+        entry["flag"] = new["flag"] = flag
+    return {**prop, "norm": new}
+
+
+def flatten_norm(doc: dict, system: frozenset[str]) -> dict[str, Any]:
+    """{key: normalised value} for present (non-tombstone) properties that have one."""
+    out = {}
+    for key, prop in doc.items():
+        if key in system or current(prop) is None:
+            continue
+        nv = norm_value(prop)
+        if nv is not None:
+            out[key] = nv
     return out
+
+
+def norm_flags(doc: dict, system: frozenset[str]) -> dict[str, str]:
+    """{key: flag} for present properties whose text could not be (fully) normalised."""
+    return {key: flag for key, prop in doc.items()
+            if key not in system and current(prop) is not None and (flag := norm_flag(prop))}
+
+
+def public_norm_entries(prop: Any) -> list[dict]:
+    return [_public_entry(e) for e in norm_entries(prop)]
 

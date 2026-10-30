@@ -9,7 +9,8 @@ import re
 from typing import Any
 
 SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated_at",
-                           "schema_version", "history"})
+                           "schema_version", "rev", "history", "norm", "norm_flags",
+                           "history_norm"})
 TIERS = ("member", "plus_one")
 RESERVED_PREFIX = "col_"      # a CSV header that slugifies to a system key becomes col_<key>
 
@@ -33,6 +34,12 @@ def label_for(key: str) -> str:
     if key.startswith(RESERVED_PREFIX) and len(key) > len(RESERVED_PREFIX):
         key = key[len(RESERVED_PREFIX):]
     return key.replace("_", " ").capitalize()
+
+
+def fold(text: str) -> str:
+    """Case-, whitespace- and punctuation-insensitive form of a short text, for matching enum
+    values and their aliases: fold("Yes-future events") == fold("yes, future events")."""
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
 def text_of(value: Any) -> str:

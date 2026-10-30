@@ -27,6 +27,7 @@ export default function PropertiesPage() {
               <th>Type</th>
               <th>Values</th>
               <th>Coverage</th>
+              <th>Not normalised</th>
               <th>Origin</th>
             </tr>
           </thead>
@@ -55,6 +56,17 @@ export default function PropertiesPage() {
                     </div>
                     <span className="w-14 text-right tabular-nums text-xs text-slate-500">{p.count.toLocaleString()}</span>
                   </div>
+                </td>
+                <td className="text-xs text-slate-500">
+                  {p.normalisable && (p.unmapped > 0 || p.non_normalizable > 0) ? (
+                    <span title={`${p.unmapped} not recognised · ${p.non_normalizable} say there is no value`}>
+                      {p.unmapped > 0 && <span className="text-amber-700">{p.unmapped} unmapped</span>}
+                      {p.unmapped > 0 && p.non_normalizable > 0 && ' · '}
+                      {p.non_normalizable > 0 && <span>{p.non_normalizable} n/a</span>}
+                    </span>
+                  ) : (
+                    <span className="text-slate-300">—</span>
+                  )}
                 </td>
                 <td className="text-xs text-slate-500">{ORIGIN[p.source]}</td>
               </tr>

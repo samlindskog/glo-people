@@ -38,7 +38,8 @@ async def test_import_registry_and_coercion(writer):
     assert "id" not in fl
 
     ada = await db().people.find_one({"name.v": "Ada Okafor"})
-    assert ada["tier"] == "member" and ada["mrr"]["v"] == 12000
+    assert ada["tier"] == "member" and ada["mrr"]["v"] == "$12,000"
+    assert ada["mrr"]["norm"]["v"] == 12000 and ada["rev"] == 1
     assert ada["sectors"]["v"] == ["fintech", "payments"]
     assert ada["emails"]["v"] == ["ada@x.io", "ada2@x.io"]
     assert ada["source"]["source_id"] == "m1" and ada["schema_version"] == 2

@@ -6,10 +6,12 @@ import { useAuth } from '../auth'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import PersonEditor from '../components/PersonEditor'
 import { formatDate, formatValue } from '../lib'
-import type { FieldEntry } from '../types'
+import type { FieldEntry, NormFlag } from '../types'
 import { TierBadge } from './People'
 
-const SYSTEM = new Set(['id', 'tier', 'name', 'source', 'created_at', 'updated_at', 'schema_version', 'history'])
+const SYSTEM = new Set(['id', 'tier', 'name', 'source', 'created_at', 'updated_at', 'schema_version', 'history', 'norm', 'norm_flags', 'history_norm'])
+
+const FLAG_LABEL: Record<NormFlag, string> = { unmapped: 'not recognised', non_normalizable: 'no value' }
 
 export default function PersonPage() {
   const { id = '' } = useParams()
@@ -92,6 +94,7 @@ export default function PersonPage() {
               </div>
               <div>
                 <FieldValue value={p[k]} type={labels[k]?.type} />
+                <Normalised value={p.norm[k]} flag={p.norm_flags[k]} />
                 <History entries={history[k] ?? []} />
               </div>
             </div>
@@ -128,6 +131,25 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
     )
   }
   return <div className="whitespace-pre-wrap break-words">{s}</div>
+}
+
+/** The normalised value of a typed property, or why there is none. */
+function Normalised({ value, flag }: { value: unknown; flag?: NormFlag }) {
+  if (value === undefined && !flag) return null
+  return (
+    <div className="mt-0.5 text-xs text-slate-500" data-testid="normalised">
+      {value !== undefined && (
+        <span title="Normalised value (used by filters and sorts)">
+          → <span className="text-slate-700">{formatValue(value)}</span>
+        </span>
+      )}
+      {flag && (
+        <span className={`badge ml-1 ${flag === 'unmapped' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`} title={flag}>
+          {FLAG_LABEL[flag]}
+        </span>
+      )}
+    </div>
+  )
 }
 
 /** Who wrote a value and when: shown when a field has more than one entry or came from an agent. */

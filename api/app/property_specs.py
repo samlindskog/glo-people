@@ -17,6 +17,15 @@ PropertyType = Literal["text", "keyword", "url", "contact", "number", "boolean",
 EMBEDDABLE: frozenset[str] = frozenset({"text", "list"})
 NORMALISABLE: frozenset[str] = frozenset({"number", "boolean", "date", "enum", "enum_list"})
 
+# Filter operators by type. Text operators always run on the text as entered (`field.v`); eq/ne/in
+# and the range operators run on the normalised value of a normalisable property.
+TEXT_OPS = ("eq", "ne", "contains", "starts_with", "regex", "in", "exists")
+RANGE_OPS = ("gt", "gte", "lt", "lte")
+
+
+def filter_ops(ptype: str) -> tuple[str, ...]:
+    return TEXT_OPS + (RANGE_OPS if ptype in ("number", "date") else ())
+
 
 @dataclass(frozen=True)
 class Spec:
