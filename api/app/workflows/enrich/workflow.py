@@ -134,8 +134,12 @@ async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
 async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     """Step 1: the person's FullEnrich record (exact LinkedIn URL, 5 credits; a miss is free)."""
     li = linkedin_profile(deps.current("linkedin"))
-    company_domain = host_of(deps.current("company_website")) if isinstance(
-        deps.current("company_website"), str) else ""
+    # Thorough mode can resolve a person by name + employer domain when the record's website is
+    # the company's (its host names the company).
+    company = deps.current("company")
+    site = deps.current("website")
+    company_domain = host_of(site) if isinstance(site, str) and isinstance(company, str) \
+        and host_mentions(host_of(site), company) else ""
     if not li and not (st.options.mode == "thorough" and st.name and company_domain):
         deps.skip("linkedin", "no linkedin.com/in URL on the record" + st.frugal_note)
         return
@@ -287,11 +291,9 @@ def _company_candidate(deps: WorkflowDeps, st: State, company: str) -> str | Non
     """The cheapest plausible company website: profile → record → the person's own domain."""
     if st.profile and st.profile.current_company and st.profile.current_company.website:
         return normalize_url(st.profile.current_company.website)
-    if isinstance(deps.current("company_website"), str):
-        return normalize_url(deps.current("company_website"))
-    site = deps.current("website")
-    if isinstance(site, str) and host_mentions(host_of(site), company):
-        return normalize_url(site)
+    for site in [deps.current("website"), *deps.history_values("website")]:
+        if isinstance(site, str) and host_mentions(host_of(site), company):
+            return normalize_url(site)
     return None
 
 
@@ -331,12 +333,15 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
     st.result["company_evidence"] = {"confidence": summary.confidence,
                                      "evidence_url": summary.evidence_url}
     website = normalize_url(summary.website)
-    values: dict[str, Any] = {"company_website": website}
+    # One `website` property holds the person's and the company's sites as history entries; the
+    # company site becomes current only when it is not already in the history.
+    values: dict[str, Any] = {}
+    if website and not _has_url(deps, "website", website):
+        values["website"] = website
     # The summary goes on `company_description`, whose earlier values (e.g. the imported one)
     # stay in its history. A reworded summary of the same website is not new information: only
-    # write one when the record has no description yet or the company website changed.
-    same_site = url_key(deps.current("company_website")) == url_key(website)
-    if not (same_site and deps.current("company_description")):
+    # write one when the record has no description yet or the company website is new.
+    if "website" in values or not deps.current("company_description"):
         values["company_description"] = _clip(summary.summary, MAX_SUMMARY_CHARS)
     else:
         deps.skip("company", "summary kept: same website as before")

@@ -226,12 +226,12 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "github_summary": "Ada Okafor — payments rails. 6 public repos, 120 followers, at PayRail. "
                           "Top repos: rails-sdk (★48), settle (★12). Languages: Python, Go.",
         "related_links": ["https://twitter.com/adaokafor", "https://rails.substack.com"],
-        "company_website": "https://payrail.io",
+        "website": "https://payrail.io",
         "company_description": "PayRail provides payments infrastructure for merchants in West "
                            "Africa, with next-day local settlement.",
     }
-    # Her site, location and company are already on the record: not re-added.
-    assert not {"website", "location", "company"} & set(res["written"])
+    # Her own site, location and company are already on the record: not re-added.
+    assert not {"location", "company"} & set(res["written"])
     assert item["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
     assert item["credits"] == run["credits_used"]
     assert [c for c in FakeFirecrawl.calls if c[0] == "search"] == []
@@ -244,7 +244,9 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                    "ref": f"run:{run['id']}/item:{item['id']}"}
     assert person["history"]["company_description"][0]["src"]["by"] == "enrich/company"
     assert person["history"]["github_summary"][0]["src"]["by"] == "enrich/github"
-    assert len(person["history"]["website"]) == 1 and len(person["history"]["company"]) == 1
+    assert [e["v"] for e in person["history"]["website"]] == ["www.adaokafor.dev",
+                                                              "https://payrail.io"]
+    assert len(person["history"]["company"]) == 1
     fl = {f["key"]: f for f in (await reader.get("/api/fields")).json()}
     assert fl["company_description"]["embed"] and fl["github_summary"]["embed"]
     assert not fl["github"]["embed"] and not fl["related_links"]["embed"]
