@@ -83,8 +83,10 @@ prod-embed:
 	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
 
 # Prod never runs alembic on its own: run this after deploying a release that adds a migration.
+# Applies the schema, wraps legacy values into histories, syncs property-name and passage vectors,
+# and (re)parses the normalised values of typed properties.
 prod-migrate:
-	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 sh -c 'alembic upgrade head && python -m app.cli migrate-history && python -m app.cli embed'
+	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 sh -c 'alembic upgrade head && python -m app.cli migrate-history && python -m app.cli embed && python -m app.cli normalize --all'
 
 prod-status:
 	ssh -t $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'
