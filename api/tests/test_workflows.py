@@ -314,6 +314,23 @@ async def test_run_credit_cap_stops_the_run(writer, people):
     assert skipped["error"] == "run credit cap reached"
 
 
+async def test_run_cap_above_one_item_lets_a_bigger_batch_finish(writer, people):
+    # cap 100 < concurrency (3) x per-item cap (60): items wait for real spend instead of being
+    # skipped on worst-case reservations.
+    run = await run_for(writer, [people["Ada Okafor"], people["Bo Chen"], people["Cy Diaz"],
+                                 people["Dee Evans"]], max_credits=100)
+    assert {it["status"] for it in run["items"]} == {"done"}, run["items"]
+    assert "stopped_reason" not in run["summary"]
+
+
+def test_split_urls_handles_lists_and_separators():
+    from app.workflows.enrich.workflow import split_urls
+    assert split_urls("https://altschoolafrica.com/ , https:/Talentql.com") == [
+        "https://altschoolafrica.com/", "https:/Talentql.com"]
+    assert split_urls(["a.com; b.com", "c.com"]) == ["a.com", "b.com", "c.com"]
+    assert split_urls("no url here") == [] and split_urls(42) == []
+
+
 async def test_bulk_selector_and_listing(writer, people):
     r = await writer.post("/api/workflows/enrich/runs", json={"all_with_field": "linkedin"})
     assert r.status_code == 201 and r.json()["total"] == 3

@@ -7,6 +7,7 @@ writes append history entries attributed to `enrich/<agent>`.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -154,12 +155,22 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     })
 
 
+def split_urls(value: Any) -> list[str]:
+    """A field may hold several URLs in one string ("a.com , b.com"), a list, or one URL."""
+    if isinstance(value, list):
+        return [u for v in value for u in split_urls(v)]
+    if not isinstance(value, str):
+        return []
+    return [p for p in re.split(r"[\s,;|]+", value) if p and "." in p]
+
+
 def _site_candidates(deps: WorkflowDeps, st: State) -> list[str]:
-    raws = [*(st.profile.personal_sites if st.profile else []), deps.current("website"),
-            *deps.history_values("website")]
+    raws = [*(st.profile.personal_sites if st.profile else []),
+            *split_urls(deps.current("website")),
+            *(u for v in deps.history_values("website") for u in split_urls(v))]
     out: list[str] = []
     for raw in raws:
-        n = normalize_url(raw) if isinstance(raw, str) else None
+        n = normalize_url(raw)
         if n and is_html_candidate(n) and not is_social(n) and url_key(n) not in map(url_key, out):
             out.append(n)
     return out

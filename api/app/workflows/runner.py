@@ -172,34 +172,41 @@ async def _run(run_id: int, principal: Principal) -> None:
     in_flight = 0
     started = 0
     stopped: str | None = None
-    lock = asyncio.Lock()
+    cond = asyncio.Condition()
 
     async def one(item: dict) -> None:
         nonlocal credits_used, in_flight, started, stopped
         async with sem:
-            async with lock:
-                if run_id in _cancelled or stopped:
-                    await _mark(item["id"], "skipped", error=stopped or "cancelled")
-                    return
-                # Reserve each in-flight item's worst case so concurrent items cannot overshoot
-                # the run cap together. The first item always runs (a cap below one item's own
-                # cap still enriches one person), so the overshoot is at most one per-item cap.
-                reserved = credits_used + (in_flight + 1) * per_item_cap
-                if run_cap and started and reserved > run_cap:
-                    stopped = "credit cap"
-                    await _mark(item["id"], "skipped", error="run credit cap reached")
-                    return
+            async with cond:
+                # Each in-flight item reserves its worst case, so the run can overshoot the cap
+                # by at most one per-item cap. An item that does not fit yet WAITS for running
+                # ones to report their real spend; it is only skipped once the cap is really
+                # used up (or the run stopped). The first item always runs.
+                while True:
+                    if run_id in _cancelled or stopped:
+                        await _mark(item["id"], "skipped", error=stopped or "cancelled")
+                        return
+                    if run_cap and started and credits_used >= run_cap:
+                        stopped = "credit cap"
+                        await _mark(item["id"], "skipped", error="run credit cap reached")
+                        return
+                    if not run_cap or not started or \
+                            credits_used + in_flight * per_item_cap < run_cap:
+                        break
+                    await cond.wait()
                 started += 1
                 in_flight += 1
             try:
                 credits = await _run_item(spec, options, run_id, item, principal)
             finally:
-                async with lock:
+                async with cond:
                     in_flight -= 1
-            async with lock:
+                    cond.notify_all()
+            async with cond:
                 credits_used += max(credits, 0)
                 if credits == -1:                 # account out of credits: stop the run
                     stopped = "firecrawl credits exhausted"
+                cond.notify_all()
 
     await asyncio.gather(*(one(it) for it in items))
     if run_id in _cancelled:
