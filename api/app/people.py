@@ -1,9 +1,11 @@
 """The person document service: the only writer of the `people` collection.
 
 Field values are never overwritten: every write appends a time-stamped, source-tagged entry to the
-field's history (see app.history) and refreshes the cached current value. Other systems read
-through the helpers here (`fetch`, `find`, `count`, `find_ids`) and react to writes through
-`on_write` hooks that the composition root registers (e.g. embeddings).
+field's history (see app.history) and refreshes the cached current value. Writes accept only
+properties that exist (app.properties); the importer creates properties before it calls
+`upsert_imported`. Other systems read through the helpers here (`fetch`, `find`, `count`,
+`find_ids`, `coverage`, `value_counts`) and react to writes through `on_write` hooks that the
+composition root registers (e.g. embeddings).
 """
 
 import logging
@@ -14,7 +16,7 @@ from typing import Any
 from bson import ObjectId
 from pymongo import UpdateOne
 
-from app import activity, fields, history, mongo
+from app import activity, fields, history, mongo, properties
 from app.auth import Principal
 from app.history import Source
 from app.mongo import db
@@ -85,6 +87,33 @@ async def find_ids(query: dict, limit: int = 0) -> list[str]:
     return [str(d["_id"]) for d in docs]
 
 
+async def coverage() -> dict[str, int]:
+    """{property key: number of people whose current value is present (not a tombstone)}."""
+    pipeline = [
+        {"$project": {"kv": {"$objectToArray": "$$ROOT"}}},
+        {"$unwind": "$kv"},
+        {"$match": {"kv.v.v": {"$exists": True, "$nin": [None, "", []]}}},
+        {"$group": {"_id": "$kv.k", "count": {"$sum": 1}}},
+    ]
+    return {d["_id"]: d["count"] async for d in await db().people.aggregate(pipeline)}
+
+
+async def value_counts(key: str, limit: int = 200) -> list[tuple[Any, int]]:
+    """The most common current values of one property (list items counted individually)."""
+    if not fields.valid_key(key):
+        raise PersonError(f"invalid field key {key!r}")
+    path = f"{key}.v"
+    pipeline = [
+        {"$match": {path: {"$exists": True, "$nin": [None, ""]}}},
+        {"$project": {"v": f"${path}"}},
+        {"$unwind": "$v"},
+        {"$group": {"_id": "$v", "n": {"$sum": 1}}},
+        {"$sort": {"n": -1, "_id": 1}},
+        {"$limit": limit},
+    ]
+    return [(d["_id"], d["n"]) async for d in await db().people.aggregate(pipeline)]
+
+
 # --- writes ---------------------------------------------------------------------------------------
 
 def _check_value(key: str, value: Any) -> Any:
@@ -101,12 +130,17 @@ def _check_value(key: str, value: Any) -> Any:
     raise PersonError(f"field {key!r}: values must be strings, numbers, booleans or lists of them")
 
 
-def _clean(changes: dict[str, Any]) -> dict[str, Any]:
-    """Validate keys and normalise values. None / empty means remove the field."""
+async def _clean(changes: dict[str, Any]) -> dict[str, Any]:
+    """Validate keys against the property catalog and normalise values. None / empty means
+    remove the field. Unknown keys are refused: properties are created only by the importer and
+    the storage agent through `properties.ensure`."""
+    known = await properties.known_keys()
     out = {}
     for key, value in changes.items():
         if not fields.valid_key(key):
             raise PersonError(f"invalid field key {key!r} (lowercase letters, digits, underscores)")
+        if key not in known:
+            raise PersonError(f"unknown property {key!r}; the catalog is at GET /api/properties")
         out[key] = _check_value(key, value)
     return out
 
@@ -125,7 +159,7 @@ def _check_tier(tier: str) -> None:
 async def create(principal: Principal, tier: str, values: dict[str, Any],
                  source: Source | None = None) -> dict:
     _check_tier(tier)
-    cleaned = _clean(values)
+    cleaned = await _clean(values)
     if not cleaned.get("name"):
         raise PersonError("name is required")
     src = source or Source.for_rest(principal)
@@ -135,7 +169,7 @@ async def create(principal: Principal, tier: str, values: dict[str, Any],
                                         "updated_at": now,
                                         "schema_version": history.SCHEMA_VERSION})
     pid = str(res.inserted_id)
-    await _after_write(pid, {k: v for k, v in cleaned.items() if v is not None})
+    await _after_write(pid)
     await activity.record("person.create", principal, pid,
                           {"fields": sorted(props), "src": src.kind})
     return await get(pid)
@@ -145,7 +179,7 @@ async def update(principal: Principal, person_id: str, values: dict[str, Any],
                  tier: str | None = None, source: Source | None = None) -> dict | None:
     """Append new values to the person's fields. Returns the person, or None if not found."""
     oid = _oid(person_id)
-    cleaned = _clean(values)
+    cleaned = await _clean(values)
     if "name" in cleaned and cleaned["name"] is None:
         raise PersonError("name cannot be removed")
     if tier is not None:
@@ -167,9 +201,8 @@ async def update(principal: Principal, person_id: str, values: dict[str, Any],
     if to_set or doc.get("schema_version") != history.SCHEMA_VERSION:
         to_set["schema_version"] = history.SCHEMA_VERSION
         await db().people.update_one({"_id": oid}, {"$set": to_set})
-    written = {k: cleaned[k] for k in changed if k != "tier"}
     if changed or removed:
-        await _after_write(person_id, written)
+        await _after_write(person_id)
     await activity.record("person.update", principal, person_id,
                           {"set": sorted(changed), "unset": sorted(removed),
                            "unchanged": sorted(unchanged), "src": src.kind})
@@ -192,6 +225,7 @@ async def delete(principal: Principal, person_id: str) -> bool:
 async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_file: str,
                           tier: str, now: datetime) -> tuple[int, int]:
     """Bulk upsert of imported rows `(source_id, row_no, values)` keyed by (file, source_id).
+    The caller has created the properties the rows use (`properties.ensure`).
 
     Rows sharing a source_id fold into one update applied in file order, so no row's entry is lost
     to a later $set of the same property. Returns (inserted, updated). Values are appended to the
@@ -224,10 +258,7 @@ async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_fi
     return inserted, updated
 
 
-async def _after_write(person_id: str, written: dict[str, Any]) -> None:
-    if written:
-        await fields.register({k: [v] for k, v in written.items()})
-    await fields.refresh_counts()
+async def _after_write(person_id: str) -> None:
     for hook in _hooks:
         try:
             await hook(person_id)
@@ -271,6 +302,4 @@ async def migrate_legacy(dry_run: bool = False, page: int = 500) -> int:
         if "name_1" in indexes:
             await people.drop_index("name_1")
         await mongo.ensure_indexes()
-        if migrated:
-            await fields.refresh_counts()
     return migrated

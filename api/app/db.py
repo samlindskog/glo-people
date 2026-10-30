@@ -100,6 +100,16 @@ field_embeddings = Table(
     Index("ix_field_embeddings_field_tier", "field", "tier"),
 )
 
+property_embeddings = Table(
+    "property_embeddings",
+    metadata,
+    Column("key", String(128), primary_key=True),
+    Column("text", Text, nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("embedding", HALFVEC(get_settings().embedding_dims), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 workflow_runs = Table(
     "workflow_runs",
     metadata,

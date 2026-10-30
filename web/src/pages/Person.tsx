@@ -18,7 +18,7 @@ export default function PersonPage() {
   const navigate = useNavigate()
   const [editing, setEditing] = useState(false)
   const person = useQuery({ queryKey: ['person', id], queryFn: () => api.person(id) })
-  const fields = useQuery({ queryKey: ['fields'], queryFn: api.fields })
+  const properties = useQuery({ queryKey: ['properties'], queryFn: api.properties })
   const remove = useMutation({
     mutationFn: () => api.deletePerson(id),
     onSuccess: () => {
@@ -28,9 +28,9 @@ export default function PersonPage() {
   })
 
   if (person.error) return <ErrorNote error={person.error} />
-  if (!person.data || !fields.data) return <p className="text-sm text-slate-500">Loading…</p>
+  if (!person.data || !properties.data) return <p className="text-sm text-slate-500">Loading…</p>
   const p = person.data
-  const labels = Object.fromEntries(fields.data.map((f) => [f.key, f]))
+  const labels = Object.fromEntries(properties.data.map((f) => [f.key, f]))
   const keys = Object.keys(p).filter((k) => !SYSTEM.has(k)).sort()
   const history = p.history ?? {}
   const nameHistory = history.name ?? []
@@ -63,13 +63,13 @@ export default function PersonPage() {
       {editing ? (
         <PersonEditor
           person={p}
-          fields={fields.data}
+          properties={properties.data}
           onCancel={() => setEditing(false)}
           onSave={async (tier, changes) => {
             const updated = await api.updatePerson(id, changes, tier !== p.tier ? tier : undefined)
             qc.setQueryData(['person', id], updated)
             qc.invalidateQueries({ queryKey: ['search'] })
-            qc.invalidateQueries({ queryKey: ['fields'] })
+            qc.invalidateQueries({ queryKey: ['properties'] })
             setEditing(false)
           }}
         />
@@ -88,7 +88,7 @@ export default function PersonPage() {
             <div key={k} className="grid grid-cols-[12rem_1fr] gap-4 px-4 py-2.5 text-sm">
               <div className="text-slate-500" title={k}>
                 {labels[k]?.label ?? k}
-                {labels[k]?.embed && <span className="ml-1 text-xs text-brand-500" title="Embedded for semantic search">◆</span>}
+                {labels[k]?.embeddable && <span className="ml-1 text-xs text-brand-500" title="Embedded for semantic search">◆</span>}
               </div>
               <div>
                 <FieldValue value={p[k]} type={labels[k]?.type} />

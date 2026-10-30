@@ -19,7 +19,7 @@ test('API key works against /mcp and stops working once revoked', async ({ page,
   expect((await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } })).ok()).toBe(true)
   const tools = await (await rpc('tools/list')).json()
   const names = tools.result.tools.map((t: { name: string }) => t.name)
-  expect(names).toEqual(expect.arrayContaining(['search_people', 'get_person', 'list_fields', 'create_person']))
+  expect(names).toEqual(expect.arrayContaining(['search_people', 'get_person', 'list_properties', 'create_person']))
   const res = await (await rpc('tools/call', { name: 'search_people', arguments: { filters: [{ field: 'name', op: 'contains', value: 'a' }], limit: 1 } })).json()
   expect(res.result.isError ?? false).toBe(false)
 

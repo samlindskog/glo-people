@@ -8,8 +8,11 @@ APP = Path(__file__).resolve().parents[1] / "app"
 # Lower layers must not import higher ones. Each entry lists modules a module may NOT import.
 FORBIDDEN = {
     "people": {"embeddings", "search", "agents", "workflows", "importer"},
+    "properties": {"people", "embeddings", "search", "agents", "workflows", "importer", "normalize"},
+    "property_specs": {"properties", "people", "embeddings", "search", "agents", "workflows",
+                       "fields", "history", "mongo", "db", "config"},
     "history": {"people", "embeddings", "search", "agents", "workflows", "properties", "mongo"},
-    "fields": {"people", "embeddings", "search", "agents", "workflows"},
+    "fields": {"people", "embeddings", "search", "agents", "workflows", "properties"},
     "embedder": {"people", "embeddings", "search", "agents", "workflows", "fields", "history"},
     "embeddings": {"search", "agents", "workflows"},
     "search": {"agents", "workflows"},

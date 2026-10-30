@@ -1,19 +1,26 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { DEFAULT_SEARCH } from '../lib'
-import type { FieldInfo, SearchRequest } from '../types'
+import type { Property, SearchRequest } from '../types'
 import SearchForm from './SearchForm'
 
-const FIELDS: FieldInfo[] = [
-  { key: 'name', label: 'Name', type: 'text', embed: true, count: 10 },
-  { key: 'bio', label: 'Bio', type: 'text', embed: true, count: 8 },
-  { key: 'mrr', label: 'Mrr', type: 'number', embed: false, count: 3 },
+const prop = (p: Partial<Property> & Pick<Property, 'key' | 'label' | 'type' | 'embeddable' | 'count'>): Property => ({
+  values: [],
+  normalisable: false,
+  source: 'spec',
+  created_at: null,
+  ...p,
+})
+const PROPERTIES: Property[] = [
+  prop({ key: 'name', label: 'Name', type: 'keyword', embeddable: false, count: 10 }),
+  prop({ key: 'bio', label: 'Bio', type: 'text', embeddable: true, count: 8 }),
+  prop({ key: 'mrr', label: 'MRR', type: 'number', embeddable: false, normalisable: true, count: 3 }),
 ]
 
 test('builds literal filters and a semantic query', async () => {
   const user = userEvent.setup()
   let got: SearchRequest | null = null
-  render(<SearchForm initial={DEFAULT_SEARCH} fields={FIELDS} onSearch={(r) => (got = r)} />)
+  render(<SearchForm initial={DEFAULT_SEARCH} properties={PROPERTIES} onSearch={(r) => (got = r)} />)
 
   await user.click(screen.getByRole('button', { name: '+ Add filter' }))
   await user.selectOptions(screen.getByLabelText('Filter field'), 'mrr')
@@ -39,11 +46,12 @@ test('builds literal filters and a semantic query', async () => {
   })
 })
 
-test('non-embedded fields are not offered for semantic search', async () => {
+test('only embeddable properties are offered for semantic search', async () => {
   const user = userEvent.setup()
-  render(<SearchForm initial={DEFAULT_SEARCH} fields={FIELDS} onSearch={() => {}} />)
+  render(<SearchForm initial={DEFAULT_SEARCH} properties={PROPERTIES} onSearch={() => {}} />)
   await user.click(screen.getByLabelText('Semantic search'))
   const group = screen.getByRole('group', { name: 'Semantic fields' })
   expect(group).toHaveTextContent('Bio')
-  expect(group).not.toHaveTextContent('Mrr')
+  expect(group).not.toHaveTextContent('MRR')
+  expect(group).not.toHaveTextContent('Name')
 })

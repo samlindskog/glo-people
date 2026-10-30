@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { FILTER_OPS } from '../lib'
-import type { FieldFilter, FieldInfo, SearchRequest, SemanticQuery } from '../types'
+import type { FieldFilter, Property, SearchRequest, SemanticQuery } from '../types'
 
 const DEFAULT_SEMANTIC: SemanticQuery = {
   query: '',
@@ -12,12 +12,12 @@ const DEFAULT_SEMANTIC: SemanticQuery = {
 
 interface Props {
   initial: SearchRequest
-  fields: FieldInfo[]
+  properties: Property[]
   onSearch: (req: SearchRequest) => void
 }
 
-/** Literal per-field filter builder + semantic panel. Emits a SearchRequest. */
-export default function SearchForm({ initial, fields, onSearch }: Props) {
+/** Literal per-property filter builder + semantic panel. Emits a SearchRequest. */
+export default function SearchForm({ initial, properties, onSearch }: Props) {
   const [tier, setTier] = useState(initial.tier ?? '')
   const [filters, setFilters] = useState<FieldFilter[]>(initial.filters)
   const [semOn, setSemOn] = useState(!!initial.semantic)
@@ -25,8 +25,8 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
   const [sort, setSort] = useState(initial.sort)
   const [limit, setLimit] = useState(initial.limit)
 
-  const embedded = fields.filter((f) => f.embed)
-  const fieldKeys = fields.map((f) => f.key)
+  const embeddable = properties.filter((p) => p.embeddable)
+  const fieldKeys = properties.map((p) => p.key)
 
   function submit(e?: FormEvent) {
     e?.preventDefault()
@@ -92,7 +92,7 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
       </div>
 
       <fieldset className="space-y-2">
-        <legend className="label mb-1">Field filters (all must match)</legend>
+        <legend className="label mb-1">Property filters (all must match)</legend>
         {filters.map((f, i) => (
           <div key={i} className="flex flex-wrap items-center gap-2" data-testid="filter-row">
             <select
@@ -101,10 +101,10 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
               value={f.field}
               onChange={(e) => updateFilter(i, { field: e.target.value })}
             >
-              <option value="">Field…</option>
-              {fields.map((fl) => (
-                <option key={fl.key} value={fl.key}>
-                  {fl.label} ({fl.key})
+              <option value="">Property…</option>
+              {properties.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label} ({p.key})
                 </option>
               ))}
             </select>
@@ -169,12 +169,12 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
               />
             </label>
             <div className="space-y-1">
-              <span className="label">Compare against fields</span>
-              {embedded.length === 0 ? (
-                <p className="text-sm text-slate-500">No embedded fields yet. Turn some on in Fields.</p>
+              <span className="label">Compare against properties</span>
+              {embeddable.length === 0 ? (
+                <p className="text-sm text-slate-500">No embeddable properties yet.</p>
               ) : (
                 <div className="flex flex-wrap gap-1.5" role="group" aria-label="Semantic fields">
-                  {embedded.map((f) => {
+                  {embeddable.map((f) => {
                     const on = sem.fields.includes(f.key)
                     return (
                       <button
@@ -242,7 +242,7 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
                   checked={sem.require_all_fields}
                   onChange={(e) => setSem({ ...sem, require_all_fields: e.target.checked })}
                 />
-                Require every selected field
+                Require every selected property
               </label>
             </div>
           </>

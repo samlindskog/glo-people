@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -44,11 +44,14 @@ set-password:
 import:
 	$(API) python -m app.cli import /data/$(notdir $(FILE)) --tier $(TIER)
 
-embed:          ## backfill embeddings for every embedded field (FIELD=bio to limit)
+embed:          ## sync property-name vectors and backfill passage vectors (FIELD=bio to limit)
 	$(API) python -m app.cli embed $(if $(FIELD),--field $(FIELD),)
 
-fields:
-	$(API) python -m app.cli fields
+properties:     ## the property catalog with coverage
+	$(API) python -m app.cli properties
+
+classify:       ## suggest property_specs entries for untyped properties from the data
+	$(API) python -m app.cli classify
 
 migrate:        ## apply alembic migrations and wrap legacy field values into histories (dev)
 	$(API) sh -c 'alembic upgrade head && python -m app.cli migrate-history'

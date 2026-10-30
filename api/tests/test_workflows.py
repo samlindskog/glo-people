@@ -248,9 +248,9 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     assert [e["v"] for e in person["history"]["website"]] == ["www.adaokafor.dev",
                                                               "https://payrail.io"]
     assert len(person["history"]["company"]) == 1
-    fl = {f["key"]: f for f in (await reader.get("/api/fields")).json()}
-    assert fl["company_description"]["embed"] and fl["github_summary"]["embed"]
-    assert not fl["github"]["embed"] and not fl["related_links"]["embed"]
+    fl = {f["key"]: f for f in (await reader.get("/api/properties")).json()}
+    assert fl["company_description"]["embeddable"] and fl["github_summary"]["embeddable"]
+    assert not fl["github"]["embeddable"] and not fl["related_links"]["embeddable"]
 
 
 async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, reader, people):

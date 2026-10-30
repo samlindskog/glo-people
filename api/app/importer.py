@@ -1,4 +1,6 @@
-"""Generic CSV → people importer. Any columns are accepted; each header becomes a field key."""
+"""Generic CSV → people importer. Any columns are accepted; each header becomes a property key
+(created through `properties.ensure` when new). Parsing and coercion live here; the write is
+`people.upsert_imported`."""
 
 import csv
 import hashlib
@@ -9,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from app import fields, people
+from app import fields, people, properties
 
 _NUMBER = re.compile(r"^-?\$?\d[\d,]*(\.\d+)?$")
 _NEVER_NUMERIC = re.compile(r"(^|_)(id|phone|phones|zip|postal|whatsapp)($|_)")
@@ -29,7 +31,7 @@ class ImportResult:
     updated: int = 0
     skipped: int = 0
     columns: list[dict] = field(default_factory=list)
-    new_fields: list[str] = field(default_factory=list)
+    new_properties: list[str] = field(default_factory=list)
     ids: list[str] = field(default_factory=list)
 
 
@@ -57,14 +59,19 @@ def _split_commas(values: list[str]) -> bool:
     return _looks_like_list(values, lambda v: v.split(","))
 
 
-def _column_kind(key: str, values: list[str], registered: str | None) -> str:
-    """Decide how to coerce a column: number | list | list_comma | text."""
+def _column_kind(key: str, values: list[str], ptype: str | None) -> str:
+    """How to coerce a column: number | list | list_comma | text. A typed property decides; a
+    free-text column (no spec) is inspected for numbers and lists."""
     if not values:
         return "text"
-    if registered in ("number", "list", "text", "url", "date"):
-        if registered == "list":
-            return "list_comma" if _split_commas(values) else "list"
-        return "number" if registered == "number" else "text"
+    if ptype == "number":
+        return "number"
+    if ptype in ("list", "enum_list"):
+        return "list_comma" if _split_commas(values) else "list"
+    if ptype in ("url", "contact"):      # several per cell is common: "a@x.io; b@x.io"
+        return "list" if _looks_like_list(values, _LIST_SEPARATORS.split) else "text"
+    if ptype is not None:
+        return "text"
     if not _NEVER_NUMERIC.search(key) and \
             sum(_to_number(v) is not None for v in values) >= 0.9 * len(values):
         return "number"
@@ -98,7 +105,7 @@ def header_map(headers: list[str]) -> list[dict]:
             out.append({"header": h, "key": "id", "role": "source_id"})
             continue
         if not key or key in fields.SYSTEM_FIELDS:
-            key = f"col_{key or 'blank'}"
+            key = f"{fields.RESERVED_PREFIX}{key or 'blank'}"
         n = seen.get(key, 0)
         seen[key] = n + 1
         out.append({"header": h, "key": key if n == 0 else f"{key}_{n + 1}", "role": "field"})
@@ -110,7 +117,7 @@ async def preview(text: str) -> dict:
     headers = next(reader, [])
     rows = sum(1 for r in reader if any(c.strip() for c in r))
     cols = header_map(headers)
-    known = {f["key"] for f in await fields.list_fields()}
+    known = await properties.known_keys()
     for c in cols:
         c["new"] = c["role"] == "field" and c["key"] not in known
     return {"rows": rows, "columns": cols}
@@ -139,13 +146,13 @@ async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
     cols = header_map(headers)
     raw_rows = [r for r in reader if any(c.strip() for c in r)]
 
-    registry = {f["key"]: f["type"] for f in await fields.list_fields()}
     kinds = {}
     for i, c in enumerate(cols):
         if c["role"] != "field":
             continue
         values = [r[i].strip() for r in raw_rows if i < len(r) and r[i].strip()]
-        kinds[c["key"]] = _column_kind(c["key"], values, registry.get(c["key"]))
+        sp = properties.spec(c["key"])
+        kinds[c["key"]] = _column_kind(c["key"], values, sp.type if sp else None)
 
     result = ImportResult(columns=cols)
     now = datetime.now(UTC)
@@ -171,17 +178,12 @@ async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
         docs.append((_source_id(doc, raw_id, row_no), {**doc, "_row": row_no}))
     result.rows = len(raw_rows)
 
-    samples: dict[str, list[Any]] = {}
-    for _, d in docs:
-        for k, v in d.items():
-            if k != "_row":
-                samples.setdefault(k, []).append(v)
-    result.new_fields = await fields.register(samples)
+    used = {k for _, d in docs for k in d if k != "_row"}
+    result.new_properties = await properties.ensure(sorted(used), "import")
 
     source_file = filename.rsplit("/", 1)[-1]
     rows = [(source_id, d.pop("_row"), d) for source_id, d in docs]
     result.inserted, result.updated = await people.upsert_imported(rows, source_file, tier, now)
 
     result.ids = await people.find_ids({"source.file": source_file})
-    await fields.refresh_counts()
     return result

@@ -1,6 +1,6 @@
 import pytest
 
-from app import embedder, embeddings, fields, jobs
+from app import embedder, embeddings, jobs
 from app.mongo import db
 
 MEMBERS = """﻿ID,Name,Company,Sectors,Bio,MRR,Emails,Brand New Column
@@ -28,11 +28,12 @@ async def _import(client, text, name, tier):
 async def test_import_registry_and_coercion(writer):
     res = await _import(writer, MEMBERS, "members.csv", "member")
     assert (res["rows"], res["inserted"], res["skipped"]) == (4, 3, 1)
-    assert "brand_new_column" in res["new_fields"]
+    assert res["new_properties"] == ["brand_new_column"]
 
-    fl = {f["key"]: f for f in (await writer.get("/api/fields")).json()}
+    fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
     assert fl["sectors"]["type"] == "list" and fl["mrr"]["type"] == "number"
-    assert fl["bio"]["embed"] and not fl["emails"]["embed"] and not fl["mrr"]["embed"]
+    assert fl["bio"]["embeddable"] and not fl["emails"]["embeddable"]
+    assert not fl["mrr"]["embeddable"] and fl["brand_new_column"]["embeddable"]
     assert fl["name"]["count"] == 3 and fl["brand_new_column"]["count"] == 1
     assert "id" not in fl
 
@@ -52,7 +53,7 @@ async def test_reimport_upserts_and_adds_columns(writer):
     v2 = MEMBERS.replace("Brand New Column", "Brand New Column,Twitter").replace(
         "alpha\n", "alpha,@ada\n")
     res = await _import(writer, v2, "members.csv", "member")
-    assert res["inserted"] == 0 and res["updated"] == 3 and res["new_fields"] == ["twitter"]
+    assert res["inserted"] == 0 and res["updated"] == 3 and res["new_properties"] == ["twitter"]
     assert await db().people.count_documents({}) == 3
     ada = await db().people.find_one({"name.v": "Ada Okafor"})
     assert ada["twitter"]["v"] == "@ada"
@@ -86,7 +87,8 @@ async def test_import_preview(writer):
     cols = {c["key"]: c for c in r.json()["columns"]}
     assert r.json()["rows"] == 4
     assert cols["id"]["role"] == "source_id"
-    assert cols["name"]["new"] is False and cols["bio"]["new"] is True
+    assert cols["name"]["new"] is False and cols["bio"]["new"] is False   # typed in code
+    assert cols["brand_new_column"]["new"] is True
 
 
 async def test_embeddings_created_per_field(writer):
@@ -102,13 +104,12 @@ async def test_embeddings_created_per_field(writer):
 async def test_person_crud_and_reembed(writer, reader):
     r = await writer.post("/api/people", json={"tier": "plus_one",
                                                "fields": {"name": "Zed", "bio": "builds warehouse robotics",
-                                                          "tags": ["a", "b"]}})
+                                                          "sectors": ["a", "b"]}})
     assert r.status_code == 201, r.text
     pid = r.json()["id"]
     got = (await reader.get(f"/api/people/{pid}")).json()
-    assert got["tags"] == ["a", "b"] and got["bio"] == "builds warehouse robotics"
+    assert got["sectors"] == ["a", "b"] and got["bio"] == "builds warehouse robotics"
     assert [e["src"] for e in got["history"]["name"]] == [{"kind": "ui", "by": "wendy"}]
-    assert await fields.get_field("tags")
 
     from sqlalchemy import select
 
@@ -120,25 +121,25 @@ async def test_person_crud_and_reembed(writer, reader):
                 fe.c.mongo_id == pid, fe.c.field == "bio"))).scalars().all())
     h1 = await bio_hashes()
     assert len(h1) == 1
-    r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones", "tags": None}})
-    assert r.status_code == 200 and "tags" not in r.json()
+    r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones", "sectors": None}})
+    assert r.status_code == 200 and "sectors" not in r.json()
     body = r.json()
     assert body["bio"] == "builds agricultural drones"
     assert [e["v"] for e in body["history"]["bio"]] == ["builds warehouse robotics",
                                                         "builds agricultural drones"]
-    assert body["history"]["tags"][-1]["v"] is None  # tombstone
+    assert body["history"]["sectors"][-1]["v"] is None  # tombstone
     h2 = await bio_hashes()
     assert len(h2) == 2 and h1 < h2  # one vector per passage
 
     # Same value again: no new entry, no updated_at bump, logged as unchanged.
     updated_at = body["updated_at"]
     r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones",
-                                                                  "tags": None}})
-    assert len(r.json()["history"]["bio"]) == 2 and len(r.json()["history"]["tags"]) == 2
+                                                                  "sectors": None}})
+    assert len(r.json()["history"]["bio"]) == 2 and len(r.json()["history"]["sectors"]) == 2
     assert r.json()["updated_at"] == updated_at
     acts = (await writer.get("/api/activity?action=person.update")).json()["items"]
-    assert acts[0]["meta"]["unchanged"] == ["bio", "tags"] and acts[0]["meta"]["src"] == "ui"
-    assert acts[1]["meta"] == {"set": ["bio"], "unset": ["tags"], "unchanged": [], "src": "ui"}
+    assert acts[0]["meta"]["unchanged"] == ["bio", "sectors"] and acts[0]["meta"]["src"] == "ui"
+    assert acts[1]["meta"] == {"set": ["bio"], "unset": ["sectors"], "unchanged": [], "src": "ui"}
 
     r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": None}})
     assert "bio" not in r.json() and await bio_hashes() == set()
@@ -151,17 +152,10 @@ async def test_person_crud_and_reembed(writer, reader):
             ).status_code == 422
     assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"history": "x"}})
             ).status_code == 422
+    assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"not_a_property": "x"}})
+            ).status_code == 422
     assert (await writer.delete(f"/api/people/{pid}")).status_code == 204
     assert (await reader.get(f"/api/people/{pid}")).status_code == 404
-
-
-async def test_tombstone_drops_coverage_count(writer):
-    r = await writer.post("/api/people", json={"tier": "member",
-                                               "fields": {"name": "Yan", "bio": "long enough bio text"}})
-    pid = r.json()["id"]
-    assert (await fields.get_field("bio"))["count"] == 1
-    await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": None}})
-    assert (await fields.get_field("bio"))["count"] == 0
 
 
 async def test_legacy_documents_are_migrated(writer, reader):
@@ -214,22 +208,7 @@ async def test_duplicate_rows_in_one_import_keep_every_entry(writer):
 
 async def test_reserved_history_header_is_renamed(writer):
     res = await _import(writer, "Name,History\nA,was here\n", "h.csv", "member")
-    assert "col_history" in res["new_fields"]
-
-
-async def test_toggle_field_embed(writer):
-    await _import(writer, MEMBERS, "members.csv", "member")
-    r = await writer.patch("/api/fields/bio", json={"embed": False})
-    assert r.json()["embed"] is False
-    r = await writer.patch("/api/fields/company", json={"embed": True})
-    await jobs.drain()
-    from sqlalchemy import func, select
-
-    from app import db as pg
-    fe = pg.field_embeddings
-    async with pg.engine().connect() as conn:
-        n_bio = (await conn.execute(select(func.count()).where(fe.c.field == "bio"))).scalar()
-    assert n_bio == 0
+    assert "col_history" in res["new_properties"]
 
 
 @pytest.fixture(autouse=True)
@@ -244,15 +223,17 @@ C,"Austin, USA",Engineer,paused,"call back, maybe",z
 """
 
 
-async def test_prose_columns_stay_text_and_short_values_not_embedded(writer):
+async def test_typed_columns_are_kept_as_entered_and_free_columns_inspected(writer):
     await _import(writer, PROSE, "prose.csv", "member")
-    fl = {f["key"]: f for f in (await writer.get("/api/fields")).json()}
-    assert fl["location"]["type"] == "text" and fl["bio"]["type"] == "text"
-    assert fl["notes"]["type"] == "text"
-    assert fl["tags"]["type"] == "list"
-    assert fl["bio"]["embed"] and not fl["status"]["embed"]
+    fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
+    assert fl["location"]["type"] == "keyword" and fl["bio"]["type"] == "text"
+    assert fl["status"]["type"] == "enum" and not fl["status"]["embeddable"]
+    assert fl["tags"]["type"] == "text" and fl["tags"]["embeddable"]   # no spec: free text
     a = await db().people.find_one({"name.v": "A"})
-    assert a["location"]["v"] == "Lagos, Nigeria" and a["tags"]["v"] == ["a", "b", "c"]
+    assert a["location"]["v"] == "Lagos, Nigeria"             # keyword: never split
+    assert a["notes"]["v"] == "Met at demo day;\nfollow up"    # text: never split
+    assert a["tags"]["v"] == ["a", "b", "c"]                   # untyped column: list detected
+    assert a["status"]["v"] == "active"                        # enum text as entered
 
 
 async def test_switching_embedder_reembeds(writer):

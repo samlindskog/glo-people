@@ -9,7 +9,7 @@ from bson import ObjectId
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
-from app import db, embeddings, fields, people
+from app import db, embeddings, fields, people, properties
 from app.auth import Principal
 
 FilterOp = Literal["eq", "ne", "contains", "starts_with", "regex", "in", "exists",
@@ -22,7 +22,7 @@ class FieldFilter(BaseModel):
     """A literal condition on one field. String matching (eq, contains, starts_with, regex, in)
     is case-insensitive; on list fields it matches any element."""
 
-    field: str = Field(description="Field key, e.g. 'name'. See list_fields.")
+    field: str = Field(description="Property key, e.g. 'name'. See list_properties.")
     op: FilterOp = Field("contains", description="Comparison operator")
     value: Any = Field(None, description="Value to compare. A list for 'in'; true/false for "
                                          "'exists'; a number or ISO date string for gt/gte/lt/lte.")
@@ -33,7 +33,8 @@ class SemanticQuery(BaseModel):
 
     query: str = Field(min_length=1, max_length=2000, description="Natural-language query")
     fields: list[str] = Field(min_length=1, max_length=20,
-                              description="Embedded field keys to compare against, e.g. ['bio']")
+                              description="Embeddable property keys to compare against, e.g. "
+                                          "['bio'] (see list_properties)")
     mode: Literal["avg", "max"] = Field(
         "avg", description="avg: mean cosine similarity over the listed fields the person has; "
                            "max: best single field. A field's own score is its best-matching "
@@ -136,7 +137,7 @@ def filter_to_mongo(f: FieldFilter, ftype: str = "text") -> dict:
 
 
 async def mongo_query(req: SearchRequest) -> dict:
-    types = {f["key"]: f["type"] for f in await fields.list_fields()}
+    types = {p.key: p.type for p in await properties.catalog()}
     clauses = [filter_to_mongo(f, types.get(f.field, "text")) for f in req.filters]
     if req.tier:
         clauses.append({"tier": req.tier})

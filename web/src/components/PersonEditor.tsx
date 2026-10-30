@@ -1,8 +1,7 @@
 import { useState, type FormEvent } from 'react'
-import type { FieldInfo, Person, Tier } from '../types'
+import type { Person, Property, Tier } from '../types'
 
 const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at', 'schema_version', 'history'])
-const KEY_RE = /^[a-z][a-z0-9_]{0,63}$/
 
 interface Row {
   key: string
@@ -17,24 +16,25 @@ function toText(v: unknown): string {
   return v === null || v === undefined ? '' : String(v)
 }
 
-function fromText(text: string, type: FieldInfo['type'] | undefined, original: unknown): unknown {
+function fromText(text: string, type: Property['type'] | undefined, original: unknown): unknown {
   const t = text.trim()
   if (!t) return null
-  if (type === 'list' || Array.isArray(original)) return t.split(';').map((s) => s.trim()).filter(Boolean)
+  if (type === 'list' || type === 'enum_list' || Array.isArray(original)) return t.split(';').map((s) => s.trim()).filter(Boolean)
   if ((type === 'number' || typeof original === 'number') && !Number.isNaN(Number(t))) return Number(t)
   return t
 }
 
 interface Props {
   person?: Person
-  fields: FieldInfo[]
+  properties: Property[]
   onSave: (tier: Tier, changes: Record<string, unknown>) => Promise<void>
   onCancel?: () => void
 }
 
-/** Edits any field on a schema-less person; returns only changed keys (null = remove). */
-export default function PersonEditor({ person, fields, onSave, onCancel }: Props) {
-  const types = Object.fromEntries(fields.map((f) => [f.key, f.type]))
+/** Edits a person's values for existing properties (the catalog decides which exist); returns only
+ * changed keys (null = remove). */
+export default function PersonEditor({ person, properties, onSave, onCancel }: Props) {
+  const types = Object.fromEntries(properties.map((p) => [p.key, p.type]))
   const [tier, setTier] = useState<Tier>(person?.tier ?? 'member')
   const [rows, setRows] = useState<Row[]>(() => {
     if (!person) return [{ key: 'name', text: '', isNew: true, removed: false }]
@@ -52,10 +52,6 @@ export default function PersonEditor({ person, fields, onSave, onCancel }: Props
     const changes: Record<string, unknown> = {}
     for (const r of rows) {
       if (!r.key) continue
-      if (!KEY_RE.test(r.key)) {
-        setError(`“${r.key}” is not a valid field key (lowercase letters, digits, underscores)`)
-        return
-      }
       const value = r.removed ? null : fromText(r.text, types[r.key], r.original)
       if (r.isNew || JSON.stringify(value) !== JSON.stringify(r.original ?? null)) changes[r.key] = value
     }
@@ -69,6 +65,9 @@ export default function PersonEditor({ person, fields, onSave, onCancel }: Props
       setBusy(false)
     }
   }
+
+  const taken = new Set(rows.map((r) => r.key))
+  const available = properties.filter((p) => !taken.has(p.key))
 
   return (
     <form onSubmit={submit} className="card space-y-3 p-4" aria-label="Edit person">
@@ -87,17 +86,17 @@ export default function PersonEditor({ person, fields, onSave, onCancel }: Props
       {rows.map((r, i) => (
         <div key={i} className={`flex items-start gap-3 ${r.removed ? 'opacity-40' : ''}`}>
           {r.isNew && r.key !== 'name' ? (
-            <input
-              className="input w-40 font-mono text-xs"
-              placeholder="field_key"
-              aria-label="New field key"
-              list="field-keys"
-              value={r.key}
-              onChange={(e) => set(i, { key: e.target.value.trim().toLowerCase() })}
-            />
+            <select className="input w-40 text-xs" aria-label="New property" value={r.key} onChange={(e) => set(i, { key: e.target.value })}>
+              <option value="">Property…</option>
+              {[...(r.key ? properties.filter((p) => p.key === r.key) : []), ...available].map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.label} ({p.key})
+                </option>
+              ))}
+            </select>
           ) : (
             <span className="label w-40 shrink-0 pt-2" title={r.key}>
-              {fields.find((f) => f.key === r.key)?.label ?? r.key}
+              {properties.find((p) => p.key === r.key)?.label ?? r.key}
             </span>
           )}
           {r.text.length > 80 || r.key.includes('bio') || r.key.includes('note') ? (
@@ -117,18 +116,13 @@ export default function PersonEditor({ person, fields, onSave, onCancel }: Props
           )}
         </div>
       ))}
-      <datalist id="field-keys">
-        {fields.map((f) => (
-          <option key={f.key} value={f.key} />
-        ))}
-      </datalist>
       <p className="text-xs text-slate-500">
-        List fields: separate items with “;”. Saving records a new entry for each changed field; previous values are kept
-        in the field’s history.
+        List properties: separate items with “;”. Saving records a new entry for each changed property; previous values
+        are kept in its history. Only existing properties can be set (see Properties).
       </p>
       <div className="flex gap-2">
-        <button type="button" className="btn-secondary" onClick={() => setRows([...rows, { key: '', text: '', isNew: true, removed: false }])}>
-          + Add field
+        <button type="button" className="btn-secondary" disabled={available.length === 0} onClick={() => setRows([...rows, { key: '', text: '', isNew: true, removed: false }])}>
+          + Add property
         </button>
         <span className="flex-1" />
         {onCancel && (

@@ -1,13 +1,13 @@
 import type {
   ActivityItem,
   ApiKey,
-  FieldInfo,
   ImportPreview,
   ImportResult,
   Job,
   Me,
   Page,
   Person,
+  Property,
   SearchRecord,
   SearchRequest,
   SearchResponse,
@@ -82,9 +82,7 @@ export const api = {
   },
   jobs: () => request<Job[]>('GET', '/api/jobs'),
 
-  fields: () => request<FieldInfo[]>('GET', '/api/fields'),
-  updateField: (key: string, changes: { label?: string; embed?: boolean }) =>
-    request<FieldInfo>('PATCH', `/api/fields/${key}`, changes),
+  properties: () => request<Property[]>('GET', '/api/properties'),
 
   searches: (params: { all?: boolean; user_id?: number; limit?: number; offset?: number }) =>
     request<Page<SearchRecord>>('GET', `/api/searches${qs(params)}`),

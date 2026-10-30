@@ -26,14 +26,14 @@ async def test_bad_password_and_throttle(client_factory, monkeypatch):
 
 async def test_unauthenticated(client_factory):
     c = await client_factory()
-    for path in ("/api/fields", "/api/searches", "/api/activity", "/api/users", "/api/api-keys"):
+    for path in ("/api/properties", "/api/searches", "/api/activity", "/api/users", "/api/api-keys"):
         assert (await c.get(path)).status_code == 401, path
 
 
 async def test_reader_cannot_write(reader):
     r = await reader.post("/api/people", json={"tier": "member", "fields": {"name": "X"}})
     assert r.status_code == 403
-    assert (await reader.get("/api/fields")).status_code == 200
+    assert (await reader.get("/api/properties")).status_code == 200
     assert (await reader.get("/api/activity")).status_code == 200
     assert (await reader.get("/api/searches?all=1")).status_code == 200
 
@@ -72,7 +72,7 @@ async def test_api_keys_lifecycle(writer, client_factory):
     h = {"Authorization": f"Bearer {key}"}
     me = (await bare.get("/api/auth/me", headers=h)).json()
     assert me["via_api_key"] and "accounts:manage" not in me["permissions"]
-    assert (await bare.get("/api/fields", headers=h)).status_code == 200
+    assert (await bare.get("/api/properties", headers=h)).status_code == 200
     # keys cannot administer accounts or mint keys
     assert (await bare.get("/api/users", headers=h)).status_code == 403
     assert (await bare.post("/api/api-keys", json={"name": "x"}, headers=h)).status_code == 403
@@ -80,8 +80,8 @@ async def test_api_keys_lifecycle(writer, client_factory):
     keys = (await writer.get("/api/api-keys")).json()
     assert keys[0]["last_used_at"] is not None and "key_hash" not in keys[0]
     assert (await writer.delete(f"/api/api-keys/{keys[0]['id']}")).status_code == 204
-    assert (await bare.get("/api/fields", headers=h)).status_code == 401
-    assert (await bare.get("/api/fields", headers={"Authorization": "Bearer glo_bad_x"})
+    assert (await bare.get("/api/properties", headers=h)).status_code == 401
+    assert (await bare.get("/api/properties", headers={"Authorization": "Bearer glo_bad_x"})
             ).status_code == 401
 
 

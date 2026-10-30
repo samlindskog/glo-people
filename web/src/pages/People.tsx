@@ -34,7 +34,7 @@ export default function PeoplePage() {
     }
   }, [columns])
 
-  const fieldsQ = useQuery({ queryKey: ['fields'], queryFn: api.fields })
+  const propsQ = useQuery({ queryKey: ['properties'], queryFn: api.properties })
   const results = useQuery({
     queryKey: ['search', encoded ?? ''],
     queryFn: () => api.search(req),
@@ -42,8 +42,8 @@ export default function PeoplePage() {
   })
 
   const run = (next: SearchRequest) => setParams({ s: encodeSearch(next) })
-  const fields = fieldsQ.data ?? []
-  const visibleCols = columns.filter((c) => fields.some((f) => f.key === c))
+  const properties = propsQ.data ?? []
+  const visibleCols = columns.filter((c) => properties.some((p) => p.key === c))
   const data = results.data
   const semantic = !!req.semantic
   const pages = data ? Math.max(1, Math.ceil(data.total / data.limit)) : 1
@@ -63,7 +63,7 @@ export default function PeoplePage() {
         )}
       </PageHeader>
 
-      {fieldsQ.isSuccess && <SearchForm key={encoded ?? ''} initial={req} fields={fields} onSearch={run} />}
+      {propsQ.isSuccess && <SearchForm key={encoded ?? ''} initial={req} properties={properties} onSearch={run} />}
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-slate-600" data-testid="result-summary">
@@ -73,14 +73,14 @@ export default function PeoplePage() {
         <details className="relative text-sm">
           <summary className="btn-secondary cursor-pointer list-none">Columns</summary>
           <div className="card absolute right-0 z-10 mt-1 max-h-80 w-64 overflow-auto p-2">
-            {fields.map((f) => (
-              <label key={f.key} className="flex items-center gap-2 px-1 py-0.5">
+            {properties.map((p) => (
+              <label key={p.key} className="flex items-center gap-2 px-1 py-0.5">
                 <input
                   type="checkbox"
-                  checked={columns.includes(f.key)}
-                  onChange={(e) => setColumns(e.target.checked ? [...columns, f.key] : columns.filter((c) => c !== f.key))}
+                  checked={columns.includes(p.key)}
+                  onChange={(e) => setColumns(e.target.checked ? [...columns, p.key] : columns.filter((c) => c !== p.key))}
                 />
-                {f.label}
+                {p.label}
               </label>
             ))}
           </div>
@@ -98,7 +98,7 @@ export default function PeoplePage() {
               {semantic && <th>Score</th>}
               {semantic && <th>Field scores</th>}
               {visibleCols.map((c) => (
-                <th key={c}>{fields.find((f) => f.key === c)?.label ?? c}</th>
+                <th key={c}>{properties.find((p) => p.key === c)?.label ?? c}</th>
               ))}
             </tr>
           </thead>

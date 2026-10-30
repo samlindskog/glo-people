@@ -87,11 +87,19 @@ export interface SearchResponse {
   search_id: number | null
 }
 
-export interface FieldInfo {
+export type PropertyType = 'text' | 'keyword' | 'url' | 'contact' | 'number' | 'boolean' | 'date' | 'enum' | 'enum_list' | 'list'
+
+/** One entry of the property catalog (GET /api/properties). Read-only in the UI. */
+export interface Property {
   key: string
   label: string
-  type: 'text' | 'number' | 'date' | 'list' | 'url'
-  embed: boolean
+  type: PropertyType
+  /** Canonical values of enum / enum_list properties. */
+  values: string[]
+  embeddable: boolean
+  normalisable: boolean
+  source: 'import' | 'agent' | 'spec'
+  created_at: string | null
   count: number
 }
 
@@ -114,7 +122,7 @@ export interface ImportResult {
   inserted: number
   updated: number
   skipped: number
-  new_fields: string[]
+  new_properties: string[]
   job_id: number
 }
 

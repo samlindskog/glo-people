@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from app import activity, db, embeddings, fields, importer, jobs
+from app import activity, db, embeddings, importer, jobs
 from app import people as people_svc
 from app.auth import Principal, require
 from app.search import SearchRequest, SearchResponse, describe, record_search, run_search
@@ -26,11 +26,6 @@ class PersonCreate(BaseModel):
 class PersonPatch(BaseModel):
     tier: Literal["member", "plus_one"] | None = None
     fields: dict[str, Any] = {}
-
-
-class FieldPatch(BaseModel):
-    label: str | None = None
-    embed: bool | None = None
 
 
 def _bad_request(e: Exception) -> HTTPException:
@@ -118,7 +113,7 @@ async def import_people(file: Annotated[UploadFile, File()],
         raise _bad_request(e) from e
     summary = {"file": file.filename, "tier": tier, "rows": result.rows,
                "inserted": result.inserted, "updated": result.updated,
-               "skipped": result.skipped, "new_fields": result.new_fields}
+               "skipped": result.skipped, "new_properties": result.new_properties}
     await activity.record("people.import", principal, file.filename, summary)
 
     async def embed(job: dict) -> int:
@@ -130,31 +125,6 @@ async def import_people(file: Annotated[UploadFile, File()],
 
     job = jobs.spawn(f"embed import {file.filename}", embed)
     return {**summary, "job_id": job["id"]}
-
-
-# --- fields -------------------------------------------------------------------------------------
-
-@router.get("/fields")
-async def list_fields(_: Reader) -> list[dict]:
-    return await fields.list_fields()
-
-
-@router.patch("/fields/{key}")
-async def patch_field(key: str, body: FieldPatch, principal: Writer) -> dict:
-    before = await fields.get_field(key)
-    if not before:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "field not found")
-    after = await fields.update_field(key, body.model_dump(exclude_none=True))
-    await activity.record("field.update", principal, key, body.model_dump(exclude_none=True))
-    if before["embed"] != after["embed"]:
-        if after["embed"]:
-            async def backfill(job: dict) -> int:
-                return await embeddings.backfill({key},
-                                                 progress=lambda n: job.update(progress=n))
-            after["job_id"] = jobs.spawn(f"embed field {key}", backfill)["id"]
-        else:
-            await embeddings.delete_field(key)
-    return after
 
 
 @router.get("/jobs")

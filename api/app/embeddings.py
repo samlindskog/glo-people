@@ -10,7 +10,7 @@ from bson import ObjectId
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
-from app import db, embedder, fields, history, people
+from app import db, embedder, fields, history, people, properties
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
     ids = [i for i in ids if ObjectId.is_valid(i)]
     if not ids:
         return 0
-    embed_keys = await fields.embedded_field_keys()
+    embed_keys = set(await properties.embeddable_keys())
     if only_fields is not None:
         embed_keys &= only_fields
 

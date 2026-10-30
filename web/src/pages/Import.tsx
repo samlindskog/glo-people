@@ -16,7 +16,7 @@ export default function ImportPage() {
     mutationFn: () => api.importCsv(file!, tier),
     onSuccess: (r) => {
       setResult(r)
-      qc.invalidateQueries({ queryKey: ['fields'] })
+      qc.invalidateQueries({ queryKey: ['properties'] })
       qc.invalidateQueries({ queryKey: ['search'] })
     },
   })
@@ -33,7 +33,7 @@ export default function ImportPage() {
       <PageHeader title="Import CSV" />
       <div className="card space-y-4 p-4">
         <p className="text-sm text-slate-600">
-          Any columns are accepted. Each header becomes a field key; new keys are added to the field registry. Rows are
+          Any columns are accepted. Each header becomes a property; a new one is created as free text. Rows are
           matched on the <code>ID</code> column if present (otherwise name + email), so re-importing the same file updates
           people instead of duplicating them. Empty cells are skipped.
         </p>
@@ -73,7 +73,7 @@ export default function ImportPage() {
           <p className="font-medium">
             Imported {result.file}: {result.inserted} new, {result.updated} updated, {result.skipped} skipped (no name).
           </p>
-          {result.new_fields.length > 0 && <p className="mt-1">New fields: {result.new_fields.join(', ')}</p>}
+          {result.new_properties.length > 0 && <p className="mt-1">New properties: {result.new_properties.join(', ')}</p>}
           <p className="mt-1 text-slate-500">
             Embeddings:{' '}
             {job ? (job.status === 'running' ? `computing… ${job.progress} people` : job.status === 'done' ? `done (${String(job.result)} vectors)` : `failed: ${job.error}`) : '…'}
@@ -100,7 +100,7 @@ export default function ImportPage() {
                     {c.role === 'source_id' ? (
                       <span className="badge bg-slate-100 text-slate-600">match key</span>
                     ) : c.new ? (
-                      <span className="badge bg-amber-50 text-amber-700">new field</span>
+                      <span className="badge bg-amber-50 text-amber-700">new property</span>
                     ) : null}
                   </td>
                 </tr>

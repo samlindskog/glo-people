@@ -26,15 +26,15 @@ test('writer imports a CSV with a new column, filters and searches semantically'
   await login(page, WRITER)
   await page.getByRole('link', { name: 'Import CSV' }).click()
   await page.getByLabel('CSV file').setInputFiles({ name: `e2e-${tag}.csv`, mimeType: 'text/csv', buffer: Buffer.from(csv) })
-  await expect(page.getByRole('row', { name: new RegExp(col) })).toContainText('new field')
+  await expect(page.getByRole('row', { name: new RegExp(col) })).toContainText('new property')
   await page.getByRole('button', { name: /Import 3 rows/ }).click()
   await expect(page.getByTestId('import-result')).toContainText('3 new')
   await expect(page.getByTestId('import-result')).toContainText(col)
   await expect(page.getByTestId('import-result')).toContainText(/done \(\d+ vectors\)/, { timeout: 30_000 })
 
-  // new column shows up in the field registry
-  await page.getByRole('link', { name: 'Fields' }).click()
-  await expect(page.getByTestId('fields-table')).toContainText(col)
+  // the new column is now a (free text, embeddable) property
+  await page.getByRole('link', { name: 'Properties' }).click()
+  await expect(page.getByTestId('properties-table').getByRole('row', { name: new RegExp(col) })).toContainText('text')
 
   // literal filter: name contains tag AND city = lagos
   await page.getByRole('link', { name: 'People', exact: true }).click()
@@ -80,16 +80,17 @@ test('writer edits and deletes a person; reader cannot', async ({ page, browser 
   await login(page, WRITER)
   await page.goto('/people/new')
   await page.getByRole('textbox', { name: 'name' }).fill(`Zed ${tag}`)
-  await page.getByRole('button', { name: '+ Add field' }).click()
-  await page.getByLabel('New field key').fill('favourite_tool')
-  await page.getByRole('textbox', { name: 'favourite_tool' }).fill('lathe')
+  // values can only be added for existing properties (the catalog is read-only in the UI)
+  await page.getByRole('button', { name: '+ Add property' }).click()
+  await page.getByLabel('New property').selectOption('notes')
+  await page.getByRole('textbox', { name: 'notes' }).fill('lathe')
   await page.getByRole('button', { name: 'Save' }).click()
   await expect(page.getByRole('heading', { name: `Zed ${tag}` })).toBeVisible()
   await expect(page.getByText('lathe')).toBeVisible()
   const url = page.url()
 
   await page.getByRole('button', { name: 'Edit' }).click()
-  await page.getByRole('textbox', { name: 'favourite_tool' }).fill('drill press')
+  await page.getByRole('textbox', { name: 'notes' }).fill('drill press')
   await page.getByRole('button', { name: 'Save' }).click()
   await expect(page.getByText('drill press').first()).toBeVisible()
   // the earlier value is kept in the field's history

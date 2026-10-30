@@ -66,7 +66,7 @@ async def test_tool_visibility_by_role(client_factory, keys):
         await init(c, key)
         resp = await rpc(c, key, "tools/list", id_=2)
         tools = {t["name"] for t in resp.json()["result"]["tools"]}
-        assert {"search_people", "get_person", "list_fields"} <= tools
+        assert {"search_people", "get_person", "list_properties"} <= tools
         assert ("create_person" in tools) is expect_write
 
 
@@ -98,8 +98,10 @@ async def test_reader_key_cannot_write(client_factory, keys):
     assert not err, res
     _, got = await call(c, r, "get_person", {"id": res["id"]})
     assert got["name"] == "Z"
-    _, fl = await call(c, r, "list_fields", {})
-    assert any(f["key"] == "bio" for f in fl)
+    _, fl = await call(c, r, "list_properties", {})
+    assert any(f["key"] == "bio" and f["embeddable"] and f["count"] == 2 for f in fl)
+    err, msg = await call(c, w, "update_person", {"id": res["id"], "fields": {"gadget": "x"}})
+    assert err and "unknown property" in str(msg)
 
 
 async def test_update_records_source_and_history(client_factory, keys):

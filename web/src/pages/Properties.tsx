@@ -1,0 +1,88 @@
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api'
+import { ErrorNote, PageHeader } from '../components/Layout'
+import type { Property } from '../types'
+
+const SHOWN_VALUES = 6
+
+export default function PropertiesPage() {
+  const props = useQuery({ queryKey: ['properties'], queryFn: api.properties })
+  const total = Math.max(1, ...(props.data ?? []).map((p) => p.count))
+
+  return (
+    <div>
+      <PageHeader title="Properties" />
+      <p className="mb-4 max-w-3xl text-sm text-slate-600">
+        Every property a person can have. Properties come into existence through CSV imports and the storage agent;
+        their type and canonical values are defined in the source code. Text and list properties (◆) are embedded for
+        semantic search; typed properties (number, date, boolean, enum) get a normalised value for filters.
+      </p>
+      <ErrorNote error={props.error} />
+      <div className="card overflow-x-auto">
+        <table className="data-table" data-testid="properties-table">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Key</th>
+              <th>Type</th>
+              <th>Values</th>
+              <th>Coverage</th>
+              <th>Origin</th>
+            </tr>
+          </thead>
+          <tbody>
+            {props.data?.map((p) => (
+              <tr key={p.key}>
+                <td className="font-medium">
+                  {p.label}
+                  {p.embeddable && (
+                    <span className="ml-1 text-xs text-brand-500" title="Embedded for semantic search">
+                      ◆
+                    </span>
+                  )}
+                </td>
+                <td className="font-mono text-xs">{p.key}</td>
+                <td>
+                  <TypeBadge type={p.type} normalisable={p.normalisable} />
+                </td>
+                <td className="max-w-md text-xs text-slate-600">
+                  <Values values={p.values} />
+                </td>
+                <td className="w-56">
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 flex-1 rounded bg-slate-100">
+                      <div className="h-1.5 rounded bg-brand-500" style={{ width: `${(100 * p.count) / total}%` }} />
+                    </div>
+                    <span className="w-14 text-right tabular-nums text-xs text-slate-500">{p.count.toLocaleString()}</span>
+                  </div>
+                </td>
+                <td className="text-xs text-slate-500">{ORIGIN[p.source]}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+const ORIGIN: Record<Property['source'], string> = { spec: 'source code', import: 'CSV import', agent: 'agent' }
+
+function TypeBadge({ type, normalisable }: { type: Property['type']; normalisable: boolean }) {
+  return (
+    <span className={`badge ${normalisable ? 'bg-sky-50 text-sky-700' : 'bg-slate-100 text-slate-600'}`} title={normalisable ? 'Normalised for filters' : undefined}>
+      {type.replace('_', ' ')}
+    </span>
+  )
+}
+
+function Values({ values }: { values: string[] }) {
+  if (values.length === 0) return <span className="text-slate-300">—</span>
+  const shown = values.slice(0, SHOWN_VALUES)
+  return (
+    <span title={values.join(' · ')}>
+      {shown.join(' · ')}
+      {values.length > shown.length && <span className="text-slate-400"> +{values.length - shown.length}</span>}
+    </span>
+  )
+}

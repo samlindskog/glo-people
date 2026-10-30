@@ -5,7 +5,7 @@ import type { Permission } from '../types'
 
 const NAV: { to: string; label: string; permission: Permission }[] = [
   { to: '/people', label: 'People', permission: 'people:read' },
-  { to: '/fields', label: 'Fields', permission: 'people:read' },
+  { to: '/properties', label: 'Properties', permission: 'people:read' },
   { to: '/workflows', label: 'Workflows', permission: 'people:read' },
   { to: '/searches', label: 'My searches', permission: 'searches:read_own' },
   { to: '/activity', label: 'Activity', permission: 'activity:read' },

@@ -9,7 +9,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import activity, auth, fields
+from app import activity, auth, properties
 from app import people as people_svc
 from app.auth import Principal
 from app.history import Source
@@ -27,17 +27,18 @@ from app.search import (
 WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person"})
 
 INSTRUCTIONS = """\
-Search and read the GLO people database. People are schema-less documents in two tiers
-('member' and 'plus_one'). Call list_fields first to see which field keys exist, their types,
-coverage, and which are embedded for semantic search. search_people combines literal per-field
-filters (AND) with optional semantic similarity over one or more embedded fields, aggregated by
-avg or max and cut off at a threshold (cosine similarity; default 0.4. Unrelated text scores
-around 0.2-0.3, so 0.35-0.5 is the useful range). A field's semantic score is its best-matching
-passage across the field's history. Field values are never overwritten: create_person and
-update_person append time-stamped entries (with their source) to each field's history, and the
-latest entry is the current value; get_person returns the current values plus `history`.
-Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to your
-key (kind "mcp") with the agent name noted in its reference."""
+Search and read the GLO people database. People are documents in two tiers ('member' and
+'plus_one') made of properties. Call list_properties first to see which properties exist, their
+type, canonical values (enum types), coverage, and which are embeddable for semantic search.
+search_people combines literal per-property filters (AND) with optional semantic similarity over
+one or more embeddable properties, aggregated by avg or max and cut off at a threshold (cosine
+similarity; default 0.4. Unrelated text scores around 0.2-0.3, so 0.35-0.5 is the useful range).
+A property's semantic score is its best-matching passage across its history. Values are never
+overwritten: create_person and update_person append time-stamped entries (with their source) to
+each property's history, and the latest entry is the current value; get_person returns the
+current values plus `history`. Only existing properties can be written; this server creates
+none. Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to
+your key (kind "mcp") with the agent name noted in its reference."""
 
 
 class GloMCP(MCPServer):
@@ -76,12 +77,13 @@ async def _principal(ctx: Context, permission: str) -> Principal:
 
 
 @mcp.tool()
-async def list_fields(ctx: Context) -> list[dict]:
-    """List every field key on people records with label, type, coverage count, and whether it is
-    embedded (usable in search_people semantic.fields)."""
+async def list_properties(ctx: Context) -> list[dict]:
+    """List every property on people records: key, label, type, canonical values (enum types),
+    coverage count, and whether it is embeddable (usable in search_people semantic.fields)."""
     principal = await _principal(ctx, "people:read")
-    await activity.record("mcp.list_fields", principal)
-    return await fields.list_fields()
+    await activity.record("mcp.list_properties", principal)
+    props = await properties.catalog(await people_svc.coverage())
+    return [p.model_dump(mode="json") for p in props]
 
 
 @mcp.tool()
@@ -137,11 +139,12 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
 async def create_person(
     ctx: Context,
     tier: Literal["member", "plus_one"],
-    fields: Annotated[dict[str, Any], Field(description="Field key → value; 'name' required")],
+    fields: Annotated[dict[str, Any], Field(description="Property key → value; 'name' required. "
+                                                        "Keys must exist (list_properties).")],
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
                                                    "change, if any; noted in the entry source")] = None,
 ) -> dict:
-    """Create a person (requires people:write). New field keys are added to the registry."""
+    """Create a person (requires people:write). Only existing properties can be set."""
     principal = await _principal(ctx, "people:write")
     try:
         return await people_svc.create(principal, tier, fields,
@@ -155,15 +158,16 @@ async def update_person(
     ctx: Context,
     id: str,
     fields: Annotated[dict[str, Any],
-                      Field(description="Field key → new value. Each value is appended as a new "
-                                        "time-stamped entry in the field's history (earlier values "
-                                        "are kept); the current value is a no-op; null records a "
-                                        "removal.")],
+                      Field(description="Property key → new value (keys must exist, see "
+                                        "list_properties). Each value is appended as a new "
+                                        "time-stamped entry in the property's history (earlier "
+                                        "values are kept); the current value is a no-op; null "
+                                        "records a removal.")],
     tier: Literal["member", "plus_one"] | None = None,
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
                                                    "change, if any; noted in the entry source")] = None,
 ) -> dict:
-    """Append new values to a person's fields (requires people:write)."""
+    """Append new values to a person's properties (requires people:write)."""
     principal = await _principal(ctx, "people:write")
     try:
         person = await people_svc.update(principal, id, fields, tier,

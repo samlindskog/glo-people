@@ -8,12 +8,12 @@ import './index.css'
 import AccountsPage from './pages/Accounts'
 import ActivityPage from './pages/Activity'
 import ApiKeysPage from './pages/ApiKeys'
-import FieldsPage from './pages/Fields'
 import ImportPage from './pages/Import'
 import LoginPage from './pages/Login'
 import PeoplePage from './pages/People'
 import PersonPage from './pages/Person'
 import PersonNewPage from './pages/PersonNew'
+import PropertiesPage from './pages/Properties'
 import SearchesPage from './pages/Searches'
 import WorkflowsPage from './pages/Workflows'
 
@@ -40,7 +40,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/people/new" element={<RequireAuth permission="people:write"><PersonNewPage /></RequireAuth>} />
               <Route path="/people/import" element={<RequireAuth permission="people:write"><ImportPage /></RequireAuth>} />
               <Route path="/people/:id" element={<RequireAuth permission="people:read"><PersonPage /></RequireAuth>} />
-              <Route path="/fields" element={<RequireAuth permission="people:read"><FieldsPage /></RequireAuth>} />
+              <Route path="/properties" element={<RequireAuth permission="people:read"><PropertiesPage /></RequireAuth>} />
               <Route path="/workflows" element={<RequireAuth permission="people:read"><WorkflowsPage /></RequireAuth>} />
               <Route path="/searches" element={<RequireAuth permission="searches:read_own"><SearchesPage /></RequireAuth>} />
               <Route path="/activity" element={<RequireAuth permission="activity:read"><ActivityPage /></RequireAuth>} />
