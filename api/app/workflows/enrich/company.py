@@ -5,7 +5,8 @@ from pydantic_ai import Agent, RunContext
 from app.workflows.context import WorkflowDeps
 from app.workflows.enrich.agents_common import budgeted_fetch, run_agent
 from app.workflows.enrich.models import CompanySummary
-from app.workflows.enrich.urls import host_of, registrable
+from app.workflows.enrich.urls import host_of, is_social, registrable
+from app.workflows.firecrawl import SearchHit
 from app.workflows.firecrawl import BudgetExceeded, FirecrawlError
 
 AGENT_NAME = "company"
@@ -23,7 +24,8 @@ Procedure:
    confidence "high" (or "medium" if the match is plausible but not explicit).
 2. Otherwise, if web_search is available, search once for the company (use the person's location
    or industry hints to disambiguate), then fetch at most two of the results that look like the
-   company's own domain (not LinkedIn, Crunchbase, news or directories).
+   company's own domain. LinkedIn, Crunchbase, news and directory pages cannot be fetched and must
+   not be used as evidence.
 3. If no page corroborates the company name, answer with confidence "low", website None and
    summary None. Never guess a domain. Never summarise a different company with the same name.
 
@@ -34,6 +36,14 @@ The summary is two or three plain sentences: what the company does, for whom, an
 
 def _allow(url: str, hosts: set[str]) -> bool:
     return registrable(host_of(url)) in hosts
+
+
+def allow_hosts(deps: WorkflowDeps, hits: list[SearchHit]) -> None:
+    """Let fetch_page visit the search results' own sites. Social and directory hosts are left
+    out: a LinkedIn company page goes through paid data providers, and a directory is not the
+    company speaking for itself."""
+    deps.notes.setdefault("company_allowed", set()).update(
+        registrable(host_of(h.url)) for h in hits if host_of(h.url) and not is_social(h.url))
 
 
 @agent.tool
@@ -62,8 +72,7 @@ async def web_search(ctx: RunContext[WorkflowDeps], query: str) -> str:
         return f"Search failed: {e}"
     if not hits:
         return "No results."
-    deps.notes.setdefault("company_allowed", set()).update(
-        registrable(host_of(h.url)) for h in hits if host_of(h.url))
+    allow_hosts(deps, hits)
     return "\n".join(f"{h.title} — {h.url} — {h.description[:200]}" for h in hits)
 
 

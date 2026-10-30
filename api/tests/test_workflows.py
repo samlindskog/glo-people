@@ -273,6 +273,17 @@ async def test_provider_route_failure_counts_as_not_found(writer, people):
     assert "could not resolve" in item["result"]["skipped"][0]["reason"]
 
 
+def test_company_fetch_allowlist_skips_social_and_directory_hosts():
+    from app.workflows.enrich.company import _allow, allow_hosts
+    deps = type("D", (), {"notes": {}})()
+    allow_hosts(deps, [SearchHit("https://www.linkedin.com/company/tuttiai", "", ""),
+                       SearchHit("https://www.crunchbase.com/organization/tutti", "", ""),
+                       SearchHit("https://www.withtutti.com/about", "", "")])
+    assert deps.notes["company_allowed"] == {"withtutti.com"}
+    assert _allow("https://withtutti.com/team", deps.notes["company_allowed"])
+    assert not _allow("https://www.linkedin.com/company/tuttiai", deps.notes["company_allowed"])
+
+
 async def test_nothing_known_costs_nothing(writer, people):
     run = await run_for(writer, [people["Cy Diaz"]])
     item = run["items"][0]
