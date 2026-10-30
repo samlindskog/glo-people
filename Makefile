@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields psql mongosh prod-create-user prod-import prod-embed prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed fields migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -50,6 +50,9 @@ embed:          ## backfill embeddings for every embedded field (FIELD=bio to li
 fields:
 	$(API) python -m app.cli fields
 
+migrate:        ## apply alembic migrations and wrap legacy field values into histories (dev)
+	$(API) sh -c 'alembic upgrade head && python -m app.cli migrate-history'
+
 psql:
 	$(DEV) exec postgres psql -U glo glo
 
@@ -75,6 +78,10 @@ prod-import:
 
 prod-embed:
 	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
+
+# Prod never runs alembic on its own: run this after deploying a release that adds a migration.
+prod-migrate:
+	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 sh -c 'alembic upgrade head && python -m app.cli migrate-history && python -m app.cli embed'
 
 prod-status:
 	ssh -t $(PROD_SSH) 'sudo docker ps --format "{{.Names}}\t{{.Status}}"; free -h | sed -n 2,3p'

@@ -1,4 +1,4 @@
-"""Admin commands: python -m app.cli {create-user,import,embed,set-password}."""
+"""Admin commands: python -m app.cli {create-user,set-password,import,embed,fields,migrate-history}."""
 
 import argparse
 import asyncio
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import select, update
 
-from app import auth, db, embeddings, fields, importer, mongo
+from app import auth, db, embeddings, fields, history, importer, mongo
 from app.permissions import is_role, roles
 
 
@@ -64,6 +64,11 @@ async def embed(only: list[str] | None) -> None:
     print(f"\nembedded {n} field values")
 
 
+async def migrate_history(dry_run: bool) -> None:
+    n = await history.migrate_legacy(dry_run=dry_run)
+    print(f"{'would migrate' if dry_run else 'migrated'} {n} people documents to field history")
+
+
 async def list_fields() -> None:
     await fields.refresh_counts()
     for f in await fields.list_fields():
@@ -87,6 +92,8 @@ def main() -> None:
     em = sub.add_parser("embed")
     em.add_argument("--field", action="append", help="only these fields (repeatable)")
     sub.add_parser("fields")
+    mh = sub.add_parser("migrate-history", help="wrap legacy flat field values into histories")
+    mh.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     async def run() -> None:
@@ -102,6 +109,8 @@ def main() -> None:
                     await embed(args.field)
                 case "fields":
                     await list_fields()
+                case "migrate-history":
+                    await migrate_history(args.dry_run)
         finally:
             await mongo.close()
             await db.dispose()

@@ -5,6 +5,8 @@ services:
     image: glo-people-api:${IMAGE_TAG:-latest}
     environment:
       COOKIE_SECURE: "true"
+      LOGFIRE_ENVIRONMENT: prod
+      LOGFIRE_INCLUDE_CONTENT: "false"
     ports: ["127.0.0.1:8000:8000"]
     restart: unless-stopped
 

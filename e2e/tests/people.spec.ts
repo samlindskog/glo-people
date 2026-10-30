@@ -89,13 +89,16 @@ test('writer edits and deletes a person; reader cannot', async ({ page, browser 
   await page.getByRole('button', { name: 'Edit' }).click()
   await page.getByRole('textbox', { name: 'favourite_tool' }).fill('drill press')
   await page.getByRole('button', { name: 'Save' }).click()
-  await expect(page.getByText('drill press')).toBeVisible()
+  await expect(page.getByText('drill press').first()).toBeVisible()
+  // the earlier value is kept in the field's history
+  await page.getByText('history (2)').click()
+  await expect(page.getByText('lathe')).toBeVisible()
 
   const readerCtx = await browser.newContext()
   const rp = await readerCtx.newPage()
   await login(rp, READER)
   await rp.goto(url)
-  await expect(rp.getByText('drill press')).toBeVisible()
+  await expect(rp.getByText('drill press').first()).toBeVisible()
   await expect(rp.getByRole('button', { name: 'Edit' })).toHaveCount(0)
   await expect(rp.getByRole('link', { name: 'Add person' })).toHaveCount(0)
   await rp.goto('/people/new')

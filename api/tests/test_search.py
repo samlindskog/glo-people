@@ -48,7 +48,33 @@ async def test_literal_filters(reader):
 
 def test_filter_translation_escapes():
     q = filter_to_mongo(FieldFilter(field="name", op="contains", value="a.b*"))
-    assert q == {"name": {"$regex": r"a\.b\*", "$options": "i"}}
+    assert q == {"name.v": {"$regex": r"a\.b\*", "$options": "i"}}
+
+
+async def test_filters_see_current_values_only(reader, writer):
+    pid = (await reader.post("/api/search", json={
+        "filters": [{"field": "name", "op": "eq", "value": "Bo"}]})).json()["results"][0]["id"]
+    await writer.patch(f"/api/people/{pid}", json={"fields": {"city": "Munich", "bio": None}})
+    s = lambda f: reader.post("/api/search", json={"filters": [f]})
+    assert names(await s({"field": "city", "op": "eq", "value": "berlin"})) == []
+    assert names(await s({"field": "city", "op": "eq", "value": "munich"})) == ["Bo"]
+    assert names(await s({"field": "bio", "op": "exists", "value": False})) == ["Bo", "Di"]
+    r = await reader.post("/api/search", json={"sort": {"field": "city", "dir": "asc"}})
+    assert names(r) == ["Di", "Ada", "Cy", "Bo"]
+
+
+async def test_semantic_max_over_passages(reader, writer):
+    ada = (await reader.post("/api/search", json={
+        "filters": [{"field": "name", "op": "eq", "value": "Ada"}]})).json()["results"][0]["id"]
+    await writer.patch(f"/api/people/{ada}", json={"fields": {"bio": "climate venture investor"}})
+    for query in ("payments infrastructure for merchants", "climate venture investor"):
+        r = await reader.post("/api/search", json={
+            "semantic": {"query": query, "fields": ["bio"], "threshold": -1}})
+        by = {h["person"]["name"]: h for h in r.json()["results"]}
+        assert by["Ada"]["field_scores"]["bio"] == pytest.approx(1.0, abs=1e-3)
+        assert by["Ada"]["score"] == pytest.approx(1.0, abs=1e-3)
+    assert by["Bo"]["field_scores"]["bio"] == pytest.approx(1.0, abs=1e-3)
+    assert by["Cy"]["field_scores"]["bio"] < 0.9
 
 
 async def test_semantic_single_field_threshold(reader):

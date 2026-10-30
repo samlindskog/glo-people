@@ -49,6 +49,15 @@ export interface SearchRequest {
 
 export type FieldValue = string | number | boolean | Array<string | number | boolean>
 
+export type SourceKind = 'ui' | 'api' | 'mcp' | 'agent' | 'import' | 'legacy'
+
+/** One history entry of a field: the value written, when, and by whom. */
+export interface FieldEntry {
+  v: FieldValue | null
+  ts?: string
+  src?: { kind: SourceKind; by?: string; ref?: string }
+}
+
 export interface Person {
   id: string
   tier: Tier
@@ -56,6 +65,9 @@ export interface Person {
   source?: { file: string; source_id: string; row: number }
   created_at?: string
   updated_at?: string
+  schema_version?: number
+  /** Present on GET /api/people/:id; every field's entries, oldest first. */
+  history?: Record<string, FieldEntry[]>
   [key: string]: unknown
 }
 
@@ -163,4 +175,59 @@ export interface ApiKey {
   last_used_at: string | null
   revoked_at: string | null
   key?: string
+}
+
+export interface WorkflowSpec {
+  key: string
+  label: string
+  description: string
+  selector_field: string
+  options_schema: { properties?: Record<string, { default?: unknown; description?: string; enum?: string[]; type?: string }> }
+}
+
+export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+export type RunItemStatus = 'queued' | 'running' | 'done' | 'failed' | 'skipped'
+
+export interface WorkflowRun {
+  id: number
+  workflow: string
+  status: RunStatus
+  params: { options?: Record<string, unknown>; selector?: string | null; tier?: Tier | null }
+  user_id: number | null
+  username?: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  total: number
+  done: number
+  failed: number
+  credits_used: number
+  summary: { stopped_reason?: string; by_status?: Record<string, number> }
+  error: string | null
+}
+
+export interface WorkflowRunItem {
+  id: number
+  run_id: number
+  workflow: string
+  person_id: string
+  status: RunItemStatus
+  result: {
+    written?: Record<string, unknown>
+    skipped?: { step: string; reason: string }[]
+    not_found?: string[]
+    linkedin?: string
+    company?: string
+    credits?: number
+  }
+  error: string | null
+  credits: number
+  trace_id: string | null
+  logfire_url: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface WorkflowRunDetail extends WorkflowRun {
+  items: WorkflowRunItem[]
 }

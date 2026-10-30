@@ -1,4 +1,5 @@
-"""Per-field embeddings stored in Postgres (pgvector halfvec), one row per (person, field)."""
+"""Per-passage embeddings stored in Postgres (pgvector halfvec): one row per (person, field,
+content hash), i.e. one vector for every distinct history entry of an embedded field."""
 
 import hashlib
 import logging
@@ -10,7 +11,7 @@ from bson import ObjectId
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
-from app import db, fields
+from app import db, fields, history
 from app.config import get_settings
 from app.mongo import db as mongo
 
@@ -88,8 +89,10 @@ async def embed_query(text: str) -> list[float]:
 async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -> int:
     """Bring field_embeddings in line with the current Mongo docs for these people.
 
-    Embeds fields whose text changed, and deletes rows for fields that were removed, emptied or
-    are no longer marked `embed`. Returns the number of vectors computed.
+    Embeds every history entry (passage) of each embedded field that has no vector yet, and
+    deletes rows for passages that no longer apply (person deleted, field removed or no longer
+    marked `embed`). A removed field (current value is a tombstone) keeps its history but gets no
+    vectors. Returns the number of vectors computed.
     """
     ids = [i for i in ids if ObjectId.is_valid(i)]
     if not ids:
@@ -99,14 +102,18 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
         embed_keys &= only_fields
 
     docs = await mongo().people.find({"_id": {"$in": [ObjectId(i) for i in ids]}}).to_list(None)
-    found = {str(d["_id"]) for d in docs}
 
-    wanted: dict[tuple[str, str], tuple[str, str, str]] = {}  # (id, field) -> (tier, text, hash)
+    # (id, field, hash) -> (tier, text)
+    wanted: dict[tuple[str, str, str], tuple[str, str]] = {}
     for doc in docs:
         for key in embed_keys:
-            text = fields.text_of(doc.get(key)).strip()[:MAX_CHARS]
-            if text:
-                wanted[(str(doc["_id"]), key)] = (doc.get("tier", ""), text, _hash(text))
+            prop = doc.get(key)
+            if history.current(prop) is None:      # absent or removed: nothing to match
+                continue
+            for entry in history.entries(prop):
+                text = fields.text_of(entry.get("v")).strip()[:MAX_CHARS]
+                if text:
+                    wanted[(str(doc["_id"]), key, _hash(text))] = (doc.get("tier", ""), text)
 
     fe = db.field_embeddings
     async with db.engine().connect() as conn:
@@ -114,29 +121,28 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
             fe.c.mongo_id.in_(ids))
         if only_fields is not None:
             q = q.where(fe.c.field.in_(only_fields))
-        existing = {(r.mongo_id, r.field): (r.content_hash, r.tier)
+        existing = {(r.mongo_id, r.field, r.content_hash): r.tier
                     for r in await conn.execute(q)}
 
-    stale = [k for k in existing
-             if k[0] not in found or k not in wanted]
-    todo = [(k, v) for k, v in wanted.items()
-            if existing.get(k) != (v[2], v[0])]
+    stale = [k for k in existing if k not in wanted]
+    todo = [(k, v) for k, v in wanted.items() if existing.get(k) != v[0]]
 
     async with db.engine().begin() as conn:
         if stale:
-            await conn.execute(delete(fe).where(tuple_(fe.c.mongo_id, fe.c.field).in_(stale)))
+            await conn.execute(delete(fe).where(
+                tuple_(fe.c.mongo_id, fe.c.field, fe.c.content_hash).in_(stale)))
 
     computed = 0
     for start in range(0, len(todo), BATCH):
         chunk = todo[start:start + BATCH]
         vectors = await embedder().embed([v[1] for _, v in chunk])
-        rows = [{"mongo_id": k[0], "field": k[1], "tier": v[0], "content_hash": v[2],
+        rows = [{"mongo_id": k[0], "field": k[1], "content_hash": k[2], "tier": v[0],
                  "embedding": vec} for (k, v), vec in zip(chunk, vectors, strict=True)]
         stmt = insert(fe).values(rows)
         stmt = stmt.on_conflict_do_update(
-            index_elements=[fe.c.mongo_id, fe.c.field],
-            set_={"tier": stmt.excluded.tier, "content_hash": stmt.excluded.content_hash,
-                  "embedding": stmt.excluded.embedding, "updated_at": stmt.excluded.updated_at})
+            index_elements=[fe.c.mongo_id, fe.c.field, fe.c.content_hash],
+            set_={"tier": stmt.excluded.tier, "embedding": stmt.excluded.embedding,
+                  "updated_at": stmt.excluded.updated_at})
         async with db.engine().begin() as conn:
             await conn.execute(stmt)
         computed += len(rows)

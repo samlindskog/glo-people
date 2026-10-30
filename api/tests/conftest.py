@@ -6,6 +6,7 @@ os.environ["DATABASE_URL"] = _pg
 os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:27017")
 os.environ["MONGO_DB"] = "glo_test"
 os.environ["EMBEDDING_PROVIDER"] = "fake"
+os.environ["LOGFIRE_SEND_TO_LOGFIRE"] = "false"
 
 import asyncio
 import sys
@@ -14,10 +15,13 @@ from pathlib import Path
 import asyncpg
 import httpx
 import pytest
+from pydantic_ai import models as ai_models
 from sqlalchemy import text
 
 from app import auth, db, mongo
 from app.main import api, app, lifespan
+
+ai_models.ALLOW_MODEL_REQUESTS = False   # no accidental LLM calls from tests
 
 PASSWORD = "correct-horse-battery"
 

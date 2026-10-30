@@ -36,12 +36,14 @@ async def test_import_registry_and_coercion(writer):
     assert fl["name"]["count"] == 3 and fl["brand_new_column"]["count"] == 1
     assert "id" not in fl
 
-    ada = await db().people.find_one({"name": "Ada Okafor"})
-    assert ada["tier"] == "member" and ada["mrr"] == 12000
-    assert ada["sectors"] == ["fintech", "payments"]
-    assert ada["emails"] == ["ada@x.io", "ada2@x.io"]
-    assert ada["source"]["source_id"] == "m1"
-    cy = await db().people.find_one({"name": "Cy Diaz"})
+    ada = await db().people.find_one({"name.v": "Ada Okafor"})
+    assert ada["tier"] == "member" and ada["mrr"]["v"] == 12000
+    assert ada["sectors"]["v"] == ["fintech", "payments"]
+    assert ada["emails"]["v"] == ["ada@x.io", "ada2@x.io"]
+    assert ada["source"]["source_id"] == "m1" and ada["schema_version"] == 2
+    assert len(ada["bio"]["h"]) == 1
+    assert ada["bio"]["h"][0]["src"] == {"kind": "import", "by": "members.csv", "ref": "row 2"}
+    cy = await db().people.find_one({"name.v": "Cy Diaz"})
     assert "company" not in cy  # sparse: empty cells omitted
 
 
@@ -52,7 +54,23 @@ async def test_reimport_upserts_and_adds_columns(writer):
     res = await _import(writer, v2, "members.csv", "member")
     assert res["inserted"] == 0 and res["updated"] == 3 and res["new_fields"] == ["twitter"]
     assert await db().people.count_documents({}) == 3
-    assert (await db().people.find_one({"name": "Ada Okafor"}))["twitter"] == "@ada"
+    ada = await db().people.find_one({"name.v": "Ada Okafor"})
+    assert ada["twitter"]["v"] == "@ada"
+    assert len(ada["bio"]["h"]) == 1  # unchanged cells append nothing
+
+
+async def test_reimport_appends_history_for_changed_cells(writer):
+    await _import(writer, MEMBERS, "members.csv", "member")
+    before = await db().people.find_one({"name.v": "Ada Okafor"})
+    await _import(writer, MEMBERS, "members.csv", "member")
+    same = await db().people.find_one({"name.v": "Ada Okafor"})
+    assert same["updated_at"] == before["updated_at"] and len(same["bio"]["h"]) == 1
+    v2 = MEMBERS.replace("Builds payments infrastructure", "Runs payments infrastructure")
+    await _import(writer, v2, "members.csv", "member")
+    ada = await db().people.find_one({"name.v": "Ada Okafor"})
+    assert ada["bio"]["v"].startswith("Runs") and len(ada["bio"]["h"]) == 2
+    assert ada["bio"]["h"][0]["v"].startswith("Builds")
+    assert ada["updated_at"] > before["updated_at"]
 
 
 async def test_crm_without_ids_is_idempotent(writer):
@@ -87,31 +105,116 @@ async def test_person_crud_and_reembed(writer, reader):
                                                           "tags": ["a", "b"]}})
     assert r.status_code == 201, r.text
     pid = r.json()["id"]
-    assert (await reader.get(f"/api/people/{pid}")).json()["tags"] == ["a", "b"]
+    got = (await reader.get(f"/api/people/{pid}")).json()
+    assert got["tags"] == ["a", "b"] and got["bio"] == "builds warehouse robotics"
+    assert [e["src"] for e in got["history"]["name"]] == [{"kind": "ui", "by": "wendy"}]
     assert await fields.get_field("tags")
 
     from sqlalchemy import select
 
     from app import db as pg
     fe = pg.field_embeddings
-    async def bio_hash():
+    async def bio_hashes():
         async with pg.engine().connect() as conn:
-            return (await conn.execute(select(fe.c.content_hash).where(
-                fe.c.mongo_id == pid, fe.c.field == "bio"))).scalar_one_or_none()
-    h1 = await bio_hash()
+            return set((await conn.execute(select(fe.c.content_hash).where(
+                fe.c.mongo_id == pid, fe.c.field == "bio"))).scalars().all())
+    h1 = await bio_hashes()
+    assert len(h1) == 1
     r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones", "tags": None}})
     assert r.status_code == 200 and "tags" not in r.json()
-    assert (await bio_hash()) not in (None, h1)
+    body = r.json()
+    assert body["bio"] == "builds agricultural drones"
+    assert [e["v"] for e in body["history"]["bio"]] == ["builds warehouse robotics",
+                                                        "builds agricultural drones"]
+    assert body["history"]["tags"][-1]["v"] is None  # tombstone
+    h2 = await bio_hashes()
+    assert len(h2) == 2 and h1 < h2  # one vector per passage
+
+    # Same value again: no new entry, no updated_at bump, logged as unchanged.
+    updated_at = body["updated_at"]
+    r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "builds agricultural drones",
+                                                                  "tags": None}})
+    assert len(r.json()["history"]["bio"]) == 2 and len(r.json()["history"]["tags"]) == 2
+    assert r.json()["updated_at"] == updated_at
+    acts = (await writer.get("/api/activity?action=person.update")).json()["items"]
+    assert acts[0]["meta"]["unchanged"] == ["bio", "tags"] and acts[0]["meta"]["src"] == "ui"
+    assert acts[1]["meta"] == {"set": ["bio"], "unset": ["tags"], "unchanged": [], "src": "ui"}
 
     r = await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": None}})
-    assert await bio_hash() is None
+    assert "bio" not in r.json() and await bio_hashes() == set()
 
     assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"name": ""}})
             ).status_code == 422
     assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"Bad Key": 1}})
             ).status_code == 422
+    assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": {"v": "x"}}})
+            ).status_code == 422
+    assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"history": "x"}})
+            ).status_code == 422
     assert (await writer.delete(f"/api/people/{pid}")).status_code == 204
     assert (await reader.get(f"/api/people/{pid}")).status_code == 404
+
+
+async def test_tombstone_drops_coverage_count(writer):
+    r = await writer.post("/api/people", json={"tier": "member",
+                                               "fields": {"name": "Yan", "bio": "long enough bio text"}})
+    pid = r.json()["id"]
+    assert (await fields.get_field("bio"))["count"] == 1
+    await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": None}})
+    assert (await fields.get_field("bio"))["count"] == 0
+
+
+async def test_legacy_documents_are_migrated(writer, reader):
+    from datetime import UTC, datetime
+
+    from app import history
+    ts = datetime(2026, 1, 2, tzinfo=UTC)
+    await db().people.insert_many([
+        {"name": "Old One", "tier": "member", "bio": "legacy bio", "tags": ["x"],
+         "created_at": ts, "updated_at": ts,
+         "source": {"file": "old.csv", "source_id": "1", "row": 7}},
+        {"name": "Old Two", "tier": "member", "created_at": ts},
+    ])
+    one = await db().people.find_one({"name": "Old One"})
+    pid = str(one["_id"])
+    got = (await reader.get(f"/api/people/{pid}")).json()   # readable before migration
+    assert got["bio"] == "legacy bio" and got["history"]["bio"] == [{"v": "legacy bio"}]
+
+    assert await history.migrate_legacy() == 2
+    assert await history.migrate_legacy() == 0
+    one = await db().people.find_one({"_id": one["_id"]})
+    assert one["schema_version"] == 2 and one["updated_at"] == ts
+    assert one["bio"] == {"v": "legacy bio", "h": [{"v": "legacy bio", "ts": ts,
+                                                   "src": {"kind": "import", "by": "old.csv",
+                                                           "ref": "row 7"}}]}
+    two = await db().people.find_one({"name.v": "Old Two"})
+    assert two["name"]["h"][0]["src"] == {"kind": "legacy"} and two["name"]["h"][0]["ts"] == ts
+    assert "name_1" not in await db().people.index_information()
+    assert "name.v_1" in await db().people.index_information()
+
+    # A write on a legacy document migrates it as a side effect.
+    await db().people.insert_one({"name": "Old Three", "tier": "member", "bio": "b"})
+    three = await db().people.find_one({"name": "Old Three"})
+    r = await writer.patch(f"/api/people/{three['_id']}", json={"fields": {"bio": "c"}})
+    assert [e["v"] for e in r.json()["history"]["bio"]] == ["b", "c"]
+    three = await db().people.find_one({"_id": three["_id"]})
+    assert three["schema_version"] == 2 and three["name"]["v"] == "Old Three"
+
+
+async def test_duplicate_rows_in_one_import_keep_every_entry(writer):
+    csv = "ID,Name,Bio\nd1,Dup Person,first bio\nd1,Dup Person,second bio\n"
+    res = await _import(writer, csv, "dups.csv", "member")
+    assert res["inserted"] == 1 and await db().people.count_documents({}) == 1
+    doc = await db().people.find_one({"source.source_id": "d1"})
+    assert doc["bio"]["v"] == "second bio"
+    assert [e["v"] for e in doc["bio"]["h"]] == ["first bio", "second bio"]
+    assert [e["src"]["ref"] for e in doc["bio"]["h"]] == ["row 2", "row 3"]
+    assert doc["source"]["row"] == 3
+
+
+async def test_reserved_history_header_is_renamed(writer):
+    res = await _import(writer, "Name,History\nA,was here\n", "h.csv", "member")
+    assert "col_history" in res["new_fields"]
 
 
 async def test_toggle_field_embed(writer):
@@ -148,8 +251,8 @@ async def test_prose_columns_stay_text_and_short_values_not_embedded(writer):
     assert fl["notes"]["type"] == "text"
     assert fl["tags"]["type"] == "list"
     assert fl["bio"]["embed"] and not fl["status"]["embed"]
-    a = await db().people.find_one({"name": "A"})
-    assert a["location"] == "Lagos, Nigeria" and a["tags"] == ["a", "b", "c"]
+    a = await db().people.find_one({"name.v": "A"})
+    assert a["location"]["v"] == "Lagos, Nigeria" and a["tags"]["v"] == ["a", "b", "c"]
 
 
 async def test_switching_embedder_reembeds(writer):

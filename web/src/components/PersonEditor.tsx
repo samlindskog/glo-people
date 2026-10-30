@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import type { FieldInfo, Person, Tier } from '../types'
 
-const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at'])
+const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at', 'schema_version', 'history'])
 const KEY_RE = /^[a-z][a-z0-9_]{0,63}$/
 
 interface Row {
@@ -122,7 +122,10 @@ export default function PersonEditor({ person, fields, onSave, onCancel }: Props
           <option key={f.key} value={f.key} />
         ))}
       </datalist>
-      <p className="text-xs text-slate-500">List fields: separate items with “;”.</p>
+      <p className="text-xs text-slate-500">
+        List fields: separate items with “;”. Saving records a new entry for each changed field; previous values are kept
+        in the field’s history.
+      </p>
       <div className="flex gap-2">
         <button type="button" className="btn-secondary" onClick={() => setRows([...rows, { key: '', text: '', isNew: true, removed: false }])}>
           + Add field

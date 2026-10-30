@@ -15,6 +15,7 @@ import PeoplePage from './pages/People'
 import PersonPage from './pages/Person'
 import PersonNewPage from './pages/PersonNew'
 import SearchesPage from './pages/Searches'
+import WorkflowsPage from './pages/Workflows'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -40,6 +41,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/people/import" element={<RequireAuth permission="people:write"><ImportPage /></RequireAuth>} />
               <Route path="/people/:id" element={<RequireAuth permission="people:read"><PersonPage /></RequireAuth>} />
               <Route path="/fields" element={<RequireAuth permission="people:read"><FieldsPage /></RequireAuth>} />
+              <Route path="/workflows" element={<RequireAuth permission="people:read"><WorkflowsPage /></RequireAuth>} />
               <Route path="/searches" element={<RequireAuth permission="searches:read_own"><SearchesPage /></RequireAuth>} />
               <Route path="/activity" element={<RequireAuth permission="activity:read"><ActivityPage /></RequireAuth>} />
               <Route path="/accounts" element={<RequireAuth permission="accounts:manage"><AccountsPage /></RequireAuth>} />

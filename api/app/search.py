@@ -9,7 +9,7 @@ from bson import ObjectId
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
-from app import db, embeddings, fields
+from app import db, embeddings, fields, history
 from app.auth import Principal
 from app.mongo import db as mongo
 
@@ -37,7 +37,8 @@ class SemanticQuery(BaseModel):
                               description="Embedded field keys to compare against, e.g. ['bio']")
     mode: Literal["avg", "max"] = Field(
         "avg", description="avg: mean cosine similarity over the listed fields the person has; "
-                           "max: best single field")
+                           "max: best single field. A field's own score is its best-matching "
+                           "passage across the field's history entries.")
     threshold: float = Field(0.4, ge=-1, le=1,
                              description="Only return people whose aggregate score >= threshold")
     require_all_fields: bool = Field(
@@ -100,36 +101,38 @@ def _num_or_str(value: Any, ftype: str) -> Any:
 
 
 def filter_to_mongo(f: FieldFilter, ftype: str = "text") -> dict:
+    """Mongo condition for one filter, against the field's current value (`field.v`)."""
     v = f.value
+    path = f"{f.field}.v"
     match f.op:
         case "exists":
             present = v is None or bool(v)
-            return {f.field: {"$exists": True, "$nin": [None, "", []]}} if present else \
-                {"$or": [{f.field: {"$exists": False}}, {f.field: {"$in": [None, "", []]}}]}
+            return {path: {"$exists": True, "$nin": [None, "", []]}} if present else \
+                {"$or": [{path: {"$exists": False}}, {path: {"$in": [None, "", []]}}]}
         case "eq" | "ne":
             if isinstance(v, str) and ftype != "number":
                 cond = _ci(f"^{re.escape(v)}$")
             else:
                 cond = _num_or_str(v, ftype)
-            return {f.field: cond} if f.op == "eq" else {f.field: {"$not": cond} if
+            return {path: cond} if f.op == "eq" else {path: {"$not": cond} if
                                                          isinstance(cond, dict) else {"$ne": cond}}
         case "contains":
-            return {f.field: _ci(re.escape(str(v or "")))}
+            return {path: _ci(re.escape(str(v or "")))}
         case "starts_with":
-            return {f.field: _ci(f"^{re.escape(str(v or ''))}")}
+            return {path: _ci(f"^{re.escape(str(v or ''))}")}
         case "regex":
             try:
                 re.compile(str(v))
             except re.error as e:
                 raise ValueError(f"invalid regex for {f.field}: {e}") from e
-            return {f.field: _ci(str(v))}
+            return {path: _ci(str(v))}
         case "in":
             values = v if isinstance(v, list) else [v]
             ors = [_ci(f"^{re.escape(x)}$") if isinstance(x, str) and ftype != "number"
                    else _num_or_str(x, ftype) for x in values]
-            return {"$or": [{f.field: o} for o in ors]} if ors else {"_id": None}
+            return {"$or": [{path: o} for o in ors]} if ors else {"_id": None}
         case "gt" | "gte" | "lt" | "lte":
-            return {f.field: {f"${f.op}": _num_or_str(v, ftype)}}
+            return {path: {f"${f.op}": _num_or_str(v, ftype)}}
     raise ValueError(f"unsupported op {f.op}")
 
 
@@ -144,17 +147,21 @@ async def mongo_query(req: SearchRequest) -> dict:
 # --- semantic scoring ---------------------------------------------------------------------------
 
 _SCORE_SQL = """
+WITH per_field AS (
+    SELECT mongo_id, field, max(1 - (embedding <=> CAST(:q AS halfvec))) AS sim
+    FROM field_embeddings
+    WHERE field = ANY(:fields)
+      {tier_clause}
+      {ids_clause}
+    GROUP BY mongo_id, field
+)
 SELECT mongo_id,
-       {agg}(1 - (embedding <=> CAST(:q AS halfvec))) AS score,
-       jsonb_object_agg(field, round((1 - (embedding <=> CAST(:q AS halfvec)))::numeric, 4))
-           AS field_scores,
+       {agg}(sim) AS score,
+       jsonb_object_agg(field, round(sim::numeric, 4)) AS field_scores,
        count(*) AS n
-FROM field_embeddings
-WHERE field = ANY(:fields)
-  {tier_clause}
-  {ids_clause}
+FROM per_field
 GROUP BY mongo_id
-HAVING {agg}(1 - (embedding <=> CAST(:q AS halfvec))) >= :threshold
+HAVING {agg}(sim) >= :threshold
    {all_clause}
 ORDER BY score DESC, mongo_id
 """
@@ -188,12 +195,16 @@ async def semantic_scores(sem: SemanticQuery, tier: str | None,
 
 # --- orchestration ------------------------------------------------------------------------------
 
-def public_person(doc: dict) -> dict:
-    out = {k: v for k, v in doc.items() if k != "_id"}
-    out["id"] = str(doc["_id"])
-    for k in ("created_at", "updated_at"):
-        if k in out and hasattr(out[k], "isoformat"):
-            out[k] = out[k].isoformat()
+def public_person(doc: dict, include_history: bool = False) -> dict:
+    """Flat view (current values) of a person; with `history`, every field's entries too."""
+    out: dict[str, Any] = {"id": str(doc["_id"])}
+    for k in ("tier", "source", "created_at", "updated_at", "schema_version"):
+        if k in doc:
+            out[k] = doc[k].isoformat() if hasattr(doc[k], "isoformat") else doc[k]
+    out.update(history.flatten(doc, fields.SYSTEM_FIELDS))
+    if include_history:
+        out["history"] = {k: history.public_entries(v) for k, v in doc.items()
+                          if k not in fields.SYSTEM_FIELDS}
     return out
 
 
@@ -203,8 +214,8 @@ async def run_search(req: SearchRequest) -> SearchResponse:
     skip = (req.page - 1) * req.limit
 
     if req.semantic is None:
-        sort = [("name", 1)] if req.sort == "score" else \
-            [(req.sort.field, 1 if req.sort.dir == "asc" else -1), ("_id", 1)]
+        sort = [("name.v", 1)] if req.sort == "score" else \
+            [(f"{req.sort.field}.v", 1 if req.sort.dir == "asc" else -1), ("_id", 1)]
         total = await people.count_documents(query)
         docs = await people.find(query).sort(sort).skip(skip).limit(req.limit).to_list(None)
         return SearchResponse(total=total, page=req.page, limit=req.limit,
@@ -226,7 +237,7 @@ async def run_search(req: SearchRequest) -> SearchResponse:
     else:
         direction = 1 if req.sort.dir == "asc" else -1
         docs = await (people.find({"_id": {"$in": [ObjectId(m) for m in by_id]}})
-                      .sort([(req.sort.field, direction), ("_id", 1)])
+                      .sort([(f"{req.sort.field}.v", direction), ("_id", 1)])
                       .skip(skip).limit(req.limit).to_list(None))
 
     results = []

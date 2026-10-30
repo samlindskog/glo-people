@@ -12,6 +12,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app import activity, auth, fields
 from app import people as people_svc
 from app.auth import Principal
+from app.history import Source
 from app.search import (
     MAX_LIMIT,
     FieldFilter,
@@ -31,7 +32,12 @@ Search and read the GLO people database. People are schema-less documents in two
 coverage, and which are embedded for semantic search. search_people combines literal per-field
 filters (AND) with optional semantic similarity over one or more embedded fields, aggregated by
 avg or max and cut off at a threshold (cosine similarity; default 0.4. Unrelated text scores
-around 0.2-0.3, so 0.35-0.5 is the useful range)."""
+around 0.2-0.3, so 0.35-0.5 is the useful range). A field's semantic score is its best-matching
+passage across the field's history. Field values are never overwritten: create_person and
+update_person append time-stamped entries (with their source) to each field's history, and the
+latest entry is the current value; get_person returns the current values plus `history`.
+Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to your
+key (kind "mcp") with the agent name noted in its reference."""
 
 
 class GloMCP(MCPServer):
@@ -114,7 +120,8 @@ async def search_people(
 
 @mcp.tool()
 async def get_person(ctx: Context, id: Annotated[str, Field(description="Person id")]) -> dict:
-    """Fetch one person by id with all of their fields."""
+    """Fetch one person by id: current field values plus `history`
+    ({field: [{v, ts, src}], oldest first})."""
     principal = await _principal(ctx, "people:read")
     try:
         person = await people_svc.get(id)
@@ -131,11 +138,14 @@ async def create_person(
     ctx: Context,
     tier: Literal["member", "plus_one"],
     fields: Annotated[dict[str, Any], Field(description="Field key → value; 'name' required")],
+    agent: Annotated[str | None, Field(description="Name of the automated agent making this "
+                                                   "change, if any; noted in the entry source")] = None,
 ) -> dict:
     """Create a person (requires people:write). New field keys are added to the registry."""
     principal = await _principal(ctx, "people:write")
     try:
-        return await people_svc.create(principal, tier, fields)
+        return await people_svc.create(principal, tier, fields,
+                                       source=Source.for_mcp(principal, agent))
     except people_svc.PersonError as e:
         raise ToolError(str(e)) from e
 
@@ -145,13 +155,19 @@ async def update_person(
     ctx: Context,
     id: str,
     fields: Annotated[dict[str, Any],
-                      Field(description="Field key → new value; null removes the field")],
+                      Field(description="Field key → new value. Each value is appended as a new "
+                                        "time-stamped entry in the field's history (earlier values "
+                                        "are kept); the current value is a no-op; null records a "
+                                        "removal.")],
     tier: Literal["member", "plus_one"] | None = None,
+    agent: Annotated[str | None, Field(description="Name of the automated agent making this "
+                                                   "change, if any; noted in the entry source")] = None,
 ) -> dict:
-    """Update a person's fields (requires people:write)."""
+    """Append new values to a person's fields (requires people:write)."""
     principal = await _principal(ctx, "people:write")
     try:
-        person = await people_svc.update(principal, id, fields, tier)
+        person = await people_svc.update(principal, id, fields, tier,
+                                         source=Source.for_mcp(principal, agent))
     except people_svc.PersonError as e:
         raise ToolError(str(e)) from e
     if not person:

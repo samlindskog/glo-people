@@ -19,7 +19,7 @@ async def ensure_indexes() -> None:
                               unique=True,
                               partialFilterExpression={"source.source_id": {"$exists": True}})
     await people.create_index([("tier", ASCENDING)])
-    await people.create_index([("name", ASCENDING)])
+    await people.create_index([("name.v", ASCENDING)])
 
 
 async def close() -> None:

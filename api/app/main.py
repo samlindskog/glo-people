@@ -4,24 +4,31 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from app import db, jobs, mongo
+from app import db, history, jobs, mongo, observability, workflows
 from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
 from app.routers import accounts, people
 from app.routers import auth as auth_router
+from app.routers import workflows as workflows_router
+from app.workflows import runner
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+observability.setup()
 
 mcp_app = build_mcp_app()
+workflows.load_all()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     load_contract()
     await mongo.ensure_indexes()
+    await history.migrate_legacy()
+    await runner.reconcile()
     async with mcp.session_manager.run():
         yield
+    await runner.drain()
     await jobs.drain()
     await mongo.close()
     await db.dispose()
@@ -32,6 +39,8 @@ api = FastAPI(title="glo-people", lifespan=lifespan, docs_url="/api/docs",
 api.include_router(auth_router.router)
 api.include_router(people.router)
 api.include_router(accounts.router)
+api.include_router(workflows_router.router)
+observability.instrument_app(api)
 
 
 @api.get("/api/health")

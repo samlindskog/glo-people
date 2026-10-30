@@ -7,6 +7,13 @@ x-api-env: &api-env
   MONGO_DB: glo
   EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  # Workflows (Firecrawl + pydantic-ai agents) and Logfire telemetry; all optional.
+  FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+  AGENT_MODEL: ${AGENT_MODEL:-openai:gpt-6-luna}
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LOGFIRE_ENVIRONMENT: ${LOGFIRE_ENVIRONMENT:-dev}
+  LOGFIRE_INCLUDE_CONTENT: ${LOGFIRE_INCLUDE_CONTENT:-true}
+  LOGFIRE_PROJECT_URL: ${LOGFIRE_PROJECT_URL:-}
 
 services:
   postgres:

@@ -100,3 +100,21 @@ async def test_reader_key_cannot_write(client_factory, keys):
     assert got["name"] == "Z"
     _, fl = await call(c, r, "list_fields", {})
     assert any(f["key"] == "bio" for f in fl)
+
+
+async def test_update_records_source_and_history(client_factory, keys):
+    w, _ = keys
+    c = await client_factory()
+    await init(c, w)
+    _, res = await call(c, w, "create_person", {"tier": "member", "fields": {"name": "Q", "bio": "one"}})
+    assert res["history"]["name"][0]["src"]["kind"] == "mcp"
+    _, res = await call(c, w, "update_person", {"id": res["id"], "fields": {"bio": "two"},
+                                                "agent": "scout"})
+    assert res["bio"] == "two"
+    src = res["history"]["bio"][-1]["src"]
+    # The agent name is only a note: an MCP caller cannot forge a workflow ("agent") entry.
+    assert src["kind"] == "mcp" and src["by"] == "wendy" and src["ref"].endswith(" agent:scout")
+    _, res = await call(c, w, "update_person", {"id": res["id"], "fields": {"bio": "two"}})
+    assert len(res["history"]["bio"]) == 2
+    _, got = await call(c, w, "get_person", {"id": res["id"]})
+    assert [e["v"] for e in got["history"]["bio"]] == ["one", "two"]

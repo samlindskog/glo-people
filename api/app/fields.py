@@ -12,12 +12,13 @@ from app.mongo import db
 
 FieldType = Literal["text", "number", "date", "list", "url"]
 
-SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated_at"})
+SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated_at",
+                           "schema_version", "history"})
 TIERS = ("member", "plus_one")
 
 _NOT_EMBEDDED = re.compile(
     r"(^|_)(id|email|emails|phone|phones|whatsapp|linkedin|instagram|twitter|website|url|"
-    r"do_not_contact|in_whatsapp|linkedin_connected)($|_)")
+    r"github|related_links|do_not_contact|in_whatsapp|linkedin_connected)($|_)")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?")
 _URLISH = re.compile(r"^(https?://|www\.)", re.IGNORECASE)
 _KEY_OK = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -69,7 +70,7 @@ def infer_type(values: list[Any]) -> FieldType:
 
 
 def text_of(value: Any) -> str:
-    """The string we embed / show for a field value."""
+    """The string we embed / show for one field value (a history entry's `v`)."""
     if isinstance(value, list):
         return "; ".join(str(v) for v in value if v not in (None, ""))
     return "" if value is None else str(value)
@@ -108,10 +109,12 @@ async def register(samples: dict[str, list[Any]]) -> list[str]:
 
 
 async def refresh_counts() -> None:
-    """Recompute how many people have each field (coverage)."""
+    """Recompute how many people have each field (coverage): a field counts when its current
+    value (`field.v`) is present and not a tombstone."""
     pipeline = [
         {"$project": {"kv": {"$objectToArray": "$$ROOT"}}},
         {"$unwind": "$kv"},
+        {"$match": {"kv.v.v": {"$exists": True, "$nin": [None, "", []]}}},
         {"$group": {"_id": "$kv.k", "count": {"$sum": 1}}},
     ]
     counts = {d["_id"]: d["count"] async for d in await db().people.aggregate(pipeline)}

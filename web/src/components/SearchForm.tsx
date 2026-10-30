@@ -211,7 +211,9 @@ export default function SearchForm({ initial, fields, onSearch }: Props) {
                 </div>
               </div>
               <label className="space-y-1">
-                <span className="label">Threshold ≥ {sem.threshold.toFixed(2)}</span>
+                <span className="label" title="A field's score is its best-matching history entry">
+                  Threshold ≥ {sem.threshold.toFixed(2)}
+                </span>
                 <div className="flex items-center gap-2">
                   <input
                     type="range"

@@ -13,6 +13,9 @@ import type {
   SearchResponse,
   Tier,
   User,
+  WorkflowRun,
+  WorkflowRunDetail,
+  WorkflowSpec,
 } from './types'
 
 export class ApiError extends Error {
@@ -110,4 +113,14 @@ export const api = {
     request<ApiKey>('POST', `/api/users/${userId}/api-keys`, { name }),
   revokeUserKey: (userId: number, id: number) =>
     request<void>('DELETE', `/api/users/${userId}/api-keys/${id}`),
+
+  workflows: () => request<WorkflowSpec[]>('GET', '/api/workflows'),
+  startRun: (
+    key: string,
+    body: { person_ids?: string[]; all_with_field?: string; tier?: Tier | null; options?: Record<string, unknown> },
+  ) => request<WorkflowRun>('POST', `/api/workflows/${key}/runs`, body),
+  runs: (params: { limit?: number; offset?: number } = {}) =>
+    request<Page<WorkflowRun>>('GET', `/api/workflows/runs${qs(params)}`),
+  run: (id: number) => request<WorkflowRunDetail>('GET', `/api/workflows/runs/${id}`),
+  cancelRun: (id: number) => request<WorkflowRun>('POST', `/api/workflows/runs/${id}/cancel`),
 }

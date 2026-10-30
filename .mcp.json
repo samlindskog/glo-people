@@ -2,7 +2,16 @@
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated"]
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.83",
+        "--headless",
+        "--isolated"
+      ]
+    },
+    "logfire": {
+      "type": "http",
+      "url": "https://logfire-us.pydantic.dev/mcp"
     }
   }
 }

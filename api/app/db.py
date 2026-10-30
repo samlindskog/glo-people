@@ -96,8 +96,46 @@ field_embeddings = Table(
     Column("content_hash", String(64), nullable=False),
     Column("embedding", HALFVEC(get_settings().embedding_dims), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    PrimaryKeyConstraint("mongo_id", "field"),
+    PrimaryKeyConstraint("mongo_id", "field", "content_hash"),
     Index("ix_field_embeddings_field_tier", "field", "tier"),
+)
+
+workflow_runs = Table(
+    "workflow_runs",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("workflow", String(64), nullable=False),
+    Column("status", String(16), nullable=False),  # queued | running | done | failed | cancelled
+    Column("params", JSONB, nullable=False, server_default="{}"),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
+    Column("total", Integer, nullable=False, server_default="0"),
+    Column("done", Integer, nullable=False, server_default="0"),
+    Column("failed", Integer, nullable=False, server_default="0"),
+    Column("credits_used", Integer, nullable=False, server_default="0"),
+    Column("summary", JSONB, nullable=False, server_default="{}"),
+    Column("error", Text),
+    Index("ix_workflow_runs_created", "created_at"),
+)
+
+workflow_run_items = Table(
+    "workflow_run_items",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("run_id", Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("workflow", String(64), nullable=False),
+    Column("person_id", String(24), nullable=False),
+    Column("status", String(16), nullable=False),  # queued | running | done | failed | skipped
+    Column("result", JSONB, nullable=False, server_default="{}"),
+    Column("error", Text),
+    Column("credits", Integer, nullable=False, server_default="0"),
+    Column("trace_id", String(32)),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
+    Index("ix_workflow_run_items_run_status", "run_id", "status"),
+    Index("ix_workflow_run_items_person", "workflow", "person_id", "finished_at"),
 )
 
 _engine: AsyncEngine | None = None
