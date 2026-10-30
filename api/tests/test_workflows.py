@@ -23,6 +23,7 @@ from app.workflows.firecrawl import (
     SCRAPE_CREDITS,
     SEARCH_CREDITS,
     AsyncFirecrawl,
+    FirecrawlError,
     NotFound,
     ScrapeResult,
     SearchHit,
@@ -35,6 +36,7 @@ PEOPLE = """Name,Company,Location,LinkedIn,Website,Bio
 Ada Okafor,PayRail,"Lagos, Nigeria",https://www.linkedin.com/in/adaokafor?,www.adaokafor.dev,Builds payments infrastructure
 Bo Chen,Leafy,Berlin,https://linkedin.com/in/bochen,https://bochen.me,Climate founder
 Cy Diaz,,,,,Doctor turned investor
+Dee Evans,,,https://www.linkedin.com/in/exchange-fail,,Operator
 """
 
 PAGES = {
@@ -58,6 +60,9 @@ class FakeFirecrawl(AsyncFirecrawl):
         self.budget.check_scrape(expected_credits)
         FakeFirecrawl.calls.append(("scrape", url))
         match = next((k for k in PAGES if url_key(k) == url_key(url)), None)
+        if "exchange-fail" in url:
+            raise FirecrawlError("Firecrawl HTTP 500: All scraping engines failed to retrieve "
+                                 "content from this URL. Engines tried: [exchange].")
         if match is None:
             raise NotFound(f"no fixture for {url}")
         name, credits, provider, links = PAGES[match]
@@ -260,6 +265,14 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert "company_summary" not in person and "github" not in person
 
 
+async def test_provider_route_failure_counts_as_not_found(writer, people):
+    run = await run_for(writer, [people["Dee Evans"]])
+    item = run["items"][0]
+    assert item["status"] == "done" and item["credits"] == 0
+    assert item["result"]["linkedin"] == "not_found" and "linkedin" in item["result"]["not_found"]
+    assert "could not resolve" in item["result"]["skipped"][0]["reason"]
+
+
 async def test_nothing_known_costs_nothing(writer, people):
     run = await run_for(writer, [people["Cy Diaz"]])
     item = run["items"][0]
@@ -292,13 +305,13 @@ async def test_run_credit_cap_stops_the_run(writer, people):
 
 async def test_bulk_selector_and_listing(writer, people):
     r = await writer.post("/api/workflows/enrich/runs", json={"all_with_field": "linkedin"})
-    assert r.status_code == 201 and r.json()["total"] == 2
+    assert r.status_code == 201 and r.json()["total"] == 3
     await runner.drain()
     runs = (await writer.get("/api/workflows/runs")).json()["items"]
     assert runs[0]["id"] == r.json()["id"] and runs[0]["username"] == "wendy"
-    assert runs[0]["status"] == "done" and runs[0]["done"] == 2
+    assert runs[0]["status"] == "done" and runs[0]["done"] == 3
     acts = (await writer.get("/api/activity?action=workflow.run")).json()["items"]
-    assert acts[0]["meta"]["people"] == 2 and acts[0]["meta"]["workflow"] == "enrich"
+    assert acts[0]["meta"]["people"] == 3 and acts[0]["meta"]["workflow"] == "enrich"
 
 
 async def test_reconcile_fails_interrupted_runs(writer, people):

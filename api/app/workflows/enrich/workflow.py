@@ -125,6 +125,13 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     except NotConfigured:
         raise
     except FirecrawlError as e:
+        if "[exchange]" in str(e):
+            # The data-provider route ran and came back empty-handed (Firecrawl reports this as a
+            # 500 rather than THIRD_PARTY_DATA_NOT_FOUND): same outcome as "no record".
+            st.result["linkedin"] = "not_found"
+            st.result["not_found"].append("linkedin")
+            deps.skip("linkedin", "the enrichment providers could not resolve this profile")
+            return
         # e.g. 403 "Enrichment is not enabled for person profiles": the rest of the ladder still
         # has the record's own website and company to work with.
         st.result["linkedin"] = "error"
