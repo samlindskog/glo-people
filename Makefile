@@ -53,8 +53,8 @@ properties:     ## the property catalog with coverage
 classify:       ## suggest property_specs entries for untyped properties from the data
 	$(API) python -m app.cli classify
 
-migrate:        ## apply alembic migrations and wrap legacy field values into histories (dev)
-	$(API) sh -c 'alembic upgrade head && python -m app.cli migrate-history'
+migrate:        ## apply alembic migrations, wrap legacy values into histories, normalise (dev)
+	$(API) sh -c 'alembic upgrade head && python -m app.cli migrate-history && python -m app.cli normalize --all'
 
 psql:
 	$(DEV) exec postgres psql -U glo glo

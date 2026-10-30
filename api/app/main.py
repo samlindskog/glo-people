@@ -43,14 +43,16 @@ async def lifespan(_: FastAPI):
         logging.getLogger(__name__).warning("DEV_AUTO_LOGIN is on: every request acts as 'dev'")
     await mongo.ensure_indexes()
     await people_svc.migrate_legacy()
-    try:
-        await properties.sync_specs()
-    except Exception:
-        # Typically a pending migration (property_embeddings). The catalog still works from the
-        # registry and specs; `python -m app.cli embed` syncs the names once migrated.
-        logging.getLogger(__name__).exception(
-            "property sync failed at startup; run `alembic upgrade head` (make prod-migrate)")
-    await runner.reconcile()
+    # Prod never runs alembic on its own (make prod-migrate does, after a deploy), so a release
+    # that adds tables must still come up before the migration: the steps that need the new
+    # tables log an error and are retried by the migration commands instead of crashing the app.
+    for step in (properties.sync_specs, runner.reconcile):
+        try:
+            await step()
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "%s failed at startup; pending migration? run `alembic upgrade head` "
+                "(make prod-migrate)", step.__name__)
     async with mcp.session_manager.run():
         yield
     await runner.drain()
