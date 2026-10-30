@@ -1,28 +1,28 @@
-"""What a workflow's run_item sees: the person, its budgeted Firecrawl client, and a `write`
-helper that appends to the person's fields with an agent source."""
+"""What a workflow's run_item sees: the person, the run/item identity, the item budget, and a
+`write` helper that appends to the person's fields with an agent source. Extends the agents'
+dependency object so the same instance can be handed to agents the workflow calls."""
 
 from dataclasses import dataclass, field
 from typing import Any
 
 from app import people
+from app.agents.common import AgentDeps
 from app.auth import Principal
 from app.history import Source
-from app.workflows.firecrawl import AsyncFirecrawl, Budget
+from app.workflows.base import Budget
 
 
-@dataclass
-class WorkflowDeps:
+@dataclass(kw_only=True)
+class WorkflowDeps(AgentDeps):
     workflow: str
     run_id: int
     item_id: int
-    person: dict[str, Any]              # public_person(..., include_history=True)
+    person: dict[str, Any]              # people.public(..., include_history=True)
     principal: Principal                # who started the run (for the activity log)
-    firecrawl: AsyncFirecrawl
     budget: Budget
     options: Any
     written: dict[str, Any] = field(default_factory=dict)
     skipped: list[dict[str, str]] = field(default_factory=list)
-    notes: dict[str, Any] = field(default_factory=dict)
 
     @property
     def person_id(self) -> str:

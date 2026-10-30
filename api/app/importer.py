@@ -9,11 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from pymongo import UpdateOne
-
-from app import fields, history
-from app.history import Source
-from app.mongo import db
+from app import fields, people
 
 _NUMBER = re.compile(r"^-?\$?\d[\d,]*(\.\d+)?$")
 _NEVER_NUMERIC = re.compile(r"(^|_)(id|phone|phones|zip|postal|whatsapp)($|_)")
@@ -22,7 +18,6 @@ _LIST_SEPARATORS = re.compile(r"\s*(?:\n|;|\s\|\s)\s*")
 _PROSE = re.compile(r"(^|_)(bio|bios|note|notes|description|message|messages|summary|liner|"
                     r"comment|comments|about|location|address|city|country|region|name|title|"
                     r"role|company|goals?|preferences)($|_)")
-WRITE_BATCH = 1000
 
 csv.field_size_limit(10_000_000)
 
@@ -184,35 +179,9 @@ async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
     result.new_fields = await fields.register(samples)
 
     source_file = filename.rsplit("/", 1)[-1]
-    system = fields.SYSTEM_FIELDS
-    for start in range(0, len(docs), WRITE_BATCH):
-        chunk = docs[start:start + WRITE_BATCH]
-        existing = {d["source"]["source_id"]: d async for d in db().people.find(
-            {"source.file": source_file,
-             "source.source_id": {"$in": [sid for sid, _ in chunk]}})}
-        # Rows sharing a source_id (duplicate ID, or same name+email) fold into ONE update, applied
-        # in file order, so no row's entry is lost to a later $set of the same property.
-        pending: dict[str, dict[str, Any]] = {}
-        for source_id, d in chunk:
-            row_no = d.pop("_row")
-            src = Source("import", source_file, f"row {row_no}")
-            cur = pending.get(source_id) or existing.get(source_id)
-            to_set, changed, _, _ = history.apply(cur or {}, d, src, now, system)
-            set_doc: dict[str, Any] = {
-                **(pending.get(source_id) or {}), **to_set, "tier": tier,
-                "source": {"file": source_file, "source_id": source_id, "row": row_no},
-                "schema_version": history.SCHEMA_VERSION}
-            if changed or cur is None:
-                set_doc["updated_at"] = now
-            pending[source_id] = set_doc
-        ops = [UpdateOne({"source.file": source_file, "source.source_id": sid},
-                         {"$set": set_doc, "$setOnInsert": {"created_at": now}}, upsert=True)
-               for sid, set_doc in pending.items()]
-        res = await db().people.bulk_write(ops, ordered=False)
-        result.inserted += res.upserted_count
-        result.updated += res.matched_count
+    rows = [(source_id, d.pop("_row"), d) for source_id, d in docs]
+    result.inserted, result.updated = await people.upsert_imported(rows, source_file, tier, now)
 
-    ids = await db().people.find({"source.file": source_file}, {"_id": 1}).to_list(None)
-    result.ids = [str(d["_id"]) for d in ids]
+    result.ids = await people.find_ids({"source.file": source_file})
     await fields.refresh_counts()
     return result

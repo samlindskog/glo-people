@@ -3,8 +3,8 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationError
 
+from app import people
 from app.auth import Principal, require
-from app.mongo import db as mongo
 from app.search import FieldFilter, SearchRequest, mongo_query
 from app.workflows import REGISTRY, runner
 
@@ -43,8 +43,7 @@ async def start_run(key: str, body: RunRequest, principal: Writer) -> dict:
         req = SearchRequest(tier=body.tier, filters=[
             FieldFilter(field=body.all_with_field, op="exists", value=True)], limit=1)
         query = await mongo_query(req)
-        ids = [str(d["_id"]) async for d in mongo().people.find(query, {"_id": 1})
-               .sort("_id", 1).limit(MAX_BULK)]
+        ids = await people.find_ids(query, limit=MAX_BULK)
     else:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
                             "person_ids or all_with_field is required")

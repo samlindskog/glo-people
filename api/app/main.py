@@ -4,13 +4,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from app import auth, db, history, jobs, mongo, observability, workflows
+from app import auth, db, embeddings, jobs, mongo, observability, workflows
+from app import people as people_svc
 from app.config import get_settings
 from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
-from app.routers import accounts, people
+from app.routers import accounts
 from app.routers import auth as auth_router
+from app.routers import people as people_router
 from app.routers import workflows as workflows_router
 from app.workflows import runner
 
@@ -19,6 +21,8 @@ observability.setup()
 
 mcp_app = build_mcp_app()
 workflows.load_all()
+# Composition root: what reacts to a person write (people.py itself knows no consumer).
+people_svc.on_write(embeddings.sync_person)
 
 
 def check_dev_auto_login() -> None:
@@ -36,7 +40,7 @@ async def lifespan(_: FastAPI):
         await auth.ensure_dev_user()
         logging.getLogger(__name__).warning("DEV_AUTO_LOGIN is on: every request acts as 'dev'")
     await mongo.ensure_indexes()
-    await history.migrate_legacy()
+    await people_svc.migrate_legacy()
     await runner.reconcile()
     async with mcp.session_manager.run():
         yield
@@ -49,7 +53,7 @@ async def lifespan(_: FastAPI):
 api = FastAPI(title="glo-people", lifespan=lifespan, docs_url="/api/docs",
               openapi_url="/api/openapi.json", redoc_url=None)
 api.include_router(auth_router.router)
-api.include_router(people.router)
+api.include_router(people_router.router)
 api.include_router(accounts.router)
 api.include_router(workflows_router.router)
 observability.instrument_app(api)

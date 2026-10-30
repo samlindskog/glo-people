@@ -8,12 +8,13 @@ and indexes work on `field.v`. An entry is `{"v": value | None, "ts": datetime, 
 Not to be confused with the document-level `source` sub-document the CSV importer writes.
 
 Documents written before this module existed hold bare scalars; every reader here tolerates them
-(`entries()` synthesises one entry) and `upgrade_doc()` / `migrate_legacy()` wrap them for good.
+(`entries()` synthesises one entry) and `upgrade_doc()` (run by `people.migrate_legacy`) wraps them
+for good. This module is pure: no database access.
 """
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal
 
 from app.auth import Principal
@@ -170,40 +171,3 @@ def public_entries(prop: Any) -> list[dict]:
         out.append(pub)
     return out
 
-
-async def migrate_legacy(dry_run: bool = False, page: int = 500) -> int:
-    """Wrap every bare field value on every person into a property. Idempotent; never bumps
-    updated_at. Returns the number of documents migrated."""
-    from app import fields, mongo
-
-    people = mongo.db().people
-    now = datetime.now(UTC)
-    migrated = 0
-    last = None
-    while True:
-        q: dict[str, Any] = {"schema_version": {"$ne": SCHEMA_VERSION}}
-        if last is not None:
-            q["_id"] = {"$gt": last}
-        batch = await people.find(q).sort("_id", 1).limit(page).to_list(None)
-        if not batch:
-            break
-        last = batch[-1]["_id"]
-        for doc in batch:
-            upgrades = upgrade_doc(doc, now, fields.SYSTEM_FIELDS)
-            if dry_run:
-                migrated += 1
-                continue
-            res = await people.update_one(
-                {"_id": doc["_id"], "schema_version": {"$ne": SCHEMA_VERSION}},
-                {"$set": {**upgrades, "schema_version": SCHEMA_VERSION}})
-            migrated += res.modified_count
-    if migrated and not dry_run:
-        log.info("migrated %d people documents to field history", migrated)
-    if not dry_run:
-        indexes = await people.index_information()
-        if "name_1" in indexes:
-            await people.drop_index("name_1")
-        await mongo.ensure_indexes()
-        if migrated:
-            await fields.refresh_counts()
-    return migrated

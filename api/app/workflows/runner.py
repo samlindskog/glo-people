@@ -1,7 +1,9 @@
 """Workflow runs: Postgres-backed state, in-process execution (the API runs one worker).
 
 A run holds one item per person. Items run concurrently up to `workflow_concurrency`, each in its
-own Logfire span; a run-level credit cap stops the run early and marks the rest `skipped`.
+own Logfire span; a run-level credit cap stops the run early and marks the rest `skipped`. The
+runner is generic: a workflow builds its own dependencies (`spec.make_deps`), reports spend through
+`deps.budget.credits`, and raises `StopRun` when the whole run must stop.
 """
 
 import asyncio
@@ -17,9 +19,8 @@ from app import activity, db
 from app import people as people_svc
 from app.auth import Principal
 from app.config import get_settings
-from app.workflows import REGISTRY, WorkflowSpec
+from app.workflows.base import REGISTRY, StopRun, WorkflowSpec
 from app.workflows.context import WorkflowDeps
-from app.workflows.firecrawl import AsyncFirecrawl, CreditsExhausted, NotConfigured
 
 log = logging.getLogger(__name__)
 
@@ -171,7 +172,7 @@ async def _run(run_id: int, principal: Principal) -> None:
                            .values(status="running", started_at=_now()))
     items = await get_items(run_id)
     sem = asyncio.Semaphore(get_settings().workflow_concurrency)
-    per_item_cap = spec.budget_for(options).max_credits
+    per_item_cap = spec.item_cap(options)
     credits_used = 0
     in_flight = 0
     started = 0
@@ -208,8 +209,8 @@ async def _run(run_id: int, principal: Principal) -> None:
                     cond.notify_all()
             async with cond:
                 credits_used += max(credits, 0)
-                if credits == -1:                 # account out of credits: stop the run
-                    stopped = "firecrawl credits exhausted"
+                if credits == -1:                 # the workflow asked to stop the run
+                    stopped = "stopped by the workflow"
                 cond.notify_all()
 
     await asyncio.gather(*(one(it) for it in items))
@@ -231,7 +232,7 @@ async def _mark(item_id: int, status: str, result: dict | None = None, error: st
 
 async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
                     principal: Principal) -> int:
-    """Run one person; returns the credits spent, or -1 when Firecrawl is out of credits."""
+    """Run one person; returns the credits spent, or -1 when the workflow raised StopRun."""
     async with db.engine().begin() as conn:
         res = await conn.execute(update(db.workflow_run_items).where(
             db.workflow_run_items.c.id == item["id"],
@@ -239,16 +240,18 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
                                                               started_at=_now()))
     if res.rowcount == 0:        # cancel() skipped it between our check and this transition
         return 0
-    budget = spec.budget_for(options)
-    client = AsyncFirecrawl(budget=budget)
     trace_id = None
     deps: WorkflowDeps | None = None
 
+    def credits() -> int:
+        return deps.budget.credits if deps is not None else 0
+
     def partial() -> dict:
-        """What a failed item still has to show: writes and skips so far, and the paid calls."""
-        out: dict[str, Any] = {"credits": budget.credits, "calls": budget.calls}
+        """What a failed item still has to show: writes and skips so far, and the spend."""
+        out: dict[str, Any] = {"credits": credits()}
         if deps is not None:
-            out.update(written=deps.written, skipped=deps.skipped)
+            out.update(written=deps.written, skipped=deps.skipped,
+                       calls=getattr(deps.budget, "calls", None))
         return out
 
     try:
@@ -262,26 +265,22 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
             if person is None:
                 await _mark(item["id"], "failed", error="person not found", trace_id=trace_id)
                 return 0
-            deps = WorkflowDeps(workflow=spec.key, run_id=run_id, item_id=item["id"],
-                                person=person, principal=principal, firecrawl=client,
-                                budget=budget, options=options)
+            deps = await spec.make_deps(run_id, item["id"], person, options, principal)
             result = await spec.run_item(deps)
-            result = {**result, "credits": budget.credits, "calls": budget.calls}
-            span.set_attribute("credits", budget.credits)
+            result = {**result, "credits": credits(), "calls": getattr(deps.budget, "calls", None)}
+            span.set_attribute("credits", credits())
             await _mark(item["id"], result.pop("status", "done"), result=result,
-                        credits=budget.credits, trace_id=trace_id)
-            return budget.credits
-    except CreditsExhausted as e:
-        await _mark(item["id"], "failed", result=partial(), error=str(e),
-                    credits=budget.credits, trace_id=trace_id)
+                        credits=credits(), trace_id=trace_id)
+            return credits()
+    except StopRun as e:
+        await _mark(item["id"], "failed", result=partial(), error=str(e), credits=credits(),
+                    trace_id=trace_id)
         return -1
-    except NotConfigured as e:
-        await _mark(item["id"], "failed", result=partial(), error=str(e), trace_id=trace_id)
-        return 0
     except Exception as e:
         log.exception("workflow %s item %s failed", spec.key, item["id"])
         await _mark(item["id"], "failed", result=partial(), error=f"{type(e).__name__}: {e}"[:500],
-                    credits=budget.credits, trace_id=trace_id)
-        return budget.credits
+                    credits=credits(), trace_id=trace_id)
+        return credits()
     finally:
-        await client.aclose()
+        if deps is not None:
+            await deps.aclose()

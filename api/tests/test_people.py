@@ -1,6 +1,6 @@
 import pytest
 
-from app import embeddings, fields, jobs
+from app import embedder, embeddings, fields, jobs
 from app.mongo import db
 
 MEMBERS = """﻿ID,Name,Company,Sectors,Bio,MRR,Emails,Brand New Column
@@ -167,7 +167,7 @@ async def test_tombstone_drops_coverage_count(writer):
 async def test_legacy_documents_are_migrated(writer, reader):
     from datetime import UTC, datetime
 
-    from app import history
+    from app import people as people_svc
     ts = datetime(2026, 1, 2, tzinfo=UTC)
     await db().people.insert_many([
         {"name": "Old One", "tier": "member", "bio": "legacy bio", "tags": ["x"],
@@ -180,8 +180,8 @@ async def test_legacy_documents_are_migrated(writer, reader):
     got = (await reader.get(f"/api/people/{pid}")).json()   # readable before migration
     assert got["bio"] == "legacy bio" and got["history"]["bio"] == [{"v": "legacy bio"}]
 
-    assert await history.migrate_legacy() == 2
-    assert await history.migrate_legacy() == 0
+    assert await people_svc.migrate_legacy() == 2
+    assert await people_svc.migrate_legacy() == 0
     one = await db().people.find_one({"_id": one["_id"]})
     assert one["schema_version"] == 2 and one["updated_at"] == ts
     assert one["bio"] == {"v": "legacy bio", "h": [{"v": "legacy bio", "ts": ts,
@@ -234,7 +234,7 @@ async def test_toggle_field_embed(writer):
 
 @pytest.fixture(autouse=True)
 def _fake_embedder():
-    embeddings.set_embedder(embeddings.FakeEmbedder(512))
+    embedder.set_embedder(embedder.FakeEmbedder(512))
 
 
 PROSE = """Name,Location,Bio,Status,Notes,Tags
@@ -260,8 +260,8 @@ async def test_switching_embedder_reembeds(writer):
     ids = [str(d["_id"]) async for d in db().people.find({}, {"_id": 1})]
     assert await embeddings.sync_people(ids) == 0  # up to date
 
-    class Other(embeddings.FakeEmbedder):
+    class Other(embedder.FakeEmbedder):
         pass
 
-    embeddings.set_embedder(Other(512))
+    embedder.set_embedder(Other(512))
     assert await embeddings.sync_people(ids) > 0

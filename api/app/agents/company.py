@@ -1,18 +1,31 @@
 """Agent: find a company's official website (when not already known) and summarise it."""
 
+from typing import Literal
+
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 
-from app.workflows.context import WorkflowDeps
-from app.workflows.enrich.agents_common import budgeted_fetch, run_agent
-from app.workflows.enrich.models import CompanySummary
-from app.workflows.enrich.urls import host_of, is_social, registrable
-from app.workflows.firecrawl import BudgetExceeded, FirecrawlError, SearchHit
+from app.agents.common import AgentDeps, budgeted_fetch, run_agent
+from app.integrations.firecrawl import BudgetExceeded, FirecrawlError, SearchHit
+from app.urls import host_of, is_social, registrable
 
 AGENT_NAME = "company"
 
+
+class CompanySummary(BaseModel):
+    website: str | None = Field(None, description="The company's official website, or None")
+    summary: str | None = Field(None, description="Two or three plain sentences: what the "
+                                                  "company does, for whom, and anything notable "
+                                                  "(stage, location). None if unresolved.")
+    confidence: Literal["high", "medium", "low"] = Field(
+        description="high: the page names the company and matches the person's context; "
+                    "medium: likely but not corroborated; low: guess or no page found")
+    evidence_url: str | None = Field(None, description="Page the summary is based on")
+
+
 agent = Agent(
-    name=f"enrich.{AGENT_NAME}",
-    deps_type=WorkflowDeps,
+    name=f"agents.{AGENT_NAME}",
+    deps_type=AgentDeps,
     output_type=CompanySummary,
     instructions="""\
 You identify a company's official website and write a short factual summary of what it does.
@@ -38,7 +51,7 @@ def _allow(url: str, hosts: set[str]) -> bool:
     return registrable(host_of(url)) in hosts
 
 
-def allow_hosts(deps: WorkflowDeps, hits: list[SearchHit]) -> None:
+def allow_hosts(deps: AgentDeps, hits: list[SearchHit]) -> None:
     """Let fetch_page visit the search results' own sites. Social and directory hosts are left
     out: a LinkedIn company page goes through paid data providers, and a directory is not the
     company speaking for itself."""
@@ -47,7 +60,7 @@ def allow_hosts(deps: WorkflowDeps, hits: list[SearchHit]) -> None:
 
 
 @agent.tool
-async def fetch_page(ctx: RunContext[WorkflowDeps], url: str) -> str:
+async def fetch_page(ctx: RunContext[AgentDeps], url: str) -> str:
     """Fetch a web page: only the candidate website or a site returned by web_search."""
     # Page text and search snippets are untrusted; the model may only fetch sites we have seen
     # a reason to visit (candidate site, search results), never an arbitrary URL from a page.
@@ -58,7 +71,7 @@ async def fetch_page(ctx: RunContext[WorkflowDeps], url: str) -> str:
 
 
 @agent.tool
-async def web_search(ctx: RunContext[WorkflowDeps], query: str) -> str:
+async def web_search(ctx: RunContext[AgentDeps], query: str) -> str:
     """Search the web (one call allowed). Returns up to five results as `title — url — snippet`."""
     deps = ctx.deps
     if deps.notes.get("company_search", 0) >= deps.notes.get("company_search_cap", 1):
@@ -76,7 +89,7 @@ async def web_search(ctx: RunContext[WorkflowDeps], query: str) -> str:
     return "\n".join(f"{h.title} — {h.url} — {h.description[:200]}" for h in hits)
 
 
-async def research(deps: WorkflowDeps, company: str, candidate_site: str | None,
+async def research(deps: AgentDeps, company: str, candidate_site: str | None,
                    context: str, allow_search: bool, pages_cap: int) -> CompanySummary:
     deps.notes["company_pages"] = 0
     deps.notes["company_pages_cap"] = pages_cap

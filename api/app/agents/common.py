@@ -1,16 +1,29 @@
-"""Shared plumbing for the enrichment agents: model selection, usage limits, budgeted tools."""
+"""Shared plumbing for every pydantic-ai agent in the app: the model to run on, usage limits, the
+dependencies tools receive, and a budgeted page-fetch helper for tools that read the web."""
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.usage import UsageLimits
 
 from app.config import get_settings
-from app.workflows.context import WorkflowDeps
-from app.workflows.enrich.budget import MAX_PROMPT_CHARS
-from app.workflows.firecrawl import BudgetExceeded, FirecrawlError
+from app.integrations.firecrawl import AsyncFirecrawl, BudgetExceeded, FirecrawlError
 
 REQUEST_LIMIT = 6
+MAX_PROMPT_CHARS = 8000       # page text handed to an agent
+
+
+@dataclass
+class AgentDeps:
+    """What agent tools can reach: a budgeted Firecrawl client and a scratch space for per-run
+    counters. Callers that need more (workflows) subclass it."""
+
+    firecrawl: AsyncFirecrawl
+    notes: dict[str, Any] = field(default_factory=dict)
+
+    async def aclose(self) -> None:
+        await self.firecrawl.aclose()
 
 
 def model_settings() -> dict[str, Any]:
@@ -20,7 +33,7 @@ def model_settings() -> dict[str, Any]:
     return {}
 
 
-async def run_agent(agent: Agent, prompt: str, deps: WorkflowDeps | None = None) -> Any:
+async def run_agent(agent: Agent, prompt: str, deps: AgentDeps | None = None) -> Any:
     """Run an agent with the configured model and this app's usage limits; returns `.output`."""
     result = await agent.run(prompt, deps=deps, model=get_settings().agent_model,
                              usage_limits=UsageLimits(request_limit=REQUEST_LIMIT),
@@ -33,7 +46,7 @@ def excerpt(text: str, limit: int = MAX_PROMPT_CHARS) -> str:
     return text if len(text) <= limit else text[:limit] + "\n…[truncated]"
 
 
-async def budgeted_fetch(ctx: RunContext[WorkflowDeps], url: str, counter: str, cap: int,
+async def budgeted_fetch(ctx: RunContext[AgentDeps], url: str, counter: str, cap: int,
                          allowed=None) -> str:
     """Fetch a page for an agent tool, bounded by a per-agent counter and the item budget.
     Returns page text or a short explanation the model can act on; never raises."""

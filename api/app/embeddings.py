@@ -1,97 +1,39 @@
-"""Per-passage embeddings stored in Postgres (pgvector halfvec): one row per (person, field,
-content hash), i.e. one vector for every distinct history entry of an embedded field."""
+"""Passage embeddings: one pgvector row per (person, field, content hash), i.e. one vector for
+every distinct history entry of an embeddable field. Owns the `field_embeddings` table."""
 
-import hashlib
+import asyncio
 import logging
-import math
-import re
-from collections.abc import Iterable, Sequence
+from collections import defaultdict
+from collections.abc import Iterable
 
 from bson import ObjectId
 from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 
-from app import db, fields, history
-from app.config import get_settings
-from app.mongo import db as mongo
+from app import db, embedder, fields, history, people
 
 log = logging.getLogger(__name__)
 
-MAX_CHARS = 8000
-BATCH = 256
+MAX_CHARS = embedder.MAX_CHARS
+_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)   # one sync per person at a time
 
 
-class FakeEmbedder:
-    """Deterministic hashed bag-of-words. Shared words → positive cosine similarity, which is
-    enough for tests and offline dev; not a semantic model."""
-
-    def __init__(self, dims: int) -> None:
-        self.dims = dims
-
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        out = []
-        for text in texts:
-            vec = [0.0] * self.dims
-            for word in re.findall(r"[a-z0-9]+", text.lower()):
-                h = int(hashlib.md5(word.encode()).hexdigest(), 16)
-                vec[h % self.dims] += 1.0 if (h >> 64) & 1 else -1.0
-            norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-            out.append([v / norm for v in vec])
-        return out
-
-
-class OpenAIEmbedder:
-    def __init__(self, api_key: str, model: str, dims: int) -> None:
-        from openai import AsyncOpenAI
-
-        self.client = AsyncOpenAI(api_key=api_key)
-        self.model = model
-        self.dims = dims
-
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        resp = await self.client.embeddings.create(model=self.model, input=list(texts),
-                                                   dimensions=self.dims)
-        return [d.embedding for d in sorted(resp.data, key=lambda d: d.index)]
-
-
-_embedder = None
-
-
-def embedder():
-    global _embedder
-    if _embedder is None:
-        s = get_settings()
-        if s.embedding_provider == "openai" and s.openai_api_key:
-            _embedder = OpenAIEmbedder(s.openai_api_key, s.embedding_model, s.embedding_dims)
-        else:
-            if s.embedding_provider == "openai":
-                log.warning("OPENAI_API_KEY not set; using the fake hashing embedder")
-            _embedder = FakeEmbedder(s.embedding_dims)
-    return _embedder
-
-
-def set_embedder(e) -> None:
-    global _embedder
-    _embedder = e
-
-
-def _hash(text: str) -> str:
-    # Includes the embedder identity so switching provider/model/dims re-embeds everything.
-    e = embedder()
-    who = f"{type(e).__name__}:{getattr(e, 'model', '')}:{e.dims}"
-    return hashlib.sha256(f"{who}:{text}".encode()).hexdigest()
+def passage_text(value) -> str:
+    """The text that represents one field value, for embedding and for matching a stored vector
+    back to its history entry. The single normalisation point for passages."""
+    return fields.text_of(value).strip()[:MAX_CHARS]
 
 
 async def embed_query(text: str) -> list[float]:
-    return (await embedder().embed([text[:MAX_CHARS]]))[0]
+    return (await embedder.embed_texts([text]))[0]
 
 
 async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -> int:
-    """Bring field_embeddings in line with the current Mongo docs for these people.
+    """Bring field_embeddings in line with the current documents of these people.
 
-    Embeds every history entry (passage) of each embedded field that has no vector yet, and
+    Embeds every history entry (passage) of each embeddable field that has no vector yet, and
     deletes rows for passages that no longer apply (person deleted, field removed or no longer
-    marked `embed`). A removed field (current value is a tombstone) keeps its history but gets no
+    embeddable). A removed field (current value is a tombstone) keeps its history but gets no
     vectors. Returns the number of vectors computed.
     """
     ids = [i for i in ids if ObjectId.is_valid(i)]
@@ -101,7 +43,7 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
     if only_fields is not None:
         embed_keys &= only_fields
 
-    docs = await mongo().people.find({"_id": {"$in": [ObjectId(i) for i in ids]}}).to_list(None)
+    docs = await people.fetch(ids)
 
     # (id, field, hash) -> (tier, text)
     wanted: dict[tuple[str, str, str], tuple[str, str]] = {}
@@ -111,9 +53,10 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
             if history.current(prop) is None:      # absent or removed: nothing to match
                 continue
             for entry in history.entries(prop):
-                text = fields.text_of(entry.get("v")).strip()[:MAX_CHARS]
+                text = passage_text(entry.get("v"))
                 if text:
-                    wanted[(str(doc["_id"]), key, _hash(text))] = (doc.get("tier", ""), text)
+                    wanted[(str(doc["_id"]), key, embedder.hash_text(text))] = (
+                        doc.get("tier", ""), text)
 
     fe = db.field_embeddings
     async with db.engine().connect() as conn:
@@ -133,9 +76,9 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
                 tuple_(fe.c.mongo_id, fe.c.field, fe.c.content_hash).in_(stale)))
 
     computed = 0
-    for start in range(0, len(todo), BATCH):
-        chunk = todo[start:start + BATCH]
-        vectors = await embedder().embed([v[1] for _, v in chunk])
+    for start in range(0, len(todo), embedder.BATCH):
+        chunk = todo[start:start + embedder.BATCH]
+        vectors = await embedder.embed_texts([v[1] for _, v in chunk])
         rows = [{"mongo_id": k[0], "field": k[1], "content_hash": k[2], "tier": v[0],
                  "embedding": vec} for (k, v), vec in zip(chunk, vectors, strict=True)]
         stmt = insert(fe).values(rows)
@@ -147,6 +90,12 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
             await conn.execute(stmt)
         computed += len(rows)
     return computed
+
+
+async def sync_person(person_id: str) -> None:
+    """Write hook: re-sync one person, serialised per person within this process."""
+    async with _locks[person_id]:
+        await sync_people([person_id])
 
 
 async def delete_people(ids: Iterable[str]) -> None:
@@ -165,11 +114,10 @@ async def backfill(only_fields: set[str] | None = None, page: int = 1000, progre
     total = 0
     last = None
     while True:
-        q = {"_id": {"$gt": last}} if last else {}
-        batch = await mongo().people.find(q, {"_id": 1}).sort("_id", 1).limit(page).to_list(None)
+        batch = await people.find_ids({"_id": {"$gt": last}} if last else {}, limit=page)
         if not batch:
             return total
-        last = batch[-1]["_id"]
-        total += await sync_people([str(d["_id"]) for d in batch], only_fields)
+        last = ObjectId(batch[-1])
+        total += await sync_people(batch, only_fields)
         if progress:
             progress(total)

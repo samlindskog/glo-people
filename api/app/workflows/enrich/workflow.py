@@ -1,9 +1,9 @@
-"""The enrichment ladder: LinkedIn (FullEnrich via Alexandria) → personal sites → GitHub (github-com
-via Alexandria) and links → company, one function per step, cheapest step first.
+"""The enrichment ladder: LinkedIn (FullEnrich) → personal sites → GitHub and links → company,
+one function per step, cheapest step first.
 
-Every paid call is preceded by a free check; a missing input skips the step instead of searching
-for it (frugal mode) or allows one bounded search (thorough mode). Nothing is overwritten: all
-writes append history entries attributed to `enrich/<agent>`.
+Every paid call is preceded by a free check and a missing input skips the step; nothing is
+searched for when the record gives no lead. Nothing is overwritten: all writes append history
+entries attributed to `enrich/<agent>`.
 """
 
 import logging
@@ -13,15 +13,24 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import logfire
+from pydantic import BaseModel
 
+from app.agents import company as company_agent
+from app.agents import site_reader
+from app.auth import Principal
 from app.config import get_settings
-from app.workflows import runner
-from app.workflows.context import WorkflowDeps
-from app.workflows.enrich import company as company_agent
-from app.workflows.enrich import github, linkedin_reader, site_reader
-from app.workflows.enrich.budget import MIN_PAGE_CHARS, caps
-from app.workflows.enrich.models import EnrichOptions, LinkedInProfile
-from app.workflows.enrich.urls import (
+from app.integrations import fullenrich, github
+from app.integrations.firecrawl import (
+    AsyncFirecrawl,
+    BudgetExceeded,
+    CreditsExhausted,
+    FirecrawlError,
+    NotConfigured,
+    NotFound,
+    TermsRequired,
+)
+from app.integrations.fullenrich import LinkedInProfile
+from app.urls import (
     github_profile,
     host_mentions,
     host_of,
@@ -31,13 +40,11 @@ from app.workflows.enrich.urls import (
     normalize_url,
     url_key,
 )
-from app.workflows.firecrawl import (
-    BudgetExceeded,
-    FirecrawlError,
-    NotConfigured,
-    NotFound,
-    TermsRequired,
-)
+from app.workflows import runner
+from app.workflows.base import StopRun
+from app.workflows.context import WorkflowDeps
+from app.workflows.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
+from app.workflows.enrich.models import EnrichOptions
 
 log = logging.getLogger(__name__)
 WORKFLOW = "enrich"
@@ -46,12 +53,26 @@ MAX_HEADLINE_CHARS = 300
 MAX_SUMMARY_CHARS = 1200
 
 
+async def make_deps(run_id: int, item_id: int, person: dict, options: BaseModel,
+                    principal: Principal) -> WorkflowDeps:
+    budget = budget_for(options)
+    return WorkflowDeps(firecrawl=AsyncFirecrawl(budget=budget), workflow=WORKFLOW, run_id=run_id,
+                        item_id=item_id, person=person, principal=principal, budget=budget,
+                        options=options)
+
+
+async def run_item(deps: WorkflowDeps) -> dict[str, Any]:
+    try:
+        return await _ladder(deps)
+    except CreditsExhausted as e:           # the Firecrawl account itself is empty
+        raise StopRun(str(e)) from e
+
+
 @dataclass
 class State:
     """What the steps hand each other."""
 
     options: EnrichOptions
-    caps: dict
     name: str
     previously_missing: set[str]
     profile: LinkedInProfile | None = None
@@ -59,10 +80,6 @@ class State:
     related: list[str] = field(default_factory=list)
     result: dict[str, Any] = field(default_factory=lambda: {
         "linkedin": "absent", "company": "absent", "not_found": []})
-
-    @property
-    def frugal_note(self) -> str:
-        return "" if self.options.mode == "thorough" else "; frugal mode does not search"
 
 
 def _has_url(deps: WorkflowDeps, key: str, url: str) -> bool:
@@ -77,13 +94,22 @@ def _clip(text: str | None, limit: int) -> str | None:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
-async def run_item(deps: WorkflowDeps) -> dict[str, Any]:
+def split_urls(value: Any) -> list[str]:
+    """A field may hold several URLs in one string ("a.com , b.com"), a list, or one URL."""
+    if isinstance(value, list):
+        return [u for v in value for u in split_urls(v)]
+    if not isinstance(value, str):
+        return []
+    return [p for p in re.split(r"[\s,;|]+", value) if p and "." in p]
+
+
+async def _ladder(deps: WorkflowDeps) -> dict[str, Any]:
     options: EnrichOptions = deps.options
     skip = await _recently_enriched(deps, options)
     if skip is not None:
         return skip
     last = await runner.last_done_item(WORKFLOW, deps.person_id)
-    st = State(options=options, caps=caps(options), name=str(deps.current("name") or ""),
+    st = State(options=options, name=str(deps.current("name") or ""),
                previously_missing=set((last or {}).get("result", {}).get("not_found", []))
                if last and not options.refresh else set())
     await _step_linkedin(deps, st)
@@ -109,8 +135,9 @@ async def _recently_enriched(deps: WorkflowDeps, options: EnrichOptions) -> dict
 
 
 async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
-    """Run one Alexandria call with the ladder's error policy: a miss is `not_found`, unaccepted
-    provider terms or a provider error are `error` (the rest of the ladder still runs)."""
+    """Run one data-provider call with the ladder's error policy: a miss is `not_found`,
+    unaccepted provider terms or a provider error are `error` (the rest of the ladder still runs),
+    an exhausted item budget is a skipped step."""
     try:
         return await call()
     except NotFound:
@@ -134,32 +161,16 @@ async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
 async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     """Step 1: the person's FullEnrich record (exact LinkedIn URL, 5 credits; a miss is free)."""
     li = linkedin_profile(deps.current("linkedin"))
-    # Thorough mode can resolve a person by name + employer domain when the record's website is
-    # the company's (its host names the company).
-    company = deps.current("company")
-    site = deps.current("website")
-    company_domain = host_of(site) if isinstance(site, str) and isinstance(company, str) \
-        and host_mentions(host_of(site), company) else ""
-    if not li and not (st.options.mode == "thorough" and st.name and company_domain):
-        deps.skip("linkedin", "no linkedin.com/in URL on the record" + st.frugal_note)
+    if not li:
+        deps.skip("linkedin", "no linkedin.com/in URL on the record")
         return
     if "linkedin" in st.previously_missing:
         deps.skip("linkedin", "no provider record last time; not retried within the TTL")
         st.result["linkedin"] = "not_found"
         return
-    profile = None
     with logfire.span("linkedin_reader"):
-        if li:
-            found = await _provider_call(deps, st, "linkedin",
-                                         lambda: linkedin_reader.match(deps, li))
-            if found:
-                profile, st.result["linkedin_provider"] = found
-        if profile is None and st.options.mode == "thorough" and st.name and company_domain \
-                and st.result.get("linkedin") not in ("error",):
-            profile = await _provider_call(
-                deps, st, "linkedin", lambda: linkedin_reader.lookup(deps, st.name, company_domain))
-            if profile:
-                st.result["linkedin_provider"] = linkedin_reader.PROVIDER
+        profile = await _provider_call(deps, st, "linkedin",
+                                       lambda: fullenrich.match(deps.firecrawl, li))
     if profile is None:
         if st.result["linkedin"] == "absent":
             st.result["linkedin"] = "not_found"
@@ -167,6 +178,7 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
             deps.skip("linkedin", "no data provider has a record for this profile")
         return
     st.result["linkedin"] = "matched"
+    st.result["linkedin_provider"] = fullenrich.PROVIDER
     st.profile = profile
     github_url = github_profile(profile.github_url)
     if github_url:
@@ -181,16 +193,7 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     if company and (not isinstance(current_company, str)
                     or current_company.strip().lower() != company.strip().lower()):
         values["company"] = company        # a new employer: appended, the old one stays in history
-    await deps.write(linkedin_reader.AGENT_NAME, values)
-
-
-def split_urls(value: Any) -> list[str]:
-    """A field may hold several URLs in one string ("a.com , b.com"), a list, or one URL."""
-    if isinstance(value, list):
-        return [u for v in value for u in split_urls(v)]
-    if not isinstance(value, str):
-        return []
-    return [p for p in re.split(r"[\s,;|]+", value) if p and "." in p]
+    await deps.write("linkedin_reader", values)
 
 
 def _site_candidates(deps: WorkflowDeps, st: State) -> list[str]:
@@ -211,7 +214,7 @@ async def _step_sites(deps: WorkflowDeps, st: State) -> None:
     if not candidates:
         deps.skip("sites", "no personal website known")
         return
-    for site in candidates[:st.caps["sites"]]:
+    for site in candidates[:CAPS["sites"]]:
         try:
             page = await deps.firecrawl.scrape(site, formats=("markdown", "links"))
         except NotFound:
@@ -230,7 +233,7 @@ async def _step_sites(deps: WorkflowDeps, st: State) -> None:
             continue
         with logfire.span("site_reader {site}", site=site):
             findings = await site_reader.read(deps, st.name, site, page.markdown, page.links,
-                                              st.caps["follow"])
+                                              CAPS["follow"])
         if not findings.is_personal:
             # A company or unrelated site: its links are about the company, not the person.
             deps.skip("sites", f"{site}: not the person's own site")
@@ -256,7 +259,7 @@ async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
         await _github_facts(deps, st, github_urls[0])
     else:
         st.result["not_found"].append("github")
-        deps.skip("github", "no GitHub link on the profile or sites" + st.frugal_note)
+        deps.skip("github", "no GitHub link on the profile or sites")
     exclude = {url_key(deps.current("website")), *map(url_key, github_urls)}
     links = [n for n in map(normalize_url, st.related)
              if n and not linkedin_profile(n) and url_key(n) not in exclude]
@@ -276,7 +279,7 @@ async def _github_facts(deps: WorkflowDeps, st: State, github_url: str) -> None:
         return
     with logfire.span("github {url}", url=github_url):
         found = await _provider_call(deps, st, "github",
-                                     lambda: github.lookup(deps, github_url))
+                                     lambda: github.lookup(deps.firecrawl, github_url))
     if not found:
         return
     st.result["github"] = "matched"
@@ -284,11 +287,12 @@ async def _github_facts(deps: WorkflowDeps, st: State, github_url: str) -> None:
     if found.blog and not is_social(found.blog) and is_html_candidate(found.blog) \
             and not _has_url(deps, "website", found.blog):
         values["website"] = found.blog       # the account's blog field is usually the personal site
-    await deps.write(github.AGENT_NAME, values)
+    await deps.write("github", values)
 
 
 def _company_candidate(deps: WorkflowDeps, st: State, company: str) -> str | None:
-    """The cheapest plausible company website: profile → record → the person's own domain."""
+    """The cheapest plausible company website: the provider's, else a website on the record whose
+    host names the company."""
     if st.profile and st.profile.current_company and st.profile.current_company.website:
         return normalize_url(st.profile.current_company.website)
     for site in [deps.current("website"), *deps.history_values("website")]:
@@ -312,14 +316,14 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
     context = ", ".join(str(x) for x in (deps.current("location"), deps.current("sectors"),
                                           deps.current("role")) if x)
     if st.profile and st.profile.current_company and st.profile.current_company.description:
-        context += f". The data provider describes the company as: " \
+        context += ". The data provider describes the company as: " \
                    f"{_clip(st.profile.current_company.description, 400)}"
     try:
         with logfire.span("company {company}", company=company):
             summary = await company_agent.research(
                 deps, company, _company_candidate(deps, st, company), context,
                 allow_search=deps.budget.searches < deps.budget.max_searches,
-                pages_cap=st.caps["company_pages"])
+                pages_cap=CAPS["company_pages"])
     except BudgetExceeded as e:
         deps.skip("company", str(e))
         return

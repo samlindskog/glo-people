@@ -14,13 +14,9 @@ from pydantic_ai import ModelMessage, ModelResponse
 from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from app import embeddings, jobs
-from app.mongo import db
-from app.workflows import runner
-from app.workflows.enrich import budget as enrich_budget
-from app.workflows.enrich import company, site_reader
-from app.workflows.enrich.urls import url_key
-from app.workflows.firecrawl import (
+from app import embedder, jobs
+from app.agents import company, site_reader
+from app.integrations.firecrawl import (
     SCRAPE_CREDITS,
     SEARCH_CREDITS,
     AlexandriaResult,
@@ -30,6 +26,11 @@ from app.workflows.firecrawl import (
     ScrapeResult,
     SearchHit,
 )
+from app.mongo import db
+from app.urls import url_key
+from app.workflows import runner
+from app.workflows.enrich import budget as enrich_budget
+from app.workflows.enrich import workflow as enrich_workflow
 
 FIX = Path(__file__).parent / "fixtures" / "firecrawl"
 LINKEDIN_CREDITS = 5    # fullenrich/people/match
@@ -168,10 +169,10 @@ def company_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRespons
 
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch):
-    embeddings.set_embedder(embeddings.FakeEmbedder(512))
+    embedder.set_embedder(embedder.FakeEmbedder(512))
     FakeFirecrawl.calls = []
     model_calls.clear()
-    monkeypatch.setattr(runner, "AsyncFirecrawl",
+    monkeypatch.setattr(enrich_workflow, "AsyncFirecrawl",
                         lambda budget: FakeFirecrawl(api_key="fake", budget=budget))
     with ExitStack() as stack:
         stack.enter_context(site_reader.agent.override(model=FunctionModel(site_model)))
@@ -199,7 +200,7 @@ async def run_for(client, ids, **options):
 async def test_workflow_listing_and_permissions(reader, writer):
     specs = (await reader.get("/api/workflows")).json()
     assert specs[0]["key"] == "enrich" and specs[0]["selector_field"] == "linkedin"
-    assert "mode" in specs[0]["options_schema"]["properties"]
+    assert "refresh" in specs[0]["options_schema"]["properties"]
     r = await reader.post("/api/workflows/enrich/runs", json={"person_ids": ["x"]})
     assert r.status_code == 403
     assert (await reader.get("/api/workflows/runs")).json() == {"items": [], "has_more": False}
@@ -274,12 +275,12 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert model_calls["site"] == 1
     steps = {s["step"]: s["reason"] for s in res["skipped"]}
     assert "no data provider" in steps["linkedin"]
-    assert "frugal mode does not search" in steps["github"]
-    # The LinkedIn miss cost nothing: one site scrape plus the one company search frugal allows.
+    assert steps["github"] == "no GitHub link on the profile or sites"
+    # The LinkedIn miss cost nothing: one site scrape plus the one company search allowed.
     assert item["credits"] == SCRAPE_CREDITS + SEARCH_CREDITS
     # Company "Leafy": no candidate site and the search finds nothing -> unresolved, nothing written
     assert res["company"] == "unresolved" and "company" in res["not_found"]
-    assert ("search", "Leafy official website") in FakeFirecrawl.calls
+    assert ("search", "Leafy official website") in FakeFirecrawl.calls   # the one company search
     person = (await reader.get(f"/api/people/{people['Bo Chen']}")).json()
     assert "company_description" not in person and "github" not in person
     assert "related_links" not in person          # links on a non-personal site are not his
@@ -295,7 +296,7 @@ async def test_provider_error_is_a_skipped_step(writer, people):
 
 
 def test_company_fetch_allowlist_skips_social_and_directory_hosts():
-    from app.workflows.enrich.company import _allow, allow_hosts
+    from app.agents.company import _allow, allow_hosts
     deps = type("D", (), {"notes": {}})()
     allow_hosts(deps, [SearchHit("https://www.linkedin.com/company/tuttiai", "", ""),
                        SearchHit("https://www.crunchbase.com/organization/tutti", "", ""),
@@ -315,7 +316,7 @@ async def test_nothing_known_costs_nothing(writer, people):
 
 
 async def test_item_budget_is_respected(writer, people, monkeypatch):
-    monkeypatch.setitem(enrich_budget.CAPS["frugal"], "max_credits", 4)
+    monkeypatch.setitem(enrich_budget.CAPS, "max_credits", 4)
     run = await run_for(writer, [people["Ada Okafor"]])
     item = run["items"][0]
     assert item["status"] == "done"
@@ -383,8 +384,8 @@ async def test_reconcile_fails_interrupted_runs(writer, people):
 
 
 async def test_unconfigured_firecrawl_fails_fast(writer, people, monkeypatch):
-    monkeypatch.setattr(runner, "AsyncFirecrawl", lambda budget: AsyncFirecrawl(api_key="",
-                                                                                 budget=budget))
+    monkeypatch.setattr(enrich_workflow, "AsyncFirecrawl",
+                        lambda budget: AsyncFirecrawl(api_key="", budget=budget))
     run = await run_for(writer, [people["Ada Okafor"]])
     item = run["items"][0]
     assert item["status"] == "failed" and "FIRECRAWL_API_KEY" in item["error"]

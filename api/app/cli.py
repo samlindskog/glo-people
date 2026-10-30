@@ -8,7 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import select, update
 
-from app import auth, db, embeddings, fields, history, importer, mongo
+from app import auth, db, embeddings, fields, importer, mongo, people
 from app.permissions import is_role, roles
 
 
@@ -65,7 +65,7 @@ async def embed(only: list[str] | None) -> None:
 
 
 async def migrate_history(dry_run: bool) -> None:
-    n = await history.migrate_legacy(dry_run=dry_run)
+    n = await people.migrate_legacy(dry_run=dry_run)
     print(f"{'would migrate' if dry_run else 'migrated'} {n} people documents to field history")
 
 

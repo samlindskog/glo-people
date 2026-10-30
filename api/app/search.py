@@ -9,9 +9,8 @@ from bson import ObjectId
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
-from app import db, embeddings, fields, history
+from app import db, embeddings, fields, people
 from app.auth import Principal
-from app.mongo import db as mongo
 
 FilterOp = Literal["eq", "ne", "contains", "starts_with", "regex", "in", "exists",
                    "gt", "gte", "lt", "lte"]
@@ -195,56 +194,42 @@ async def semantic_scores(sem: SemanticQuery, tier: str | None,
 
 # --- orchestration ------------------------------------------------------------------------------
 
-def public_person(doc: dict, include_history: bool = False) -> dict:
-    """Flat view (current values) of a person; with `history`, every field's entries too."""
-    out: dict[str, Any] = {"id": str(doc["_id"])}
-    for k in ("tier", "source", "created_at", "updated_at", "schema_version"):
-        if k in doc:
-            out[k] = doc[k].isoformat() if hasattr(doc[k], "isoformat") else doc[k]
-    out.update(history.flatten(doc, fields.SYSTEM_FIELDS))
-    if include_history:
-        out["history"] = {k: history.public_entries(v) for k, v in doc.items()
-                          if k not in fields.SYSTEM_FIELDS}
-    return out
-
-
 async def run_search(req: SearchRequest) -> SearchResponse:
-    people = mongo().people
     query = await mongo_query(req)
     skip = (req.page - 1) * req.limit
 
     if req.semantic is None:
         sort = [("name.v", 1)] if req.sort == "score" else \
             [(f"{req.sort.field}.v", 1 if req.sort.dir == "asc" else -1), ("_id", 1)]
-        total = await people.count_documents(query)
-        docs = await people.find(query).sort(sort).skip(skip).limit(req.limit).to_list(None)
+        total = await people.count(query)
+        docs = await people.find(query, sort=sort, skip=skip, limit=req.limit)
         return SearchResponse(total=total, page=req.page, limit=req.limit,
                               results=[SearchHit(id=str(d["_id"]), tier=d.get("tier", ""),
-                                                 person=public_person(d)) for d in docs])
+                                                 person=people.public(d)) for d in docs])
 
     ids = None
     if req.filters:
-        ids = [str(d["_id"]) async for d in people.find(query, {"_id": 1})]
+        ids = await people.find_ids(query)
     scored = await semantic_scores(req.semantic, req.tier, ids)
     by_id = {mid: (score, fs) for mid, score, fs in scored}
     total = len(scored)
 
     if req.sort == "score":
         page_ids = [mid for mid, _, _ in scored[skip:skip + req.limit]]
-        docs = await people.find({"_id": {"$in": [ObjectId(i) for i in page_ids]}}).to_list(None)
+        docs = await people.fetch(page_ids)
         order = {mid: i for i, mid in enumerate(page_ids)}
         docs.sort(key=lambda d: order[str(d["_id"])])
     else:
         direction = 1 if req.sort.dir == "asc" else -1
-        docs = await (people.find({"_id": {"$in": [ObjectId(m) for m in by_id]}})
-                      .sort([(f"{req.sort.field}.v", direction), ("_id", 1)])
-                      .skip(skip).limit(req.limit).to_list(None))
+        docs = await people.find({"_id": {"$in": [ObjectId(m) for m in by_id]}},
+                                 sort=[(f"{req.sort.field}.v", direction), ("_id", 1)],
+                                 skip=skip, limit=req.limit)
 
     results = []
     for d in docs:
         score, fs = by_id[str(d["_id"])]
         results.append(SearchHit(id=str(d["_id"]), tier=d.get("tier", ""), score=round(score, 4),
-                                 field_scores=fs, person=public_person(d)))
+                                 field_scores=fs, person=people.public(d)))
     return SearchResponse(total=total, page=req.page, limit=req.limit, results=results)
 
 
