@@ -231,6 +231,15 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
     budget = spec.budget_for(options)
     client = AsyncFirecrawl(budget=budget)
     trace_id = None
+    deps: WorkflowDeps | None = None
+
+    def partial() -> dict:
+        """What a failed item still has to show: writes and skips so far, and the paid calls."""
+        out: dict[str, Any] = {"credits": budget.credits, "calls": budget.calls}
+        if deps is not None:
+            out.update(written=deps.written, skipped=deps.skipped)
+        return out
+
     try:
         with logfire.span("workflow {workflow} item {item_id}", workflow=spec.key,
                           run_id=run_id, item_id=item["id"],
@@ -252,14 +261,15 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
                         credits=budget.credits, trace_id=trace_id)
             return budget.credits
     except CreditsExhausted as e:
-        await _mark(item["id"], "failed", error=str(e), credits=budget.credits, trace_id=trace_id)
+        await _mark(item["id"], "failed", result=partial(), error=str(e),
+                    credits=budget.credits, trace_id=trace_id)
         return -1
     except NotConfigured as e:
-        await _mark(item["id"], "failed", error=str(e), trace_id=trace_id)
+        await _mark(item["id"], "failed", result=partial(), error=str(e), trace_id=trace_id)
         return 0
     except Exception as e:
         log.exception("workflow %s item %s failed", spec.key, item["id"])
-        await _mark(item["id"], "failed", error=f"{type(e).__name__}: {e}"[:500],
+        await _mark(item["id"], "failed", result=partial(), error=f"{type(e).__name__}: {e}"[:500],
                     credits=budget.credits, trace_id=trace_id)
         return budget.credits
     finally:

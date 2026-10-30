@@ -122,6 +122,14 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     except BudgetExceeded as e:
         deps.skip("linkedin", str(e))
         return
+    except NotConfigured:
+        raise
+    except FirecrawlError as e:
+        # e.g. 403 "Enrichment is not enabled for person profiles": the rest of the ladder still
+        # has the record's own website and company to work with.
+        st.result["linkedin"] = "error"
+        deps.skip("linkedin", str(e))
+        return
     st.result["linkedin"] = "matched"
     st.result["linkedin_provider"] = page.provider
     if len(page.markdown) < MIN_PAGE_CHARS:
