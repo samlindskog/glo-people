@@ -115,11 +115,29 @@ def normalizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return _out(info, {"items": items})
 
 
+def site_reader(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """A site is the person's own when the prompt names them in its first lines; no links."""
+    prompt = _prompt(messages)
+    person = _section(prompt, "Person").split("\n")[0].strip()
+    home = prompt.split("# Home page", 1)[-1][:600].lower()
+    personal = bool(person) and person.lower() in home
+    return _out(info, {"is_personal": personal, "github_urls": [], "related_links": [],
+                       "one_liner": None})
+
+
+def company(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """Never resolves a company: low confidence, nothing fetched, nothing written."""
+    return _out(info, {"website": None, "summary": None, "confidence": "low",
+                       "evidence_url": None})
+
+
 FAKES: dict[str, Callable[[list[ModelMessage], AgentInfo], ModelResponse]] = {
     "agents.planner": planner,
     "agents.answer": answer,
     "agents.extract": extract,
     "agents.normalizer": normalizer,
+    "agents.site_reader": site_reader,
+    "agents.company": company,
 }
 
 

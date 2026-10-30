@@ -6,6 +6,7 @@ os.environ["DATABASE_URL"] = _pg
 os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:27017")
 os.environ["MONGO_DB"] = "glo_test"
 os.environ["EMBEDDING_PROVIDER"] = "fake"
+os.environ["FAKE_AGENTS"] = "0"        # tests choose their own fakes; the container may run with 1
 os.environ["LOGFIRE_SEND_TO_LOGFIRE"] = "false"
 
 import asyncio
