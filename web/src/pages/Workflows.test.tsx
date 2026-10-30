@@ -30,7 +30,7 @@ const ITEMS: WorkflowRunItem[] = [
     person_id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
     status: 'done',
     result: {
-      written: { github: 'https://github.com/adaok', company_summary: 'PayRail builds payments rails.' },
+      written: { github: 'https://github.com/adaok', company_description: 'PayRail builds payments rails.' },
       skipped: [{ step: 'sites', reason: 'no personal website known' }],
     },
     error: null,
@@ -80,7 +80,7 @@ test('run detail lists written fields, skipped reasons, errors and trace links',
   )
   const items = screen.getByTestId('run-items')
   expect(items).toHaveTextContent('github')
-  expect(items).toHaveTextContent('company_summary')
+  expect(items).toHaveTextContent('company_description')
   expect(items).toHaveTextContent('no personal website known')
   expect(items).toHaveTextContent('FIRECRAWL_API_KEY is not set')
   expect(screen.getByRole('link', { name: 'Logfire' })).toHaveAttribute('href', ITEMS[0].logfire_url!)

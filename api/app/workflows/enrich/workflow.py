@@ -332,11 +332,12 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
                                      "evidence_url": summary.evidence_url}
     website = normalize_url(summary.website)
     values: dict[str, Any] = {"company_website": website}
-    # A reworded summary of the same website is not new information: only write one when the
-    # record has none yet or the company website changed.
+    # The summary goes on `company_description`, whose earlier values (e.g. the imported one)
+    # stay in its history. A reworded summary of the same website is not new information: only
+    # write one when the record has no description yet or the company website changed.
     same_site = url_key(deps.current("company_website")) == url_key(website)
-    if not (same_site and deps.current("company_summary")):
-        values["company_summary"] = _clip(summary.summary, MAX_SUMMARY_CHARS)
+    if not (same_site and deps.current("company_description")):
+        values["company_description"] = _clip(summary.summary, MAX_SUMMARY_CHARS)
     else:
         deps.skip("company", "summary kept: same website as before")
     if not deps.current("company"):

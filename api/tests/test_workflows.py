@@ -227,7 +227,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                           "Top repos: rails-sdk (★48), settle (★12). Languages: Python, Go.",
         "related_links": ["https://twitter.com/adaokafor", "https://rails.substack.com"],
         "company_website": "https://payrail.io",
-        "company_summary": "PayRail provides payments infrastructure for merchants in West "
+        "company_description": "PayRail provides payments infrastructure for merchants in West "
                            "Africa, with next-day local settlement.",
     }
     # Her site, location and company are already on the record: not re-added.
@@ -242,11 +242,11 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     src = person["history"]["github"][0]["src"]
     assert src == {"kind": "agent", "by": "enrich/linkedin_reader",
                    "ref": f"run:{run['id']}/item:{item['id']}"}
-    assert person["history"]["company_summary"][0]["src"]["by"] == "enrich/company"
+    assert person["history"]["company_description"][0]["src"]["by"] == "enrich/company"
     assert person["history"]["github_summary"][0]["src"]["by"] == "enrich/github"
     assert len(person["history"]["website"]) == 1 and len(person["history"]["company"]) == 1
     fl = {f["key"]: f for f in (await reader.get("/api/fields")).json()}
-    assert fl["company_summary"]["embed"] and fl["github_summary"]["embed"]
+    assert fl["company_description"]["embed"] and fl["github_summary"]["embed"]
     assert not fl["github"]["embed"] and not fl["related_links"]["embed"]
 
 
@@ -279,7 +279,7 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert res["company"] == "unresolved" and "company" in res["not_found"]
     assert ("search", "Leafy official website") in FakeFirecrawl.calls
     person = (await reader.get(f"/api/people/{people['Bo Chen']}")).json()
-    assert "company_summary" not in person and "github" not in person
+    assert "company_description" not in person and "github" not in person
     assert "related_links" not in person          # links on a non-personal site are not his
     assert any("not the person's own site" in s["reason"] for s in res["skipped"])
 

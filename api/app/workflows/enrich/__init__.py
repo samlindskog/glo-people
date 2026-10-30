@@ -11,8 +11,8 @@ SPEC = register(WorkflowSpec(
     description=("Resolves the person's LinkedIn profile through FullEnrich (Firecrawl "
                  "Alexandria, 5 credits per match), reads their personal site(s), summarises a "
                  "known GitHub account (github-com data tool, 5 credits), and records headline, "
-                 "current company, websites, related links and a short summary of the company's "
-                 "website. Fallbacks at every step; frugal mode never searches the web for "
+                 "current company, websites, related links and a short description of the company "
+                 "from its website (appended to company_description). Fallbacks at every step; frugal mode never searches the web for "
                  "missing LinkedIn or GitHub links."),
     selector_field="linkedin",
     options_model=EnrichOptions,
