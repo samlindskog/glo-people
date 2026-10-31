@@ -8,6 +8,7 @@ const TEXT_OPS = ['eq', 'ne', 'contains', 'starts_with', 'regex', 'in', 'exists'
 const RANGE_OPS = [...TEXT_OPS, 'gt', 'gte', 'lt', 'lte'] as const
 const prop = (p: Partial<Property> & Pick<Property, 'key' | 'label' | 'type' | 'embeddable' | 'count'>): Property => ({
   values: [],
+  description: null,
   normalisable: false,
   filter_ops: [...TEXT_OPS],
   source: 'spec',

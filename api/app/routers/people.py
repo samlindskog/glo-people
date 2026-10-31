@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app import activity, db, embeddings, importer, jobs
 from app import people as people_svc
+from app.agents.storage import Proposal
 from app.auth import Principal, require
 from app.history import Source
 from app.normalize import person as normalize_person
@@ -132,6 +133,11 @@ class StoreBody(BaseModel):
     options: StoreOptions = Field(default_factory=StoreOptions)
 
 
+class ApplyBody(BaseModel):
+    proposal: Proposal
+    options: StoreOptions = Field(default_factory=StoreOptions)
+
+
 def _source(principal: Principal, agent: str) -> Source:
     """The passage came from this person (UI or API key); the agent only restructured it."""
     base = Source.for_rest(principal)
@@ -148,15 +154,36 @@ async def _store(person_id: str, passage: str, options: StoreOptions,
         raise _bad_request(e) from e
     if report is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    await activity.record("person.store", principal, person_id, {
-        "items": [{"tag": i.tag, "action": i.action, "key": i.key} for i in report.items],
-        "created": report.created, "chars": len(passage)})
+    await _record_store(principal, person_id, report, chars=len(passage))
     return report
+
+
+async def _record_store(principal: Principal, person_id: str, report: StoreReport, **meta) -> None:
+    if report.applied:
+        await activity.record("person.store", principal, person_id, {
+            "items": [{"key": i.key, "action": i.action} for i in report.items],
+            "created": report.created, **meta})
 
 
 @router.post("/people/{person_id}/store")
 async def store_passage(person_id: str, body: StoreBody, principal: Writer) -> StoreReport:
+    """Store what a passage says about the person. With options.dry_run the agent's proposal
+    comes back with what would happen and nothing is written."""
     return await _store(person_id, body.passage, body.options, principal)
+
+
+@router.post("/people/{person_id}/store/apply")
+async def store_apply(person_id: str, body: ApplyBody, principal: Writer) -> StoreReport:
+    """Apply a proposal (from a dry run, possibly edited); it is checked like the agent's."""
+    try:
+        report = await store.apply(person_id, body.proposal, body.options, principal,
+                                   _source(principal, "store"), commit=not body.options.dry_run)
+    except (ValueError, AgentRunError) as e:
+        raise _bad_request(e) from e
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
+    await _record_store(principal, person_id, report, applied_proposal=True)
+    return report
 
 
 @router.post("/people/{person_id}/store/file")

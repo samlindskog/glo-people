@@ -36,6 +36,7 @@ class Property(BaseModel):
     key: str
     label: str
     type: PropertyType
+    description: str | None = None    # what values it holds (spec, or given at creation)
     values: list[str] = []            # canonical values (enum, enum_list), seeds first
     embeddable: bool
     normalisable: bool
@@ -78,7 +79,9 @@ def _property(key: str, doc: dict | None) -> Property:
     if values:
         _aliases[key] = {e["v"]: list(e.get("aliases") or []) for e in entries}
     return Property(key=key, label=(sp.label if sp else None) or fields.label_for(key),
-                    type=ptype, values=values, embeddable=ptype in EMBEDDABLE,
+                    type=ptype, description=(sp.description if sp else None)
+                    or (doc or {}).get("description"),
+                    values=values, embeddable=ptype in EMBEDDABLE,
                     normalisable=ptype in NORMALISABLE, filter_ops=list(filter_ops(ptype)),
                     source=(doc or {}).get("source") or ("import" if doc else "spec"),
                     created_at=(doc or {}).get("created_at"))
@@ -145,12 +148,15 @@ async def enum_lookup(key: str) -> dict[str, str]:
 
 # --- writes ---------------------------------------------------------------------------------------
 
-async def ensure(keys: Iterable[str], source: CreatedBy) -> list[str]:
+async def ensure(keys: Iterable[str], source: CreatedBy,
+                 descriptions: dict[str, str] | None = None) -> list[str]:
     """Make sure these properties exist; returns the keys created now. The only creator.
 
     Idempotent and safe under concurrency (`$setOnInsert`). A new property is free text and
-    embeddable unless `app.property_specs` types it. Its name is embedded right away; if that
-    fails the registry entry stands and `sync_names` (CLI `embed`, startup) completes it.
+    embeddable unless `app.property_specs` types it; `descriptions` (key → one sentence) is kept
+    on the registry entry and becomes part of the property's name text. The name is embedded
+    right away; if that fails the registry entry stands and `sync_names` (CLI `embed`, startup)
+    completes it.
     """
     wanted = list(dict.fromkeys(keys))
     for key in wanted:
@@ -160,9 +166,16 @@ async def ensure(keys: Iterable[str], source: CreatedBy) -> list[str]:
     if not wanted:
         return []
     now = datetime.now(UTC)
+
+    def on_insert(key: str) -> dict:
+        doc = {"created_at": now, "source": source}
+        if descriptions and descriptions.get(key):
+            doc["description"] = descriptions[key].strip()[:300]
+        return doc
+
     res = await mongo.db().fields.bulk_write(
-        [UpdateOne({"_id": k}, {"$setOnInsert": {"created_at": now, "source": source}},
-                   upsert=True) for k in wanted], ordered=False)
+        [UpdateOne({"_id": k}, {"$setOnInsert": on_insert(k)}, upsert=True) for k in wanted],
+        ordered=False)
     created = [k for k in wanted if k in set(res.upserted_ids.values())] if res.upserted_ids \
         else []
     if created:
@@ -215,8 +228,11 @@ async def sync_specs() -> None:
 # --- name embeddings ------------------------------------------------------------------------------
 
 def name_text(prop: Property) -> str:
-    """The text that stands for a property when names are compared with tags or queries."""
+    """The text that stands for a property when names are compared (near-duplicate checks for
+    new properties): label, description and a few enum values."""
     text = prop.label.lower()
+    if prop.description:
+        text += f": {prop.description}"
     if prop.values:
         text += ". Values: " + "; ".join(prop.values[:NAME_VALUES])
     return text

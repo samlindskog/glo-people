@@ -37,7 +37,8 @@ def _out(info: AgentInfo, data: dict) -> ModelResponse:
     return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, data)])
 
 
-_HEADERS = ("Person", "Passage", "Properties", "Question", "Tier", "People", "Items")
+_HEADERS = ("Person", "Current values", "Passage", "Properties", "Question", "Tier", "People",
+            "Items")
 
 
 def _section(prompt: str, name: str) -> str:
@@ -76,23 +77,44 @@ def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
                                      for pid, n in people[:5]]})
 
 
-def extract(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    """`tag: text` lines become items (an existing key named by the tag is picked up); other
-    sentences land on `notes`."""
+def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """`key: value` lines write to that property (a list type gets the items split on ';',
+    appended); `new <words>: value` proposes a property; a value equal to the current one is
+    confirmed; other sentences go to notes; lines starting with 'hi' are ignored."""
     prompt = _prompt(messages)
     passage = _section(prompt, "Passage")
-    keys = set(re.findall(r"^- ([a-z0-9_]+) \(", _section(prompt, "Properties"), re.MULTILINE))
-    items = []
-    for line in [ln.strip() for ln in re.split(r"[\n.]+", passage) if ln.strip()]:
-        if ":" in line:
-            tag, text = (s.strip() for s in line.split(":", 1))
-            key = fields.slugify(tag)
-            items.append({"tag": tag, "text": text or tag,
-                          "existing_key": key if key in keys else None})
+    props = dict(re.findall(r"^- ([a-z0-9_]+) \((\w+)", _section(prompt, "Properties"), re.MULTILINE))
+    current = dict(re.findall(r"^([a-z0-9_]+): (.*?)(?:  \[|$)", _section(prompt, "Current values"), re.MULTILINE))
+    out: dict = {"writes": [], "new_properties": [], "confirmed": [], "ignored": []}
+    for line in [ln.strip() for ln in re.split(r"(?<=[^0-9])\.\s+|\n+", passage) if ln.strip()]:
+        line = line.rstrip(".")
+        if line.lower().startswith("hi") and ":" not in line:
+            out["ignored"].append(line)
+            continue
+        if line.lower().startswith("new ") and ":" in line:
+            words, value = (s.strip() for s in line[4:].split(":", 1))
+            key = fields.slugify(words)
+            if key in props:        # it exists after all: write to it, as the real agent would
+                out["writes"].append({"key": key, "value": value, "action": "set",
+                                      "conflict": key in current, "evidence": line})
+            else:
+                out["new_properties"].append({"key": key, "label": words.capitalize(),
+                                              "description": f"The person's {words}",
+                                              "value": value, "evidence": line})
+            continue
+        key, value = (s.strip() for s in line.split(":", 1)) if ":" in line else ("notes", line)
+        if key not in props:
+            key, value = "notes", line
+        if current.get(key, "").strip() == value:
+            out["confirmed"].append(key)
+            continue
+        if props[key] in ("list", "enum_list"):
+            out["writes"].append({"key": key, "value": [v.strip() for v in value.split(";")],
+                                  "action": "append", "evidence": line})
         else:
-            items.append({"tag": "notes", "text": line, "existing_key": "notes" if "notes" in keys
-                          else None})
-    return _out(info, {"items": items[:8]})
+            out["writes"].append({"key": key, "value": value, "action": "set",
+                                  "conflict": key in current, "evidence": line})
+    return _out(info, out)
 
 
 def normalizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -134,7 +156,7 @@ def company(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
 FAKES: dict[str, Callable[[list[ModelMessage], AgentInfo], ModelResponse]] = {
     "agents.planner": planner,
     "agents.answer": answer,
-    "agents.extract": extract,
+    "agents.storage": storage,
     "agents.normalizer": normalizer,
     "agents.site_reader": site_reader,
     "agents.company": company,

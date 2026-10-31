@@ -66,7 +66,8 @@ def catalog_prompt(props: Sequence[Property], max_values: int = 12) -> str:
             bits.append("values: " + ", ".join(p.values[:max_values]) + more)
         if p.count:
             bits.append(f"{p.count} people")
-        lines.append(f"- {p.key} ({'; '.join(bits)}): {p.label}")
+        desc = f" — {p.description}" if p.description else ""
+        lines.append(f"- {p.key} ({'; '.join(bits)}): {p.label}{desc}")
     return "\n".join(lines)
 
 

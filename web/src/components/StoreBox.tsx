@@ -1,25 +1,33 @@
 import { useMutation } from '@tanstack/react-query'
 import { useRef, useState, type FormEvent } from 'react'
 import { api } from '../api'
-import type { Person, StoreReport } from '../types'
+import { formatValue } from '../lib'
+import type { NormalizeReport, Person, StoreAction, StoreReport } from '../types'
 import { ErrorNote } from './Layout'
 
-const DEFAULTS = { threshold: 0.5, near_duplicate: 0.8, max_new: 1 }
-const ACTION_CLASS = { existing: 'bg-emerald-50 text-emerald-700', created: 'bg-brand-50 text-brand-700', dropped: 'bg-slate-100 text-slate-500' }
+const DEFAULTS = { near_duplicate: 0.8, max_new: 2 }
+const ACTION_CLASS: Record<StoreAction, string> = {
+  set: 'bg-emerald-50 text-emerald-700',
+  append: 'bg-emerald-50 text-emerald-700',
+  created: 'bg-brand-50 text-brand-700',
+  redirected: 'bg-sky-50 text-sky-700',
+  to_notes: 'bg-sky-50 text-sky-700',
+  confirmed: 'bg-slate-100 text-slate-600',
+  ignored: 'bg-slate-100 text-slate-400',
+}
+const ACTION_LABEL: Record<StoreAction, string> = { set: 'set', append: 'added to', created: 'new property', redirected: 'redirected', to_notes: 'to notes', confirmed: 'confirmed', ignored: 'ignored' }
 
 /** Add free text about a person: an agent splits it into statements and files each under the
  * best-matching property (or a new free-text one, within the caps). */
 export default function StoreBox({ personId, onStored }: { personId: string; onStored: (person: Person) => void }) {
   const [passage, setPassage] = useState('')
-  const [threshold, setThreshold] = useState(DEFAULTS.threshold)
   const [nearDuplicate, setNearDuplicate] = useState(DEFAULTS.near_duplicate)
   const [maxNew, setMaxNew] = useState(DEFAULTS.max_new)
   const fileRef = useRef<HTMLInputElement>(null)
   const store = useMutation({
-    mutationFn: (file?: File) =>
-      file ? api.storeFile(personId, file) : api.store(personId, passage.trim(), { threshold, near_duplicate: nearDuplicate, max_new: maxNew }),
+    mutationFn: (file?: File) => (file ? api.storeFile(personId, file) : api.store(personId, passage.trim(), { near_duplicate: nearDuplicate, max_new: maxNew })),
     onSuccess: (report) => {
-      onStored(report.person)
+      if (report.person) onStored(report.person)
       setPassage('')
       if (fileRef.current) fileRef.current.value = ''
     },
@@ -38,7 +46,7 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
           <textarea
             className="input min-h-20"
             aria-label="Passage"
-            placeholder="Notes from a call, a message, a profile… Each statement is filed under the property it belongs to."
+            placeholder="Notes from a call, a message, a profile… Each fact is filed under the property it belongs to."
             value={passage}
             onChange={(e) => setPassage(e.target.value)}
           />
@@ -66,10 +74,6 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
             <summary className="cursor-pointer select-none text-slate-600">Advanced</summary>
             <div className="mt-2 flex flex-wrap items-end gap-4">
               <label className="space-y-1">
-                <span className="label">Match threshold</span>
-                <input type="number" className="input w-24" aria-label="Match threshold" min={0} max={1} step={0.05} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} />
-              </label>
-              <label className="space-y-1">
                 <span className="label">Near-duplicate</span>
                 <input type="number" className="input w-24" aria-label="Near-duplicate threshold" min={0} max={1} step={0.05} value={nearDuplicate} onChange={(e) => setNearDuplicate(Number(e.target.value))} />
               </label>
@@ -90,32 +94,48 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
 function Report({ report }: { report: StoreReport }) {
   if (report.items.length === 0) return <p className="text-sm text-slate-500">Nothing about the person was found in the passage.</p>
   return (
-    <table className="data-table" data-testid="store-report">
-      <thead>
-        <tr>
-          <th>Statement</th>
-          <th>Property</th>
-          <th>Why</th>
-        </tr>
-      </thead>
-      <tbody>
-        {report.items.map((it, i) => (
-          <tr key={i}>
-            <td>
-              <span className="text-xs text-slate-500">{it.tag}</span>
-              <div className="max-w-md">{it.text}</div>
-            </td>
-            <td>
-              <span className={`badge ${ACTION_CLASS[it.action]}`}>{it.action}</span>
-              {it.key && <span className="ml-1 font-mono text-xs">{it.key}</span>}
-            </td>
-            <td className="text-xs text-slate-500">
-              {it.reason}
-              {it.similarity !== null && <span className="ml-1 tabular-nums">({it.similarity.toFixed(2)})</span>}
-            </td>
+    <div className="space-y-2">
+      <table className="data-table" data-testid="store-report">
+        <thead>
+          <tr>
+            <th>Property</th>
+            <th>Value</th>
+            <th>Why</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {report.items.map((it, i) => (
+            <tr key={i} title={it.evidence ? `“${it.evidence}”` : undefined}>
+              <td className="whitespace-nowrap">
+                <span className={`badge ${ACTION_CLASS[it.action]}`}>{ACTION_LABEL[it.action]}</span>
+                {it.key && <span className="ml-1 font-mono text-xs">{it.key}</span>}
+                {it.conflict && (
+                  <span className="badge ml-1 bg-amber-50 text-amber-700" title="Differs from the value it replaces (kept in history)">
+                    conflict
+                  </span>
+                )}
+              </td>
+              <td className="max-w-md">{formatValue(it.value)}</td>
+              <td className="max-w-xs text-xs text-slate-500">{it.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {report.normalized && <NormalizedLine report={report.normalized} />}
+    </div>
+  )
+}
+
+function NormalizedLine({ report }: { report: NormalizeReport }) {
+  const parts = [
+    ...Object.entries(report.mapped).map(([k, v]) => `${k} → ${formatValue(v)}`),
+    ...report.non_normalizable.map((k) => `${k}: no value`),
+    ...report.unmapped.map((k) => `${k}: still unmapped`),
+  ]
+  if (parts.length === 0) return null
+  return (
+    <p className="text-xs text-slate-500" data-testid="store-normalized">
+      Normalised: {parts.join(' · ')}
+    </p>
   )
 }

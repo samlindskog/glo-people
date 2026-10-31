@@ -45,6 +45,7 @@ export default function PropertiesPage() {
             <tr>
               <th>Label</th>
               <th>Key</th>
+              <th>Describes</th>
               <th>Type</th>
               <th>Values</th>
               <th>Coverage</th>
@@ -65,6 +66,7 @@ export default function PropertiesPage() {
                   )}
                 </td>
                 <td className="font-mono text-xs">{p.key}</td>
+                <td className="max-w-xs text-xs text-slate-500">{p.description ?? <span className="text-slate-300">—</span>}</td>
                 <td>
                   <TypeBadge type={p.type} normalisable={p.normalisable} />
                 </td>

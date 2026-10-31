@@ -32,6 +32,7 @@ class Spec:
     type: PropertyType
     values: tuple[str, ...] = ()      # seed canonical values (enum, enum_list)
     label: str | None = None          # overrides fields.label_for(key)
+    description: str | None = None    # one sentence on what values it holds (agents read it)
 
 
 TEXT = Spec("text")
@@ -80,31 +81,42 @@ SPECS: dict[str, Spec] = {
     "city": Spec("keyword"),
     "region": Spec("enum", REGIONS),
     "linkedin_headline": Spec("text", label="LinkedIn headline"),
-    "bio": TEXT,
-    "intro_bio": TEXT,
-    "one_liner": TEXT,
+    "bio": Spec("text", description="A few sentences about the person: background, what they "
+                                    "do now, notable facts"),
+    "intro_bio": Spec("text", description="The introduction the community posted about them"),
+    "one_liner": Spec("text", description="One sentence: who they are and what they build"),
     "github_summary": Spec("text", label="GitHub summary"),
-    "sectors": Spec("list"),
-    "icp": Spec("list", label="ICP (ideal customer profile)"),
-    "provides": Spec("list"),
-    "communities": Spec("enum_list", COMMUNITIES),
-    "needs_stated": Spec("enum_list", NEEDS),
-    "needs_inferred": Spec("enum_list", NEEDS),
-    "investor": Spec("boolean"),
+    "sectors": Spec("list", description="Industry tags for their work (fintech, payments, ai…)"),
+    "icp": Spec("list", label="ICP (ideal customer profile)",
+                description="Who their company sells to (saas, consumer, enterprises…)"),
+    "provides": Spec("list", description="What they can offer other members (introductions, "
+                                         "expertise, services)"),
+    "communities": Spec("enum_list", COMMUNITIES,
+                        description="The community groups they belong to"),
+    "needs_stated": Spec("enum_list", NEEDS,
+                         description="What they said they are looking for (capital, hiring…)"),
+    "needs_inferred": Spec("enum_list", NEEDS,
+                           description="What we infer they need from their situation"),
+    "investor": Spec("boolean", description="Whether they invest in startups"),
     # the company
-    "company_description": TEXT,
-    "stage": Spec("enum", STAGES),
-    "model": Spec("enum", ("B2B", "B2C", "Marketplace")),
-    "arr": Spec("enum", ARR, label="ARR (annual recurring revenue)"),
-    "mrr": Spec("number", label="MRR (monthly recurring revenue)"),
-    "revenue_note": TEXT,
-    "funding": Spec("enum", FUNDING),
-    "raised_funds": Spec("number", label="Raised funds (total funding raised)"),
+    "company_description": Spec("text", description="What their company does, for whom"),
+    "stage": Spec("enum", STAGES, description="The company's funding or maturity stage"),
+    "model": Spec("enum", ("B2B", "B2C", "Marketplace"), description="Business model"),
+    "arr": Spec("enum", ARR, label="ARR (annual recurring revenue)",
+                description="Annual recurring revenue bucket"),
+    "mrr": Spec("number", label="MRR (monthly recurring revenue)",
+                description="Monthly recurring revenue in USD; ranges count as the lower bound"),
+    "revenue_note": Spec("text", description="Free-text remarks on revenue or traction"),
+    "funding": Spec("enum", FUNDING, description="Total funding raised, as a bucket"),
+    "raised_funds": Spec("number", label="Raised funds (total funding raised)",
+                         description="Total funding raised in USD"),
     # the relationship
     "status": Spec("enum", ("Active", "Removed")),
     "membership": Spec("enum", ("Standard", "Premium")),
-    "directory_tier": Spec("enum", ("Core", "Plus", "Removed")),
-    "warmth": Spec("enum", ("Known", "Opted in", "Warm", "Hot")),
+    "directory_tier": Spec("enum", ("Core", "Plus", "Removed"),
+                           description="Their tier in the member directory"),
+    "warmth": Spec("enum", ("Known", "Opted in", "Warm", "Hot"),
+                   description="How warm the relationship with the community is"),
     "new_member": Spec("boolean"),
     "in_whatsapp": Spec("boolean", label="In WhatsApp"),
     "do_not_contact": Spec("boolean"),
@@ -115,7 +127,8 @@ SPECS: dict[str, Spec] = {
     "last_contact": Spec("date"),
     "linkedin_connected": Spec("date", label="LinkedIn connected"),
     "messages": Spec("number"),
-    "last_message": TEXT,
-    "notes": TEXT,
+    "last_message": Spec("text", description="The last message exchanged with them"),
+    "notes": Spec("text", description="Internal remarks: meetings, follow-ups, anything that "
+                                      "fits no other property"),
     "col_source": Spec("keyword", label="Source"),
 }

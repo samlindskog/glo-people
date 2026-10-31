@@ -16,6 +16,7 @@ import type {
   SearchRequest,
   SearchResponse,
   StoreOptions,
+  StoreProposal,
   StoreReport,
   Tier,
   User,
@@ -94,6 +95,8 @@ export const api = {
     request<AskResult>('POST', '/api/search/ask', body),
   store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
     request<StoreReport>('POST', `/api/people/${id}/store`, { passage, options }),
+  applyStore: (id: string, proposal: StoreProposal, options?: Partial<StoreOptions>) =>
+    request<StoreReport>('POST', `/api/people/${id}/store/apply`, { proposal, options }),
   storeFile: (id: string, file: File) => {
     const fd = new FormData()
     fd.append('file', file)

@@ -117,6 +117,8 @@ export interface Property {
   type: PropertyType
   /** Canonical values of enum / enum_list properties. */
   values: string[]
+  /** What values the property holds (from source code, or given when an agent created it). */
+  description: string | null
   embeddable: boolean
   normalisable: boolean
   filter_ops: FilterOp[]
@@ -211,25 +213,54 @@ export interface AskResult {
 }
 
 export interface StoreOptions {
-  threshold: number
-  near_duplicate: number
   max_new: number
+  near_duplicate: number
+  dry_run: boolean
 }
 
+/** The storage agent's proposal: writes against existing properties, new properties, and what it confirmed or ignored. */
+export interface StoreWrite {
+  key: string
+  value: string | string[]
+  action: 'set' | 'append'
+  conflict: boolean
+  evidence: string
+}
+
+export interface StoreNewProperty {
+  key: string
+  label: string
+  description: string
+  value: string | string[]
+  evidence: string
+}
+
+export interface StoreProposal {
+  writes: StoreWrite[]
+  new_properties: StoreNewProperty[]
+  confirmed: string[]
+  ignored: string[]
+}
+
+export type StoreAction = 'set' | 'append' | 'confirmed' | 'created' | 'redirected' | 'to_notes' | 'ignored'
+
 export interface StoredItem {
-  tag: string
-  text: string
-  action: 'existing' | 'created' | 'dropped'
   key: string | null
-  similarity: number | null
+  action: StoreAction
+  value: unknown
+  conflict: boolean
+  evidence: string | null
   reason: string | null
 }
 
 export interface StoreReport {
+  proposal: StoreProposal
+  applied: boolean
   items: StoredItem[]
   written: Record<string, unknown>
   created: string[]
-  person: Person
+  normalized: NormalizeReport | null
+  person: Person | null
 }
 
 export interface NormalizeReport {

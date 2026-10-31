@@ -98,53 +98,88 @@ async def test_ask_invalid_plan_is_retried_then_fails_clearly(people_by_name, re
 
 # --- store -------------------------------------------------------------------------------------------
 
-async def test_store_maps_statements_to_properties(people_by_name, writer, reader):
+async def test_store_files_facts_under_properties(people_by_name, writer, reader):
     ada = people_by_name["Ada"]
     r = await writer.post(f"/api/people/{ada}/store", json={
-        "passage": "notes: follows up next week. favourite tool: lathe"})
+        "passage": "notes: follows up next week. mrr: 20k. sectors: payments; lending. "
+                   "stage: seed round closed. bio: payments infrastructure for merchants. "
+                   "Hi there. new favourite tool: lathe"})
     assert r.status_code == 200, r.text
     rep = r.json()
-    by_tag = {i["tag"]: i for i in rep["items"]}
-    assert by_tag["notes"]["action"] == "existing" and by_tag["notes"]["key"] == "notes"
-    assert by_tag["notes"]["reason"] == "agent's pick"
-    assert by_tag["favourite tool"]["action"] == "created"
+    assert rep["applied"] is True
+    by = {(i["key"], i["action"]): i for i in rep["items"]}
+    assert ("notes", "set") in by and by[("notes", "set")]["conflict"] is True   # replaces a value
+    assert by[("mrr", "set")]["value"] == "20k" and by[("mrr", "set")]["conflict"] is True
+    assert by[("sectors", "append")]["value"] == ["payments", "lending"]
+    assert ("bio", "confirmed") in by                                           # restated, not written
+    assert by[(None, "ignored")]["value"] == "Hi there"
+    assert by[("favourite_tool", "created")]["reason"].startswith("new property")
     assert rep["created"] == ["favourite_tool"]
-    assert rep["written"] == {"notes": "follows up next week", "favourite_tool": "lathe"}
+    assert rep["written"] == {"notes": "follows up next week", "mrr": "20k",
+                              "sectors": ["payments", "lending"], "stage": "seed round closed",
+                              "favourite_tool": "lathe"}
+    # the clean-up pass mapped the enum text the parser could not read
+    assert rep["normalized"]["mapped"] == {"stage": "Seed"} and rep["normalized"]["agent_called"]
     person = (await reader.get(f"/api/people/{ada}")).json()
-    assert person["favourite_tool"] == "lathe"
+    assert person["norm"]["mrr"] == 20000 and person["norm"]["stage"] == "Seed"
     assert [e["v"] for e in person["history"]["notes"]] == ["met at demo day", "follows up next week"]
-    src = person["history"]["notes"][-1]["src"]
-    assert src == {"kind": "ui", "by": "wendy", "ref": "agent:store"}
+    assert len(person["history"]["bio"]) == 1                                   # confirmed: untouched
+    assert person["history"]["notes"][-1]["src"] == {"kind": "ui", "by": "wendy", "ref": "agent:store"}
     prop = await properties.get("favourite_tool")
-    assert prop.type == "text" and prop.embeddable and prop.source == "agent"
+    assert prop.type == "text" and prop.source == "agent"
+    assert prop.description == "The person's favourite tool"
     acts = (await writer.get("/api/activity?action=person.store")).json()["items"]
     assert acts[0]["meta"]["created"] == ["favourite_tool"]
 
-    # a related tag maps onto the property just created (shared words → similar names)
-    r = await writer.post(f"/api/people/{ada}/store", json={
-        "passage": "favourite tools: hammer", "options": {"threshold": 0.4}})
+    # appending to a list keeps what is there and skips folded duplicates
+    r = await writer.post(f"/api/people/{ada}/store", json={"passage": "sectors: Lending; ai"})
+    assert r.json()["written"] == {"sectors": ["payments", "lending", "ai"]}
+    # a near-duplicate new property is redirected to the existing one
+    r = await writer.post(f"/api/people/{ada}/store", json={"passage": "new favourite tools: hammer",
+                                                           "options": {"near_duplicate": 0.3}})
     item = r.json()["items"][0]
-    assert item["action"] == "existing" and item["key"] == "favourite_tool"
-    assert item["reason"] == "nearest property name"
-    # ...or is refused as a near duplicate when the caller asks for stricter mapping
+    assert item["action"] == "redirected" and item["key"] == "favourite_tool"
+    assert "too close" in item["reason"]
+    # beyond max_new the facts go to notes instead of a new property
     r = await writer.post(f"/api/people/{ada}/store", json={
-        "passage": "favourite tools: saw", "options": {"threshold": 0.9, "near_duplicate": 0.4}})
-    item = r.json()["items"][0]
-    assert item["action"] == "dropped" and "too close" in item["reason"]
-    # the new-property cap
-    r = await writer.post(f"/api/people/{ada}/store", json={
-        "passage": "shoe size: 42. eye colour: green", "options": {"max_new": 1, "threshold": 0.9}})
-    actions = [i["action"] for i in r.json()["items"]]
-    assert actions == ["created", "dropped"] and "at most 1" in r.json()["items"][1]["reason"]
-    # a typed property picked by the agent gets its text normalised like any write
-    r = await writer.post(f"/api/people/{ada}/store", json={"passage": "mrr: 20k"})
-    assert r.json()["written"] == {"mrr": "20k"}
-    assert (await reader.get(f"/api/people/{ada}")).json()["norm"]["mrr"] == 20000
+        "passage": "new eye colour: green. new shoe size: 42", "options": {"max_new": 1}})
+    actions = [(i["key"], i["action"]) for i in r.json()["items"]]
+    assert actions == [("eye_colour", "created"), ("notes", "to_notes")]
+    assert r.json()["written"]["notes"] == "Shoe size: 42"
 
     assert (await writer.post("/api/people/000000000000000000000000/store",
                               json={"passage": "x: y"})).status_code == 404
     assert (await reader.post(f"/api/people/{ada}/store", json={"passage": "x: y"})
             ).status_code == 403
+
+
+async def test_store_dry_run_and_apply(people_by_name, writer, reader):
+    bo = people_by_name["Bo"]
+    before = (await reader.get(f"/api/people/{bo}")).json()
+    r = await writer.post(f"/api/people/{bo}/store", json={
+        "passage": "notes: wants intros to LPs. new favourite colour: teal",
+        "options": {"dry_run": True}})
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["applied"] is False and rep["written"] == {} and rep["normalized"] is None
+    assert [(i["key"], i["action"]) for i in rep["items"]] == [("notes", "set"),
+                                                              ("favourite_colour", "created")]
+    assert (await reader.get(f"/api/people/{bo}")).json()["history"] == before["history"]
+    assert await properties.get("favourite_colour") is None                   # nothing created
+
+    # a program edits the proposal (drops the new property) and applies it
+    proposal = rep["proposal"]
+    proposal["new_properties"] = []
+    r = await writer.post(f"/api/people/{bo}/store/apply", json={"proposal": proposal})
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] and r.json()["written"] == {"notes": "wants intros to LPs"}
+    # an invalid proposal is refused like the agent's would be
+    bad = {"writes": [{"key": "nonexistent", "value": "x"}]}
+    r = await writer.post(f"/api/people/{bo}/store/apply", json={"proposal": bad})
+    assert r.status_code == 422 and "not a property" in r.text
+    bad = {"writes": [{"key": "bio", "value": "x", "action": "append"}]}
+    assert (await writer.post(f"/api/people/{bo}/store/apply", json={"proposal": bad})
+            ).status_code == 422
 
 
 async def test_store_from_file(people_by_name, writer, reader):
@@ -225,10 +260,17 @@ async def test_mcp_tools(people_by_name, writer, reader, client_factory):
     err, res = await call(c, w, "store_about_person", {
         "id": people_by_name["Bo"], "passage": "notes: raised a seed round", "agent": "scout"})
     assert not err, res
-    assert res["written"] == {"notes": "raised a seed round"}
+    assert res["written"] == {"notes": "raised a seed round"} and res["applied"]
     bo = (await reader.get(f"/api/people/{people_by_name['Bo']}")).json()
     assert bo["history"]["notes"][-1]["src"] == {"kind": "mcp", "by": "wendy",
                                                  "ref": "key:1 agent:store/scout"}
+    err, res = await call(c, w, "store_about_person", {
+        "id": people_by_name["Bo"], "passage": "notes: second call", "options": {"dry_run": True}})
+    assert not err and not res["applied"]
+    err, res = await call(c, w, "apply_store_proposal", {"id": people_by_name["Bo"],
+                                                         "proposal": res["proposal"]})
+    assert not err, res
+    assert res["written"] == {"notes": "second call"}
     err, res = await call(c, w, "normalize_person", {"id": people_by_name["Cy"]})
     assert not err, res
     assert res["mapped"] == {"stage": "Pre-seed"}

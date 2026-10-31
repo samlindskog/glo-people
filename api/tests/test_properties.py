@@ -50,11 +50,15 @@ async def test_catalog_merges_specs_registry_and_coverage(writer, reader):
 
 
 async def test_ensure_is_the_only_creator(writer):
-    assert await properties.ensure(["favourite_tool"], "agent") == ["favourite_tool"]
+    assert await properties.ensure(["favourite_tool"], "agent",
+                                   descriptions={"favourite_tool": "The tool they like best"}) == [
+        "favourite_tool"]
     assert await properties.ensure(["favourite_tool"], "agent") == []       # idempotent
     prop = await properties.get("favourite_tool")
     assert prop.type == "text" and prop.embeddable and prop.source == "agent"
-    assert (await _name_rows())["favourite_tool"] == "favourite tool"
+    assert prop.description == "The tool they like best"
+    assert (await _name_rows())["favourite_tool"] == "favourite tool: The tool they like best"
+    assert (await properties.get("mrr")).description.startswith("Monthly recurring revenue")
     with pytest.raises(properties.PropertyError):
         await properties.ensure(["Bad Key"], "agent")
     with pytest.raises(properties.PropertyError):
@@ -97,7 +101,7 @@ async def test_enum_values_are_stored_and_extensible():
 
 async def test_sync_names_follows_text_changes_and_removals():
     rows = await _name_rows()
-    assert rows["model"] == "model. Values: B2B; B2C; Marketplace"
+    assert rows["model"] == "model: Business model. Values: B2B; B2C; Marketplace"
     assert rows["linkedin"] == "linkedin" and rows["col_source"] == "source"
     assert await properties.sync_names() == 0                                   # up to date
     await properties.add_enum_value("model", "B2B2C")
@@ -113,9 +117,9 @@ async def test_sync_names_follows_text_changes_and_removals():
 
 async def test_nearest_property_names():
     await properties.ensure(["favourite_tool"], "agent")
-    vectors = await embedder.embed_texts(["company description", "favourite tool"])
+    vectors = await embedder.embed_texts(["linkedin", "favourite tool"])
     hits = await properties.nearest(vectors, k=2)
-    assert hits[0][0][0] == "company_description" and hits[0][0][1] == pytest.approx(1.0)
+    assert hits[0][0][0] == "linkedin" and hits[0][0][1] == pytest.approx(1.0)
     assert hits[1][0][0] == "favourite_tool"
     assert len(hits[0]) == 2 and hits[0][0][1] >= hits[0][1][1]
 

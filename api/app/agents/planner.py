@@ -16,7 +16,8 @@ from app.properties import Property
 from app.search.engine import FieldFilter, FieldQuery, filter_to_mongo
 
 AGENT_NAME = "planner"
-REQUEST_LIMIT = 3
+REQUEST_LIMIT = 4
+OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
 
 
 class SearchPlan(BaseModel):
@@ -44,6 +45,7 @@ agent = Agent(
     name=f"agents.{AGENT_NAME}",
     deps_type=PlannerDeps,
     output_type=SearchPlan,
+    retries=OUTPUT_RETRIES,
     instructions="""\
 You plan a search over a database of people (founders, investors, operators). You are given a
 question and the catalog of properties each person may have, with how many people have each.

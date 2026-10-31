@@ -49,21 +49,21 @@ test('storing a passage files statements under properties; normalise reports', a
   await page.getByRole('button', { name: 'Save' }).click()
   await expect(page.getByRole('heading', { name: `Store ${tag}` })).toBeVisible()
 
-  await page.getByRole('textbox', { name: 'Passage' }).fill(`notes: met at the summit ${tag}. stage: seed round closed`)
+  await page.getByRole('textbox', { name: 'Passage' }).fill(`notes: met at the summit ${tag}. stage: seed round closed. new favourite tool: lathe`)
   await page.getByRole('button', { name: 'Store' }).click()
   const report = page.getByTestId('store-report')
-  await expect(report.getByRole('row')).toHaveCount(3)
+  await expect(report.getByRole('row')).toHaveCount(4)
   await expect(report).toContainText('notes')
   await expect(report).toContainText('stage')
+  await expect(report).toContainText('favourite_tool') // created now, or set when an earlier run created it
   await expect(page.getByText(`met at the summit ${tag}`).first()).toBeVisible()
-  // the parser cannot read "seed round closed" as a stage: flagged, not normalised
-  await expect(page.getByTestId('normalised')).toContainText('not recognised')
+  // the clean-up pass mapped "seed round closed" onto the canonical stage value
+  await expect(page.getByTestId('store-normalized')).toContainText('stage → Seed')
+  await expect(page.getByTestId('normalised')).toContainText('Seed')
   await expect(page.getByText('history (2)')).toHaveCount(0) // one entry each: nothing overwritten
 
-  // the normaliser agent maps it onto the canonical value
   await page.getByRole('button', { name: 'Normalise' }).click()
-  await expect(page.getByTestId('normalise-report')).toContainText('stage → Seed')
-  await expect(page.getByTestId('normalised')).toContainText('Seed')
+  await expect(page.getByTestId('normalise-report')).toContainText('already normalised')
 
   // the Properties page can normalise everyone who has a property
   await page.getByRole('link', { name: 'Properties' }).click()

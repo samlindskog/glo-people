@@ -12,6 +12,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import activity, auth, properties
 from app import people as people_svc
+from app.agents.storage import Proposal
 from app.auth import Principal
 from app.history import Source
 from app.normalize import person as normalize_person_op
@@ -30,7 +31,7 @@ from app.search.ask import AskOptions, ask
 from app.search.store import StoreOptions
 
 WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
-                         "normalize_person"})
+                         "apply_store_proposal", "normalize_person"})
 
 INSTRUCTIONS = """\
 Search and read the GLO people database. People are documents in two tiers ('member' and
@@ -229,22 +230,60 @@ async def store_about_person(
     agent: Annotated[str | None, Field(description="Name of the automated agent supplying the "
                                                    "passage, if any")] = None,
     options: Annotated[StoreOptions | None,
-                       Field(description="threshold, near_duplicate, max_new")] = None,
+                       Field(description="max_new, near_duplicate, dry_run")] = None,
 ) -> dict:
-    """Store what a passage says about a person (requires people:write). An agent splits it into
-    tagged statements; each lands on the existing property whose name fits best, or on a new
-    free-text property (at most `max_new` per passage). Returns what was written and why."""
+    """Store what a passage says about a person (requires people:write). An agent reads the
+    passage against the person's current values and the property catalog and proposes one write
+    per property (typed values in the type's form, lists appended), new properties only for
+    recurring kinds of fact (at most `max_new`; near-duplicates are redirected), then the
+    normaliser maps what stayed unmapped. Returns the proposal, every item with its action
+    (set, append, confirmed, created, redirected, to_notes, ignored), what was written, and the
+    clean-up report. With options.dry_run nothing is written; pass the (edited) proposal to
+    apply_store_proposal to write it."""
     principal = await _principal(ctx, "people:write")
-    src = Source.for_mcp(principal, f"store{'/' + agent.strip() if agent and agent.strip() else ''}")
+    src = _store_source(principal, agent)
     try:
         report = await store.store(id, passage, options or StoreOptions(), principal, src)
     except (ValueError, AgentRunError) as e:
         raise ToolError(str(e)) from e
     if report is None:
         raise ToolError("person not found")
-    await activity.record("mcp.store", principal, id, {
-        "items": [{"tag": i.tag, "action": i.action, "key": i.key} for i in report.items],
-        "created": report.created})
+    await _record_store(principal, id, report)
+    return json.loads(report.model_dump_json())
+
+
+def _store_source(principal: Principal, agent: str | None) -> Source:
+    return Source.for_mcp(principal, f"store{'/' + agent.strip() if agent and agent.strip() else ''}")
+
+
+async def _record_store(principal: Principal, id: str, report) -> None:
+    if report.applied:
+        await activity.record("mcp.store", principal, id, {
+            "items": [{"key": i.key, "action": i.action} for i in report.items],
+            "created": report.created})
+
+
+@mcp.tool()
+async def apply_store_proposal(
+    ctx: Context,
+    id: str,
+    proposal: Annotated[Proposal, Field(description="A proposal from store_about_person "
+                                                    "(dry_run), possibly edited")],
+    agent: Annotated[str | None, Field(description="Name of the automated agent, if any")] = None,
+    options: Annotated[StoreOptions | None, Field(description="max_new, near_duplicate")] = None,
+) -> dict:
+    """Write a store proposal (requires people:write). The proposal is checked against the
+    catalog like the agent's own; new properties are created or redirected, the values written
+    in one update, and the normaliser cleans up flagged values."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        report = await store.apply(id, proposal, options or StoreOptions(), principal,
+                                   _store_source(principal, agent))
+    except (ValueError, AgentRunError) as e:
+        raise ToolError(str(e)) from e
+    if report is None:
+        raise ToolError("person not found")
+    await _record_store(principal, id, report)
     return json.loads(report.model_dump_json())
 
 
