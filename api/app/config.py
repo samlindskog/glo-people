@@ -30,8 +30,16 @@ class Settings(BaseSettings):
     firecrawl_max_age_s: int = 172_800   # reuse Firecrawl's cached copy of a page up to 2 days old
     agent_model: str = "openai:gpt-6-luna"
     fake_agents: bool = False            # deterministic stand-ins for every agent (e2e, demos)
-    workflow_concurrency: int = 3
     enrich_ttl_days: int = 90
+
+    # Assistant runs (app.assistants.runner): items in flight across all runs of this process,
+    # heartbeat/staleness for adopting runs left by a dead process, poison protection, retention.
+    assistant_concurrency: int = 3
+    run_heartbeat_s: int = 10
+    run_stale_s: int = 60
+    item_max_attempts: int = 3
+    run_events_retention_days: int = 30
+    firecrawl_credits_cache_s: int = 60
 
     # Logfire: LOGFIRE_TOKEN is read by the SDK itself; nothing is exported without it.
     logfire_environment: str = "dev"

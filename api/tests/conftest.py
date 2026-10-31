@@ -20,6 +20,7 @@ from pydantic_ai import models as ai_models
 from sqlalchemy import text
 
 from app import auth, db, mongo, properties
+from app.assistants import runner
 from app.main import api, app, lifespan
 
 ai_models.ALLOW_MODEL_REQUESTS = False   # no accidental LLM calls from tests
@@ -69,10 +70,12 @@ async def _schema():
 
 @pytest.fixture(autouse=True)
 async def _clean():
+    await runner.abort_all()
     async with db.engine().begin() as conn:
         await conn.execute(text(
             "TRUNCATE users, sessions, api_keys, searches, activity, field_embeddings, "
-            "property_embeddings RESTART IDENTITY CASCADE"))
+            "property_embeddings, workflow_runs, workflow_run_items, workflow_run_events "
+            "RESTART IDENTITY CASCADE"))
     await mongo.db().people.delete_many({})
     await mongo.db().fields.delete_many({})
     properties.reset()

@@ -333,14 +333,30 @@ async def test_item_budget_is_respected(writer, people, monkeypatch):
     assert item["credits"] <= 4 and "linkedin_headline" not in written(item["result"])
 
 
-async def test_run_credit_cap_stops_the_run(writer, people):
-    # Concurrency stays at its default: the reservation of in-flight items is what stops Bo.
+async def test_run_credit_cap_pauses_and_a_raised_cap_resumes(writer, reader, people):
+    # Concurrency stays at its default: the reservation of in-flight items is what holds Bo back;
+    # once Ada's real spend exceeds the cap the run pauses, Bo still queued.
     run = await run_for(writer, [people["Ada Okafor"], people["Bo Chen"]], max_credits=1)
     statuses = {it["person_id"]: it["status"] for it in run["items"]}
-    assert statuses[people["Ada Okafor"]] == "done" and statuses[people["Bo Chen"]] == "skipped"
-    assert run["summary"]["stopped_reason"] == "credit cap" and run["status"] == "done"
-    skipped = next(it for it in run["items"] if it["status"] == "skipped")
-    assert skipped["error"] == "run credit cap reached"
+    assert statuses[people["Ada Okafor"]] == "done" and statuses[people["Bo Chen"]] == "queued"
+    assert run["status"] == "paused" and run["pause_reason"] == "credit cap"
+    assert run["done"] == 1 and run["credits_used"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    active = (await reader.get("/api/assistants/runs?status=active")).json()["items"]
+    assert [r["id"] for r in active] == [run["id"]]
+    assert (await writer.post(f"/api/assistants/runs/{run['id']}/pause")).status_code == 409
+    # resuming with a higher cap finishes the rest
+    r = await writer.post(f"/api/assistants/runs/{run['id']}/resume", json={"options": {"max_credits": 200}})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "running" and r.json()["params"]["options"]["max_credits"] == 200
+    await runner.wait(run["id"])
+    run = (await writer.get(f"/api/assistants/runs/{run['id']}")).json()
+    assert run["status"] == "done" and run["done"] == 2 and run["pause_reason"] is None
+    assert {it["status"] for it in run["items"]} == {"done"}
+    kinds = [e["kind"] for e in await runner.events(run["id"])]
+    assert kinds.count("run") >= 4 and "item" in kinds and "step" in kinds   # started, pausing, paused, resumed, done
+    assert (await writer.post(f"/api/assistants/runs/{run['id']}/resume")).status_code == 409
+    acts = (await writer.get("/api/activity?action=assistant.")).json()["items"]
+    assert {a["action"] for a in acts} >= {"assistant.run", "assistant.pause", "assistant.resume"}
 
 
 async def test_run_cap_above_one_item_lets_a_bigger_batch_finish(writer, people):
@@ -376,21 +392,49 @@ async def test_bulk_selector_and_listing(writer, people):
     assert all({"key", "action", "value", "previous", "flag"} <= set(c) for c in item["result"]["changes"])
 
 
-async def test_reconcile_fails_interrupted_runs(writer, people):
+async def test_a_run_left_by_a_dead_worker_is_adopted_and_continues(writer, people):
+    from datetime import UTC, datetime, timedelta
+
     from sqlalchemy import insert
 
     from app import db as pg
+    stale = datetime.now(UTC) - timedelta(hours=1)
     async with pg.engine().begin() as conn:
         rid = (await conn.execute(insert(pg.workflow_runs).values(
-            workflow="enrich", status="running", total=1).returning(pg.workflow_runs.c.id))
-        ).scalar_one()
-        await conn.execute(insert(pg.workflow_run_items).values(
-            run_id=rid, workflow="enrich", person_id=people["Cy Diaz"], status="running"))
-    await runner.reconcile()
-    run = (await writer.get(f"/api/assistants/runs/{rid}")).json()
-    assert run["status"] == "failed" and run["error"] == "interrupted by restart"
-    assert run["items"][0]["status"] == "failed"
+            workflow="enrich", status="running", total=2, worker="api:999", heartbeat_at=stale,
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+        await conn.execute(insert(pg.workflow_run_items).values([
+            {"run_id": rid, "workflow": "enrich", "person_id": people["Cy Diaz"],
+             "status": "running", "attempts": 1, "label": "Cy Diaz"},
+            {"run_id": rid, "workflow": "enrich", "person_id": people["Dee Evans"],
+             "status": "queued", "attempts": 0, "label": "Dee Evans"}]))
+        # a CLI-owned run with a fresh heartbeat is left alone
+        other = (await conn.execute(insert(pg.workflow_runs).values(
+            workflow="enrich", status="running", total=0, worker="cli:4", heartbeat_at=datetime.now(UTC),
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+    adopted = await runner.adopt(all_api_runs=True)
+    assert adopted == [rid]
+    run = await runner.wait(rid)
+    assert run["status"] == "done" and run["done"] == 2 and run["worker"].startswith("api:")
+    items = {it["person_id"]: it for it in (await writer.get(f"/api/assistants/runs/{rid}")).json()["items"]}
+    assert items[people["Cy Diaz"]]["status"] == "done" and items[people["Cy Diaz"]]["attempts"] == 2
+    messages = [e["message"] for e in await runner.events(rid)]
+    assert any(m.startswith("adopted by api:") and "1 item(s) requeued" in m for m in messages)
+    assert (await writer.get(f"/api/assistants/runs/{other}")).json()["worker"] == "cli:4"
     assert (await writer.post(f"/api/assistants/runs/{rid}/cancel")).status_code == 409
+    # an item interrupted too often fails instead of running forever
+    async with pg.engine().begin() as conn:
+        rid2 = (await conn.execute(insert(pg.workflow_runs).values(
+            workflow="enrich", status="running", total=1, worker=None,
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+        await conn.execute(insert(pg.workflow_run_items).values(
+            run_id=rid2, workflow="enrich", person_id=people["Cy Diaz"], status="running",
+            attempts=3, label="Cy Diaz"))
+    assert await runner.adopt(all_api_runs=False) == [rid2]
+    run = await runner.wait(rid2)
+    assert run["status"] == "done" and run["failed"] == 1
+    item = (await writer.get(f"/api/assistants/runs/{rid2}")).json()["items"][0]
+    assert item["status"] == "failed" and item["error"] == "interrupted repeatedly"
 
 
 async def test_unconfigured_firecrawl_fails_fast(writer, people, monkeypatch):

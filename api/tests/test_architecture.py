@@ -11,7 +11,7 @@ LEVELS: dict[str, int] = {
     # 0 — rules and adapters
     **dict.fromkeys(["fields", "history", "normalize", "property_specs", "embedder", "urls",
                      "config", "db", "mongo", "auth", "permissions", "activity", "observability",
-                     "jobs", "integrations"], 0),
+                     "jobs", "integrations", "hub"], 0),
     # 1 — stores
     **dict.fromkeys(["properties", "people", "embeddings"], 1),
     # 2 — tools and the agent plumbing they share

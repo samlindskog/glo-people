@@ -167,6 +167,23 @@ class AsyncFirecrawl:
                                  f"{str(data.get('error') or data)[:200]}")
         return data
 
+    async def credit_usage(self) -> dict[str, Any]:
+        """The team's balance: {remaining, plan, period_start, period_end} (GET /v2/team/credit-usage;
+        free). NotConfigured without a key."""
+        if not self.api_key:
+            raise NotConfigured("FIRECRAWL_API_KEY is not set")
+        resp = await self._http().get("/v2/team/credit-usage")
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code >= 400 or not data.get("success", True):
+            raise FirecrawlError(f"Firecrawl HTTP {resp.status_code}: "
+                                 f"{str(data.get('error') or data)[:200]}")
+        d = data.get("data") or {}
+        return {"remaining": d.get("remainingCredits"), "plan": d.get("planCredits"),
+                "period_start": d.get("billingPeriodStart"), "period_end": d.get("billingPeriodEnd")}
+
     async def scrape(self, url: str, formats: tuple[str, ...] = ("markdown",),
                      expected_credits: int = SCRAPE_CREDITS,
                      timeout_ms: int = 60_000) -> ScrapeResult:

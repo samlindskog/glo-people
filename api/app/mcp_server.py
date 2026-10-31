@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Annotated, Any, Literal
 
+from fastapi import HTTPException
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
@@ -13,6 +14,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import activity, auth, fields, properties
 from app import people as people_svc
+from app.assistants import REGISTRY, runner
 from app.assistants.ask import ask
 from app.auth import Principal
 from app.history import Source
@@ -38,7 +40,8 @@ from app.tools.store import StoreOptions
 log = logging.getLogger(__name__)
 
 WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
-                         "normalize_person"})
+                         "normalize_person", "start_assistant", "pause_run", "resume_run",
+                         "stop_run"})
 
 INSTRUCTIONS = """\
 Search and read the GLO people database. People are documents in two tiers ('member' and
@@ -53,13 +56,15 @@ each property's history, and the latest entry is the current value; get_person r
 current values plus `history`. Only existing properties can be written directly; new properties
 come only from store_about_person.
 
-Two kinds of operation. Tools are one shot and return structured results for programs:
-search_people (run a search), plan_search (question → an executable search request),
+Two kinds of operation. Tools act on one record, one shot, and return structured results for
+programs: search_people (run a search), plan_search (question → an executable search request),
 store_about_person (file a passage into the person's properties; returns every change),
-normalize_person (typed values; returns every change). Assistants answer in text for a human:
-ask_people (plan, search, answer with citations). Pass `agent` when you write on behalf of an
-automated agent: the entry stays attributed to your key (kind "mcp") with the agent name noted
-in its reference."""
+normalize_person (typed values; returns every change); while they run, their activity arrives as
+progress notifications. Assistants answer in text for a human (ask_people: plan, search, answer
+with citations) or run over many records as a run you can follow, pause, resume with other
+options and stop: list_assistants, start_assistant, get_run, pause_run, resume_run, stop_run.
+Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to your
+key (kind "mcp") with the agent name noted in its reference."""
 
 
 class GloMCP(MCPServer):
@@ -332,6 +337,102 @@ async def _run_tool(ctx: Context, tool, person_id: str, source: Source, principa
         return await inv.wait()
     except (ValueError, AgentRunError, invoke.Stopped) as e:
         raise ToolError(str(e)) from e
+
+
+@mcp.tool()
+async def list_assistants(ctx: Context) -> list[dict]:
+    """Assistant: the assistants that run over records as a run (key, what they do, their
+    options schema, and the selector field for 'everyone with this property')."""
+    await _principal(ctx, "people:read")
+    return [spec.public() for spec in REGISTRY.values()]
+
+
+@mcp.tool()
+async def start_assistant(
+    ctx: Context,
+    key: Annotated[str, Field(description="The assistant key (see list_assistants)")],
+    person_ids: Annotated[list[str] | None, Field(description="The people to run it for")] = None,
+    all_with_field: Annotated[str | None, Field(description="Or: everyone whose property is set")] = None,
+    tier: Literal["member", "plus_one"] | None = None,
+    options: Annotated[dict[str, Any] | None, Field(description="Per the options schema")] = None,
+    label: Annotated[str | None, Field(description="A name for the run")] = None,
+) -> dict:
+    """Assistant: start a run (requires people:write). Returns the run; follow it with get_run,
+    pause_run / resume_run / stop_run control it. A run pauses by itself when it reaches its
+    credit cap (resume with a higher max_credits) or when the Firecrawl account is empty."""
+    from app.routers.assistants import RunRequest, _people_items
+    principal = await _principal(ctx, "people:write")
+    spec = REGISTRY.get(key)
+    if spec is None:
+        raise ToolError(f"unknown assistant {key!r}")
+    try:
+        body = RunRequest(person_ids=person_ids, all_with_field=all_with_field, tier=tier,
+                          options=options or {}, label=label)
+        opts = spec.options_model.model_validate(body.options)
+        if spec.scope == "people":
+            items = await _people_items(body)
+        elif spec.prepare is not None:
+            items = await spec.prepare(body.model_dump(), opts)
+        else:
+            raise ToolError(f"{key} cannot be started this way")
+    except (ValueError, HTTPException) as e:
+        raise ToolError(getattr(e, "detail", str(e))) from e
+    run = await runner.create_run(spec, principal, items, {
+        "options": opts.model_dump(), "selector": all_with_field, "tier": tier}, label=label)
+    await runner.start(run["id"], principal)
+    return await runner.get_run(run["id"])
+
+
+@mcp.tool()
+async def get_run(ctx: Context, run_id: int,
+                  events: Annotated[int, Field(ge=0, le=200, description="Latest events")] = 20) -> dict:
+    """Assistant: a run's state (status, counts, credits, pause reason), its items' statuses and
+    its latest activity."""
+    await _principal(ctx, "people:read")
+    run = await runner.get_run(run_id)
+    if run is None:
+        raise ToolError("run not found")
+    items = await runner.get_items(run_id, limit=500)
+    recent = (await runner.events(run_id, limit=100_000))[-events:] if events else []
+    return {**run, "items": [{k: it.get(k) for k in ("id", "person_id", "label", "status",
+                                                     "credits", "error")} for it in items],
+            "events": [{k: e.get(k) for k in ("id", "ts", "kind", "message", "item_id")}
+                       for e in recent]}
+
+
+@mcp.tool()
+async def pause_run(ctx: Context, run_id: int) -> dict:
+    """Assistant: stop taking new items; in-flight ones finish (requires people:write)."""
+    principal = await _principal(ctx, "people:write")
+    if not await runner.pause(run_id, principal):
+        raise ToolError("run is not running")
+    return await runner.get_run(run_id)
+
+
+@mcp.tool()
+async def resume_run(ctx: Context, run_id: int,
+                     options: Annotated[dict[str, Any] | None,
+                                        Field(description="Options to change, e.g. max_credits")] = None
+                     ) -> dict:
+    """Assistant: continue a paused run, optionally with other options (requires people:write)."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        ok = await runner.resume(run_id, options, principal)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    if not ok:
+        raise ToolError("run is not paused")
+    return await runner.get_run(run_id)
+
+
+@mcp.tool()
+async def stop_run(ctx: Context, run_id: int) -> dict:
+    """Assistant: stop a run for good; in-flight tools are stopped before they write, queued
+    items are skipped (requires people:write)."""
+    principal = await _principal(ctx, "people:write")
+    if not await runner.stop(run_id, principal):
+        raise ToolError("run is not running")
+    return await runner.get_run(run_id)
 
 
 @mcp.tool()

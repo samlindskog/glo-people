@@ -115,7 +115,8 @@ workflow_runs = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("workflow", String(64), nullable=False),
-    Column("status", String(16), nullable=False),  # queued | running | done | failed | cancelled
+    # queued | running | pausing | paused | done | failed | cancelled
+    Column("status", String(16), nullable=False),
     Column("params", JSONB, nullable=False, server_default="{}"),
     Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
@@ -127,6 +128,10 @@ workflow_runs = Table(
     Column("credits_used", Integer, nullable=False, server_default="0"),
     Column("summary", JSONB, nullable=False, server_default="{}"),
     Column("error", Text),
+    Column("worker", String(64)),                  # the process executing it: api:<pid> | cli:<pid>
+    Column("heartbeat_at", DateTime(timezone=True)),
+    Column("label", Text),
+    Column("pause_reason", Text),                  # requested | credit cap | account credits
     Index("ix_workflow_runs_created", "created_at"),
 )
 
@@ -136,7 +141,7 @@ workflow_run_items = Table(
     Column("id", Integer, primary_key=True),
     Column("run_id", Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False),
     Column("workflow", String(64), nullable=False),
-    Column("person_id", String(24), nullable=False),
+    Column("person_id", String(24)),               # a person, or null for a row / batch item
     Column("status", String(16), nullable=False),  # queued | running | done | failed | skipped
     Column("result", JSONB, nullable=False, server_default="{}"),
     Column("error", Text),
@@ -144,8 +149,24 @@ workflow_run_items = Table(
     Column("trace_id", String(32)),
     Column("started_at", DateTime(timezone=True)),
     Column("finished_at", DateTime(timezone=True)),
+    Column("payload", JSONB, nullable=False, server_default="{}"),
+    Column("label", Text),
+    Column("attempts", Integer, nullable=False, server_default="0"),
     Index("ix_workflow_run_items_run_status", "run_id", "status"),
     Index("ix_workflow_run_items_person", "workflow", "person_id", "finished_at"),
+)
+
+workflow_run_events = Table(
+    "workflow_run_events",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("run_id", Integer, ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("item_id", Integer, ForeignKey("workflow_run_items.id", ondelete="CASCADE")),
+    Column("ts", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("kind", String(16), nullable=False),
+    Column("message", Text, nullable=False),
+    Column("data", JSONB, nullable=False, server_default="{}"),
+    Index("ix_workflow_run_events_run", "run_id", "id"),
 )
 
 _engine: AsyncEngine | None = None

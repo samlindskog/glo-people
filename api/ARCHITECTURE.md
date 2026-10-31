@@ -9,7 +9,7 @@ and `tests/test_architecture.py` enforces it.
 | 0 | Rules & adapters | `fields`, `history`, `normalize` (the parser), `property_specs`, `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions. `fields.MAX_TEXT_CHARS` (about 5000 words) is the only cap on a text value, stored or shown to an agent |
 | 1 | Stores | `properties` (registry, enum sets, name vectors), `people` (documents; the only writer; `Transaction` stages one document's changes for one compare-and-set commit, replaying them on a concurrent write), `embeddings` (passage vectors) | typed reads; writers return `WriteResult{person, changes}`; compare-and-set |
 | 2 | Tools | `tools/search`, `tools/plan`, `tools/record`, `tools/store`, `tools/normalize`, `tools/repair`, `tools/site`, `tools/company`; `tools/invoke` (running one); `agents/common`, `agents/fakes` (model plumbing) | **one record, one shot**: a writing tool takes a `ToolContext` and only *stages* on its transaction; `tools.invoke` commits once after it returns, so a stopped tool has written nothing; activity through `ctx.emit`, Firecrawl spend on the context's budget; a Pydantic result for programs built on `history.Change` with `credits` and `calls`; no prose for humans; each tool's model agent is defined inside the tool |
-| 3 | Assistants | `assistants/ask`; the per-person assistants `assistants/enrich`, `assistants/normalize`; `assistants/base`, `runner`, `context` (runs over many people) | compose tools; may change data through them; return `text` for a human plus `changes` |
+| 3 | Assistants | `assistants/ask`; the per-item assistants `assistants/enrich`, `assistants/normalize`; `assistants/base`, `runner`, `context`, `credits` (runs over one or many records) | compose tools and change data only through them (`deps.tool`); return `text` for a human plus `changes`; a run persists its state, pauses, resumes, stops and survives a restart |
 | 4 | Surfaces | `routers/`, `mcp_server`, `cli`, `importer`, `main`, `web/` | adapt tools (structured) and assistants (text + changes) to REST, MCP, CLI, CSV, UI; no logic |
 
 ## The shared vocabulary: `history.Change`
@@ -64,17 +64,45 @@ assistants or surfaces.
 | enrich | per person via the runner (`POST /api/assistants/enrich/runs`) | item result `{text, changes, skipped, not_found, credits, …}` |
 | normalize | per person via the runner | item result `{text, changes, agent_called, unmapped}` |
 
-The runner persists runs and items (`workflow_runs`, `workflow_run_items`; the `workflow` column
-holds the assistant key), caps credits per item and per run, and gives every item its own trace.
+### Runs
+
+The runner persists runs, items and events (`workflow_runs`, `workflow_run_items`,
+`workflow_run_events`; the `workflow` column holds the assistant key). One scheduler per process
+(`worker` = `api:<pid>` or `cli:<pid>`) dispatches the queued items of the runs it owns
+round-robin, up to `assistant_concurrency` items in flight for the whole process, each item in
+its own Logfire trace and inside the starter's context. Items are people (`person_id`), batches
+or rows (`payload`), or the single item of a one-shot assistant (`scope`).
+
+```
+queued ──start──▶ running ──pause / credit cap / account credits──▶ pausing ──in-flight done──▶ paused ──resume(options)──▶ running
+running ──all items done──▶ done        running | pausing | paused ──stop──▶ cancelled (in-flight tools stopped, queue skipped)
+```
+
+Credits: each in-flight item reserves its worst case (`spec.item_cap`); when the run's
+`max_credits` is reached the run pauses with `pause_reason = credit cap` and a resume with a
+higher cap continues it; a Firecrawl 402 requeues the item and pauses every run that spends
+(`account credits`). `done`, `failed` and `credits_used` are kept per item end. The owner
+heartbeats every `run_heartbeat_s`; the API adopts a run whose worker is gone (none, stale beyond
+`run_stale_s`, or any `api:` worker at startup), requeueing its running items (`attempts`; an
+item interrupted `item_max_attempts` times fails). Shutdown cancels in-flight items (their tool
+invocations roll back), requeues them and releases the runs, so a deploy loses nothing. Every
+tool event during an item is persisted with the item and published on the in-process hub;
+`runner.subscribe` replays then follows (polling the table for a run another process owns).
+Events of runs finished more than `run_events_retention_days` ago are pruned.
 
 ## Surfaces (level 4)
 
 REST: `POST /api/search` (tool), `POST /api/search/plan` (tool), `POST /api/search/ask`
-(assistant), `/api/assistants…` (runs). A writing tool on one record is non-blocking: `POST
+(assistant). Runs: `GET /api/assistants`, `POST /api/assistants/{key}/runs`, `GET /runs?status=active`,
+`GET /runs/{id}` (+ `/items?status&after&limit`, `/events` as Server-Sent Events replayable with
+`Last-Event-ID`), `POST /runs/{id}/pause | resume {options} | stop` (`cancel` is an alias); `GET
+/api/credits` is the Firecrawl balance with the credits the running assistants reserve. A writing tool on one record is non-blocking: `POST
 /api/people/{id}/store`, `/store/file` and `/normalize` answer 202 with the invocation (`?wait=true`
 blocks for the result), `GET /api/invocations/{id}` has its state and result, `GET
 /api/invocations/{id}/events` streams its activity (Server-Sent Events, replayable with
 `Last-Event-ID`), `POST /api/invocations/{id}/stop` stops it before the commit (409 when too late).
 MCP mirrors them: `search_people`, `plan_search`, `store_about_person`, `normalize_person` return
-tool results and forward the activity as log messages while they run; `ask_people` returns text.
+tool results and forward the activity as progress notifications while they run; `ask_people`
+returns text; `list_assistants`, `start_assistant`, `get_run`, `pause_run`, `resume_run`,
+`stop_run` drive runs.
 Every REST handler and MCP tool docstring starts with its kind ("Tool:" / "Assistant:").

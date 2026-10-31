@@ -1,10 +1,13 @@
-"""What a per-person assistant's `run_item` sees: the person, the run/item identity, the item
-budget, and a `write` helper that appends to the person's properties with an agent source and
-collects the resulting changes. Extends the agents' dependency object so the same instance can
-be handed to the tools' agents."""
+"""What an assistant's `run_item` sees: the item (its person when it has one, its payload), the
+run/item identity, the item budget, where its activity goes, and `tool()` — the one way an
+assistant changes data: a tool invocation on the item's person, attributed to the assistant,
+spending from the item's budget, its events joining the item's. Extends the agents' dependency
+object so the same instance can be handed to the tools' agents."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from app.agents.common import AgentDeps
@@ -19,15 +22,19 @@ class AssistantDeps(AgentDeps):
     assistant: str
     run_id: int
     item_id: int
-    person: dict[str, Any]              # people.public(..., include_history=True)
-    principal: Principal                # who started the run (for the activity log)
+    person: dict[str, Any] | None = None   # people.public(..., include_history=True)
+    payload: dict[str, Any] = field(default_factory=dict)
+    label: str | None = None
+    principal: Principal | None = None     # who started the run (for the activity log)
     budget: Budget
     options: Any
     changes: list[Change] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
+    event_sink: Callable[[ToolEvent], None] | None = None   # the runner's; None when run alone
 
     @property
     def person_id(self) -> str:
+        assert self.person is not None, "this item has no person"
         return self.person["id"]
 
     @property
@@ -40,31 +47,38 @@ class AssistantDeps(AgentDeps):
                       f"run:{self.run_id}/item:{self.item_id}")
 
     def current(self, key: str) -> Any:
-        return self.person.get(key)
+        return (self.person or {}).get(key)
 
     def history_values(self, key: str) -> list[Any]:
         """Every value the field ever held (tombstones excluded), oldest first."""
-        return [e["v"] for e in (self.person.get("history") or {}).get(key, [])
+        return [e["v"] for e in ((self.person or {}).get("history") or {}).get(key, [])
                 if e.get("v") is not None]
 
     def skip(self, step: str, reason: str) -> None:
         self.skipped.append({"step": step, "reason": reason})
 
-    def on_tool_event(self, event: ToolEvent) -> None:
-        """Where the events of this item's tools go; the runner replaces it per item."""
+    def emit(self, kind: str, message: str, **data: Any) -> None:
+        """A line of this item's own activity (a step, a note)."""
+        if self.event_sink is not None:
+            self.event_sink(ToolEvent(seq=0, ts=datetime.now(UTC), kind=kind,  # type: ignore[arg-type]
+                                      message=message, data=data))
 
     async def tool(self, fn: Callable[..., Awaitable[ToolResult | None]], agent: str,
                    **kwargs: Any) -> ToolResult | None:
         """Run a tool on this item's person: the entries it writes are attributed to
         `assistant/agent` with the run and item as reference, it spends from this item's budget,
-        its events reach `on_tool_event`, and its changes join the item's. None when the person
-        no longer exists."""
+        its events join the item's, and its changes join the item's. Cancelling the item stops
+        the tool before it commits. None when the person no longer exists."""
         ctx = await invoke.make_context(self.person_id, self.source(agent), self.principal,
-                                        firecrawl=self.firecrawl, sink=self.on_tool_event)
+                                        firecrawl=self.firecrawl, sink=self.event_sink)
         if ctx is None:
             return None
         inv = invoke.invoke(fn, ctx, **kwargs)
-        result = await inv.wait()
+        try:
+            result = await inv.wait()
+        except asyncio.CancelledError:
+            inv.stop()
+            raise
         if inv.person is not None:
             self.person = inv.person
         self.changes.extend(result.changes)

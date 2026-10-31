@@ -314,7 +314,7 @@ export interface AssistantSpec {
   options_schema: { properties?: Record<string, { default?: unknown; description?: string; enum?: string[]; type?: string }> }
 }
 
-export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+export type RunStatus = 'queued' | 'running' | 'pausing' | 'paused' | 'done' | 'failed' | 'cancelled'
 export type RunItemStatus = 'queued' | 'running' | 'done' | 'failed' | 'skipped'
 
 export interface AssistantRun {

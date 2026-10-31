@@ -25,12 +25,13 @@ class NormalizeRunOptions(NormalizeOptions):
                                          "name lookup is 5)")
 
 
-async def make_deps(run_id: int, item_id: int, person: dict, options: NormalizeRunOptions,
-                    principal: Principal) -> AssistantDeps:
+async def make_deps(run_id: int, item: dict, options: NormalizeRunOptions,
+                    principal: Principal | None) -> AssistantDeps:
     budget = Budget(max_scrapes=1, max_searches=0, max_credits=MATCH_CREDITS)
     client = AsyncFirecrawl(budget=budget) if options.repair and options.provider else None
-    return AssistantDeps(firecrawl=client, assistant=ASSISTANT, run_id=run_id, item_id=item_id,
-                         person=person, principal=principal, budget=budget, options=options)
+    return AssistantDeps(firecrawl=client, assistant=ASSISTANT, run_id=run_id, item_id=item["id"],
+                         person=item["person"], label=item.get("label"), principal=principal,
+                         budget=budget, options=options)
 
 
 def item_cap(options: NormalizeRunOptions) -> int:

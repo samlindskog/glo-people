@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,6 +15,7 @@ from app.permissions import load_contract
 from app.routers import accounts
 from app.routers import assistants as assistants_router
 from app.routers import auth as auth_router
+from app.routers import credits as credits_router
 from app.routers import invocations as invocations_router
 from app.routers import people as people_router
 from app.routers import properties as properties_router
@@ -48,16 +50,22 @@ async def lifespan(_: FastAPI):
     # Prod never runs alembic on its own (make prod-migrate does, after a deploy), so a release
     # that adds tables must still come up before the migration: the steps that need the new
     # tables log an error and are retried by the migration commands instead of crashing the app.
-    for step in (properties.sync_specs, runner.reconcile):
-        try:
-            await step()
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "%s failed at startup; pending migration? run `alembic upgrade head` "
-                "(make prod-migrate)", step.__name__)
+    try:
+        await properties.sync_specs()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "sync_specs failed at startup; pending migration? run `alembic upgrade head` "
+            "(make prod-migrate)")
+    runner.start_scheduler(f"api:{os.getpid()}")
+    try:
+        await runner.adopt(all_api_runs=True)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "adopting runs failed at startup; pending migration? run `alembic upgrade head` "
+            "(make prod-migrate)")
     async with mcp.session_manager.run():
         yield
-    await runner.drain()
+    await runner.stop_scheduler()
     await invoke.drain()
     await jobs.drain()
     await mongo.close()
@@ -69,6 +77,7 @@ api = FastAPI(title="glo-people", lifespan=lifespan, docs_url="/api/docs",
 api.include_router(auth_router.router)
 api.include_router(people_router.router)
 api.include_router(invocations_router.router)
+api.include_router(credits_router.router)
 api.include_router(properties_router.router)
 api.include_router(search_router.router)
 api.include_router(accounts.router)

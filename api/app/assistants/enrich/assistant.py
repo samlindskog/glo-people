@@ -54,12 +54,12 @@ ASSISTANT = "enrich"
 MAX_RELATED_LINKS = 50        # a person record is not a link directory
 
 
-async def make_deps(run_id: int, item_id: int, person: dict, options: BaseModel,
-                    principal: Principal) -> AssistantDeps:
+async def make_deps(run_id: int, item: dict, options: BaseModel,
+                    principal: Principal | None) -> AssistantDeps:
     budget = budget_for(options)
     return AssistantDeps(firecrawl=AsyncFirecrawl(budget=budget), assistant=ASSISTANT, run_id=run_id,
-                        item_id=item_id, person=person, principal=principal, budget=budget,
-                        options=options)
+                        item_id=item["id"], person=item["person"], label=item.get("label"),
+                        principal=principal, budget=budget, options=options)
 
 
 async def run_item(deps: AssistantDeps) -> dict[str, Any]:
