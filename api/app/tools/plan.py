@@ -43,7 +43,7 @@ class SearchPlan(BaseModel):
         default_factory=list, max_length=6,
         description="Literal conditions on typed or text properties (AND). Use canonical enum "
                     "values, numbers for number properties, ISO dates for dates.")
-    rationale: str = Field("", max_length=300, description="One sentence on the choice")
+    rationale: str = Field("", description="One sentence on the choice")
 
 
 class PlanResult(BaseModel):

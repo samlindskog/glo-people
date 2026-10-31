@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
+from app import fields
 from app.agents.common import run_agent
 from app.assistants import AssistantResult
 from app.auth import Principal
@@ -19,14 +20,13 @@ from app.tools.search import FieldFilter, SearchHit, SearchRequest
 
 AGENT_NAME = "answer"
 REQUEST_LIMIT = 3
-MAX_CONTEXT_CHARS = 60_000
-MAX_VALUE_CHARS = 600
+MAX_CONTEXT_CHARS = 200_000   # all hits together; one value may be fields.MAX_TEXT_CHARS
 
 
 class Citation(BaseModel):
     person_id: str
     field: str = Field(description="The property the cited value comes from")
-    value: str = Field(max_length=300, description="The value (or an excerpt) relied on")
+    value: str = Field(description="The value (or an excerpt) relied on")
 
 
 class AskResult(AssistantResult):
@@ -89,7 +89,7 @@ def _context(hit: SearchHit, keys: list[str]) -> dict[str, Any]:
     for key in keys:
         if key in person:
             value = person[key]
-            out[key] = value[:MAX_VALUE_CHARS] if isinstance(value, str) else value
+            out[key] = value[:fields.MAX_TEXT_CHARS] if isinstance(value, str) else value
         if key in norm:
             out[f"{key}_normalised"] = norm[key]
     return out

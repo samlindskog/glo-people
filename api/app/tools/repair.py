@@ -31,12 +31,10 @@ AGENT_NAME = "repair"
 REQUEST_LIMIT = 4
 KIND = "record_kind"
 PERSON, COMPANY, UNIDENTIFIABLE = "Person", "Company", "Unidentifiable"
-MAX_NAME_CHARS = 80
 TEXT_LIKE = ("text", "keyword", "url", "contact", "list")
-EVIDENCE_KEYS = (("linkedin", 200), ("email", 200), ("emails", 200), ("github", 200),
-                 ("website", 200), ("company", 200), ("role", 200), ("linkedin_headline", 300),
-                 ("one_liner", 300), ("bio", 400), ("intro_bio", 300), ("notes", 200),
-                 ("entity_type", 100), ("location", 100))
+EVIDENCE_KEYS = ("linkedin", "email", "emails", "github", "website", "company", "role",
+                 "linkedin_headline", "one_liner", "bio", "intro_bio", "notes", "entity_type",
+                 "location")
 _COMPANY_WORDS = re.compile(r"\b(inc|llc|ltd|ventures?|capital|labs?|studio|partners|holdings|"
                             r"group|technologies|fund|gmbh|corp|company|co)\b", re.IGNORECASE)
 _HANDLE = re.compile(r"@\w")
@@ -168,13 +166,12 @@ class Verdict(BaseModel):
     name: str | None = Field(None, description="The person's first and last name when the "
                                                "current name is broken and the evidence gives "
                                                "the full name verbatim; otherwise null")
-    name_evidence: str = Field("", max_length=200,
-                               description="Where the name comes from, in a few words")
+    name_evidence: str = Field("", description="Where the name comes from, in a few words")
     name_complete: bool = Field(description="After your answer, is the name a first and a last "
                                             "name (or, for a company, the company's name)?")
     misfiled: list[Misfiled] = Field(default_factory=list, max_length=5)
     confidence: Confidence = "medium"
-    note: str = Field("", max_length=200)
+    note: str = ""
 
 
 @dataclass
@@ -237,7 +234,7 @@ async def _grounded(ctx: RunContext[RepairDeps], v: Verdict) -> Verdict:
         name = " ".join(v.name.split())
         toks = _tokens(name)
         evidence_tokens = set(ctx.deps.evidence.split())
-        if not is_full_name(name) or len(name) > MAX_NAME_CHARS:
+        if not is_full_name(name):
             problems.append("a proposed name needs a first and a last name (or null)")
         elif fields.fold(name) == fields.fold(ctx.deps.current_name):
             problems.append("the proposed name is the current one; answer null")
@@ -275,11 +272,11 @@ def _evidence(doc: dict) -> tuple[str, str]:
     if slug:
         lines.append(f"linkedin slug: {slug}")
         folded.append(fields.fold(slug.replace("-", " ").replace("_", " ")))
-    for key, limit in EVIDENCE_KEYS:
+    for key in EVIDENCE_KEYS:
         value = _cur(doc, key)
         if value in (None, "", []):
             continue
-        text = fields.text_of(value)[:limit]
+        text = fields.text_of(value)[:fields.MAX_TEXT_CHARS]
         lines.append(f"{key}: {text}")
         folded.append(fields.fold(text))
         if key in ("email", "emails"):

@@ -17,6 +17,7 @@ from typing import Any
 import logfire
 from pydantic import BaseModel
 
+from app import fields
 from app.assistants import runner
 from app.assistants.base import StopRun
 from app.assistants.context import AssistantDeps
@@ -51,8 +52,6 @@ from app.urls import (
 log = logging.getLogger(__name__)
 ASSISTANT = "enrich"
 MAX_RELATED_LINKS = 50        # a person record is not a link directory
-MAX_HEADLINE_CHARS = 300
-MAX_SUMMARY_CHARS = 1200
 
 
 async def make_deps(run_id: int, item_id: int, person: dict, options: BaseModel,
@@ -89,7 +88,7 @@ def _has_url(deps: AssistantDeps, key: str, url: str) -> bool:
     return any(url_key(v) == wanted for v in deps.history_values(key) if isinstance(v, str))
 
 
-def _clip(text: str | None, limit: int) -> str | None:
+def _clip(text: str | None, limit: int = fields.MAX_TEXT_CHARS) -> str | None:
     if not text:
         return None
     text = " ".join(text.split())
@@ -209,7 +208,7 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     if github_url:
         st.github_urls.append(github_url)
     st.related.extend(profile.other_links)
-    values: dict[str, Any] = {"linkedin_headline": _clip(profile.headline, MAX_HEADLINE_CHARS),
+    values: dict[str, Any] = {"linkedin_headline": _clip(profile.headline),
                               "github": github_url}
     if not deps.current("location") and profile.location:
         values["location"] = profile.location
@@ -308,7 +307,7 @@ async def _github_facts(deps: AssistantDeps, st: State, github_url: str) -> None
     if not found:
         return
     st.result["github"] = "matched"
-    values: dict[str, Any] = {"github_summary": _clip(found.summary(), MAX_SUMMARY_CHARS)}
+    values: dict[str, Any] = {"github_summary": _clip(found.summary())}
     if found.blog and not is_social(found.blog) and is_html_candidate(found.blog) \
             and not _has_url(deps, "website", found.blog):
         values["website"] = found.blog       # the account's blog field is usually the personal site
@@ -371,7 +370,7 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
     # stay in its history. A reworded summary of the same website is not new information: only
     # write one when the record has no description yet or the company website is new.
     if "website" in values or not deps.current("company_description"):
-        values["company_description"] = _clip(summary.summary, MAX_SUMMARY_CHARS)
+        values["company_description"] = _clip(summary.summary)
     else:
         deps.skip("company", "summary kept: same website as before")
     if not deps.current("company"):

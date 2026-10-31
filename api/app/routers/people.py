@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
-from app import activity, db, embeddings, importer, jobs
+from app import activity, db, embeddings, fields, importer, jobs
 from app import people as people_svc
 from app.auth import Principal, require
 from app.config import get_settings
@@ -25,7 +25,7 @@ Reader = Annotated[Principal, Depends(require("people:read"))]
 Writer = Annotated[Principal, Depends(require("people:write"))]
 
 MAX_UPLOAD = 25 * 1024 * 1024
-MAX_PASSAGE = 20_000
+MAX_PASSAGE = fields.MAX_TEXT_CHARS
 
 
 class PersonCreate(BaseModel):
@@ -169,7 +169,7 @@ async def store_file(person_id: str, file: Annotated[UploadFile, File()],
     """Tool: a .txt or .md file as the passage, stored with the default options."""
     data = await file.read(MAX_PASSAGE + 1)
     if len(data) > MAX_PASSAGE:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "file larger than 20 kB")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"file larger than {MAX_PASSAGE // 1000} kB")
     try:
         passage = data.decode("utf-8-sig")
     except UnicodeDecodeError as e:

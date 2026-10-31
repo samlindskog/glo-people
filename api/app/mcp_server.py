@@ -10,7 +10,7 @@ from pydantic import Field
 from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import activity, auth, properties
+from app import activity, auth, fields, properties
 from app import people as people_svc
 from app.assistants.ask import ask
 from app.auth import Principal
@@ -255,7 +255,7 @@ async def ask_people(
 async def store_about_person(
     ctx: Context,
     id: str,
-    passage: Annotated[str, Field(min_length=1, max_length=20_000,
+    passage: Annotated[str, Field(min_length=1, max_length=fields.MAX_TEXT_CHARS,
                                   description="Free text about the person (notes, a message, "
                                               "a profile)")],
     agent: Annotated[str | None, Field(description="Name of the automated agent supplying the "

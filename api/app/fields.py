@@ -13,6 +13,8 @@ SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated
                            "history_norm"})
 TIERS = ("member", "plus_one")
 RESERVED_PREFIX = "col_"      # a CSV header that slugifies to a system key becomes col_<key>
+MAX_TEXT_CHARS = 40_000       # about 5000 words: text values are not capped below this,
+                              # neither when stored nor when an agent reads them
 
 _KEY_OK = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 

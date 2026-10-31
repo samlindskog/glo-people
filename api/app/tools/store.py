@@ -25,8 +25,7 @@ from app.tools.normalize import NormalizeResult
 AGENT_NAME = "storage"
 REQUEST_LIMIT = 4
 OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
-MAX_PASSAGE_CHARS = 20_000
-MAX_EVIDENCE = 200
+MAX_PASSAGE_CHARS = fields.MAX_TEXT_CHARS
 LIST_TYPES = ("list", "enum_list")
 
 Value = str | list[str]
@@ -43,8 +42,7 @@ class Write(BaseModel):
     action: Literal["set", "append"] = Field(
         "set", description="append (list types only): add these items to the current list")
     conflict: bool = Field(False, description="The passage contradicts the current value")
-    evidence: str = Field("", max_length=MAX_EVIDENCE,
-                          description="The passage words this rests on, copied verbatim")
+    evidence: str = Field("", description="The passage words this rests on, copied verbatim")
 
 
 class NewProperty(BaseModel):
@@ -55,7 +53,7 @@ class NewProperty(BaseModel):
     description: str = Field(min_length=1, max_length=300,
                              description="One sentence: what values this property holds")
     value: Value
-    evidence: str = Field("", max_length=MAX_EVIDENCE)
+    evidence: str = ""
 
 
 class Proposal(BaseModel):
@@ -174,7 +172,7 @@ def render_person(person: dict) -> str:
         if key in fields.SYSTEM_FIELDS or key in ("id", "tier", "name"):
             continue
         text = "; ".join(map(str, value)) if isinstance(value, list) else str(value)
-        text = re.sub(r"\s+", " ", text)[:300]
+        text = re.sub(r"\s+", " ", text)[:fields.MAX_TEXT_CHARS]
         extra = f"  [{norm[key]}]" if key in norm else ""
         lines.append(f"{key}: {text}{extra}")
     return "\n".join(lines) or "(no values yet)"

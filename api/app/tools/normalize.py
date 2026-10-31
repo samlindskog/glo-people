@@ -31,7 +31,6 @@ REQUEST_LIMIT = 3
 ENUM_TYPES = ("enum", "enum_list")
 MAX_VALUE_CHARS = 40
 CONTEXT_KEYS = ("company", "role", "one_liner", "bio", "sectors", "company_description")
-MAX_CONTEXT_CHARS = 300
 
 
 class NormalizeOptions(BaseModel):
@@ -85,7 +84,7 @@ class Mapping(BaseModel):
     non_normalizable: bool = Field(
         False, description="True when the text says there is no value, or is not a value of this "
                            "property at all (e.g. an industry in a stage field); then value is null")
-    note: str = Field("", max_length=200, description="Why, in a few words")
+    note: str = Field("", description="Why, in a few words")
 
 
 class Normalised(BaseModel):
@@ -182,7 +181,7 @@ def person_context(doc: dict) -> str:
         value = history.current(doc.get(key))
         if value not in (None, "", []):
             text = fields.text_of(value)
-            lines.append(f"{key}: {text[:MAX_CONTEXT_CHARS]}")
+            lines.append(f"{key}: {text[:fields.MAX_TEXT_CHARS]}")
     return "\n".join(lines) or "(nothing else known)"
 
 

@@ -6,7 +6,7 @@ and `tests/test_architecture.py` enforces it.
 
 | Level | Name | Modules | Contract |
 |---|---|---|---|
-| 0 | Rules & adapters | `fields`, `history`, `normalize` (the parser), `property_specs`, `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions |
+| 0 | Rules & adapters | `fields`, `history`, `normalize` (the parser), `property_specs`, `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions. `fields.MAX_TEXT_CHARS` (about 5000 words) is the only cap on a text value, stored or shown to an agent |
 | 1 | Stores | `properties` (registry, enum sets, name vectors), `people` (documents; the only writer), `embeddings` (passage vectors) | typed reads; writers return `WriteResult{person, changes}`; compare-and-set |
 | 2 | Tools | `tools/search`, `tools/plan`, `tools/store`, `tools/normalize`, `tools/site`, `tools/company`; `agents/common`, `agents/fakes` (model plumbing) | **one shot**; side effects only through level-1 writers; a Pydantic result for programs built on `history.Change`; no prose for humans; each tool's model agent is defined inside the tool |
 | 3 | Assistants | `assistants/ask`; the per-person assistants `assistants/enrich`, `assistants/normalize`; `assistants/base`, `runner`, `context` (runs over many people) | compose tools; may change data through them; return `text` for a human plus `changes` |
