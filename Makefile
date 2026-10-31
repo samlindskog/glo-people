@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -26,8 +26,23 @@ test-api:       ## pytest inside the api container (uses glo_test databases)
 test-web:
 	cd web && npm test
 
-e2e:            ## Playwright against the running dev stack
+e2e:            ## Playwright against the running dev stack (real agents, real Firecrawl: spends a little)
 	cd e2e && npx playwright test
+
+# The sandbox: a separate compose project with its own data, fake agents and no provider keys,
+# on http://localhost:8081. For e2e that must not touch the dev data (which is production data).
+SANDBOX = docker compose -f compose.yaml -f compose.dev.yaml -f compose.e2e.yaml
+
+sandbox-up:     ## start the sandbox stack (fakes, own database) on http://localhost:8081
+	env -u OPENAI_API_KEY -u FIRECRAWL_API_KEY $(SANDBOX) up -d --build
+	@echo "→ http://localhost:8081 (sandbox: fake agents, disposable data)"
+
+sandbox-down:   ## stop the sandbox and drop its data
+	$(SANDBOX) down -v
+
+e2e-sandbox: sandbox-up   ## Playwright against the sandbox: every spec runs, nothing real is touched
+	@for i in $$(seq 1 60); do curl -sf -m 3 localhost:8081/api/health >/dev/null 2>&1 && curl -sf -m 3 localhost:8081/ >/dev/null 2>&1 && break; sleep 2; done
+	cd e2e && BASE_URL=http://localhost:8081 COMPOSE="$(SANDBOX)" npx playwright test
 
 lint:
 	cd api && uv run ruff check app tests alembic

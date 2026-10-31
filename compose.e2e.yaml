@@ -1,0 +1,26 @@
+# Sandbox for e2e with fake agents: a separate compose project (own containers and volumes), no
+# provider keys, deterministic agents and embedder, on http://localhost:8081. Nothing it writes
+# can reach the dev data, which is production data. Real-agent e2e runs against the dev stack.
+#   docker compose -f compose.yaml -f compose.dev.yaml -f compose.e2e.yaml up -d   (or: make sandbox-up)
+name: glo-e2e
+
+services:
+  api:
+    environment:
+      FAKE_AGENTS: "1"
+      EMBEDDING_PROVIDER: fake
+      OPENAI_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
+      LOGFIRE_TOKEN: ""
+      LOGFIRE_ENVIRONMENT: e2e
+      DEV_AUTO_LOGIN: "0"
+    ports: !override ["127.0.0.1:8001:8000"]
+
+  nginx:
+    ports: !override ["127.0.0.1:8081:80"]
+
+  postgres:
+    ports: !override []
+
+  mongo:
+    ports: !override []
