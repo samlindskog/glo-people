@@ -1,5 +1,4 @@
 import logging
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -56,7 +55,7 @@ async def lifespan(_: FastAPI):
         logging.getLogger(__name__).exception(
             "sync_specs failed at startup; pending migration? run `alembic upgrade head` "
             "(make prod-migrate)")
-    runner.start_scheduler(f"api:{os.getpid()}")
+    runner.start_scheduler(runner.worker_id("api"))
     try:
         await runner.adopt(all_api_runs=True)
     except Exception:

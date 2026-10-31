@@ -225,16 +225,7 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     if github_url:
         st.github_urls.append(github_url)
     st.related.extend(profile.other_links)
-    values: dict[str, Any] = {"linkedin_headline": _clip(profile.headline),
-                              "github": github_url}
-    if not deps.current("location") and profile.location:
-        values["location"] = profile.location
-    company = profile.current_company.name if profile.current_company else None
-    current_company = deps.current("company")
-    if company and (not isinstance(current_company, str)
-                    or current_company.strip().lower() != company.strip().lower()):
-        values["company"] = company        # a new employer: appended, the old one stays in history
-    await deps.write("linkedin_reader", values)
+    await deps.write("linkedin_reader", fullenrich.profile_values(profile, deps.person or {}))
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:

@@ -92,6 +92,12 @@ class FakeFirecrawl(AsyncFirecrawl):
                 return AlexandriaResult(provider, capability,
                                         json.loads((FIX / "fullenrich_ada.json").read_text()),
                                         LINKEDIN_CREDITS)
+            if url_key(url) == url_key("https://www.linkedin.com/in/nameless"):
+                # a paid match whose record carries no name at all
+                self.budget.charge("scrape", target, LINKEDIN_CREDITS)
+                data = json.loads((FIX / "fullenrich_ada.json").read_text())
+                data["people"][0].update(full_name=None, first_name=None, last_name=None)
+                return AlexandriaResult(provider, capability, data, LINKEDIN_CREDITS)
             return AlexandriaResult(provider, capability, {"people": []}, 0)
         if target == "github-com/repositories/user":
             if url_key(options["url"]) == url_key("https://github.com/adaok"):

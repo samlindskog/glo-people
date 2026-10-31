@@ -41,6 +41,25 @@ class LinkedInProfile(BaseModel):
                                    description="Other URLs on the profile (twitter, blog, ...)")
 
 
+def profile_values(profile: LinkedInProfile, current: dict[str, Any]) -> dict[str, Any]:
+    """What a matched profile adds to a record: the headline, the GitHub account, the location
+    when the record has none, and the current company when it differs from the record's (the
+    old one stays in history). `current` is the record's current values. A paid lookup should
+    never be thrown away: every caller that matched a profile writes these."""
+    values: dict[str, Any] = {}
+    if profile.headline:
+        values["linkedin_headline"] = " ".join(profile.headline.split())
+    if g := github_profile(profile.github_url):
+        values["github"] = g
+    if profile.location and not current.get("location"):
+        values["location"] = profile.location
+    company = profile.current_company.name if profile.current_company else None
+    now = current.get("company")
+    if company and (not isinstance(now, str) or now.strip().lower() != company.strip().lower()):
+        values["company"] = company
+    return values
+
+
 async def match(client: AsyncFirecrawl, linkedin_url: str) -> LinkedInProfile | None:
     """The profile for an exact LinkedIn URL, or None when no record matched."""
     res = await client.alexandria(PROVIDER, "people/match", {"linkedin_url": linkedin_url},

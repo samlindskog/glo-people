@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import os
+import secrets
+import socket
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -679,6 +682,13 @@ async def _rows(q: Any) -> list[Any]:
 
 
 _scheduler: _Scheduler | None = None
+
+
+def worker_id(kind: str) -> str:
+    """A worker name unique to this process start: `api:<host>:<pid>:<nonce>`. The pid alone
+    repeats across container restarts, and a worker must never mistake a dead predecessor's
+    runs for its own."""
+    return f"{kind}:{socket.gethostname()[:16]}:{os.getpid()}:{secrets.token_hex(3)}"
 
 
 def start_scheduler(worker: str) -> _Scheduler:

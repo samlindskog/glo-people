@@ -5,7 +5,6 @@ process (visible on the Assistants page like any other run)."""
 import argparse
 import asyncio
 import getpass
-import os
 import re
 import statistics
 import sys
@@ -68,7 +67,7 @@ async def _run(spec_key: str, items: list, params: dict, label: str) -> dict:
     assistants.load_all()
     run = await runner.create_run(REGISTRY[spec_key], None, items, params, label=label)
     print(f"run {run['id']} ({spec_key}): {run['total']} item(s)")
-    run = await runner.run_to_completion(run["id"], f"cli:{os.getpid()}", on_event=_show)
+    run = await runner.run_to_completion(run["id"], runner.worker_id("cli"), on_event=_show)
     print(f"run {run['id']}: {run['status']}, {run['done']} done, {run['failed']} failed")
     return run
 

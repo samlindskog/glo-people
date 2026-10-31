@@ -5,8 +5,10 @@ agent (defined here) judges the record: what it is (`record_kind`: Person, Compa
 Unidentifiable, or a kind it allocates), whether the name is a real first and last name and, when
 it is broken, the full name the record's own evidence gives verbatim; and values filed under the
 wrong property. When the evidence yields no full name and the record has a LinkedIn URL, the
-FullEnrich profile behind it is asked for the name only. A Person whose name stays partial or
-broken is Unidentifiable. Every fix is an appended history entry; nothing is deleted."""
+FullEnrich profile behind it is asked for the name; since that lookup is paid for, what the
+profile says about the person (headline, company, location, GitHub) is written too. A Person
+whose name stays partial or broken is Unidentifiable. Every fix is an appended history entry;
+nothing is deleted."""
 
 import re
 from dataclasses import dataclass, field
@@ -65,6 +67,9 @@ class RepairResult(ToolResult):
     note: str = ""
     rejected: list[str] = Field(default_factory=list,
                                 description="Agent proposals the caps or rules did not allow")
+    profile_written: list[str] = Field(default_factory=list,
+                                       description="Properties filled from the paid profile "
+                                                   "(headline, company, location, github)")
 
 
 # --- signals and mechanical fixes (pure) -----------------------------------------------------------
@@ -299,19 +304,18 @@ async def _judge(doc: dict, sigs: list[str], opts: RepairOptions, emit: Emit = s
     return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
-async def _provider_name(doc: dict, firecrawl: AsyncFirecrawl,
-                         result: RepairResult) -> str | None:
-    """The full name from the FullEnrich profile behind the record's LinkedIn URL, or None."""
+async def _provider_profile(doc: dict, firecrawl: AsyncFirecrawl,
+                            result: RepairResult) -> fullenrich.LinkedInProfile | None:
+    """The FullEnrich profile behind the record's LinkedIn URL, or None (a miss is free)."""
     li = _cur(doc, "linkedin")
     url = linkedin_profile(li) if isinstance(li, str) else None
     if not url:
         return None
     before = firecrawl.budget.credits
-    profile = None
     try:
-        profile = await fullenrich.match(firecrawl, url)
+        return await fullenrich.match(firecrawl, url)
     except NotFound:
-        pass
+        return None
     except NotConfigured as e:
         result.note = f"{result.note} provider skipped: {e}".strip()
         return None
@@ -321,7 +325,13 @@ async def _provider_name(doc: dict, firecrawl: AsyncFirecrawl,
     finally:
         result.provider_called = True
         result.credits += firecrawl.budget.credits - before
-    name = " ".join((profile.full_name or "").split()) if profile else ""
+
+
+def _profile_name(profile: fullenrich.LinkedInProfile | None) -> str | None:
+    """The profile's first and last name, or None when it has no full name."""
+    if profile is None:
+        return None
+    name = " ".join((profile.full_name or f"{profile.first_name or ''} {profile.last_name or ''}").split())
     return name if is_full_name(name) else None
 
 
@@ -356,17 +366,31 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         result.rejected.append(f"name {verdict.name!r} (low confidence)")
     complete = verdict.name_complete or name is not None
     kind_proposed = verdict.kind
+    profile = None
     if fields.fold(kind_proposed) == fields.fold(PERSON) and not complete:
         if opts.provider and ctx.firecrawl is not None:
             ctx.emit("step", "no full name on the record; asking the LinkedIn profile")
-            provider_name = await _provider_name(doc, ctx.firecrawl, result)
+            profile = await _provider_profile(doc, ctx.firecrawl, result)
+            provider_name = _profile_name(profile)
             if provider_name and fields.fold(provider_name) != fields.fold(current_name):
                 name, name_source, complete = provider_name, "provider", True
             elif provider_name:
                 complete = True
+            elif profile is not None:
+                ctx.emit("note", "the profile matched but gives no full name")
         if not complete:
             kind_proposed = UNIDENTIFIABLE
     result.name_source = name_source
+    if profile is not None:
+        # The lookup was paid for: whatever it did for the name, what the profile says about the
+        # person goes on the record (headline, company, location, GitHub), attributed to it.
+        extra = fullenrich.profile_values(profile, ctx.tx.public(include_history=False))
+        if extra:
+            await ctx.tx.set_values(extra, Source("agent", f"{AGENT_NAME}/fullenrich", ctx.source.ref),
+                                    tag="repair")
+            result.profile_written = sorted(extra)
+            ctx.emit("write", "from the profile: " + ", ".join(result.profile_written),
+                     keys=result.profile_written)
 
     kind, allocated = await properties.resolve_enum_value(
         KIND, kind_proposed, opts.allocate, src=f"agent:{AGENT_NAME} {ctx.source.ref or ''}".strip())
