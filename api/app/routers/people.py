@@ -2,13 +2,19 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
 from app import activity, db, embeddings, importer, jobs
 from app import people as people_svc
 from app.auth import Principal, require
-from app.search import SearchRequest, SearchResponse, describe, record_search, run_search
+from app.history import Source
+from app.normalize import person as normalize_person
+from app.normalize.person import NormalizeReport
+from app.routers.search import agent_error
+from app.search import store
+from app.search.store import StoreOptions, StoreReport
 
 router = APIRouter(prefix="/api", tags=["people"])
 
@@ -16,6 +22,7 @@ Reader = Annotated[Principal, Depends(require("people:read"))]
 Writer = Annotated[Principal, Depends(require("people:write"))]
 
 MAX_UPLOAD = 25 * 1024 * 1024
+MAX_PASSAGE = 20_000
 
 
 class PersonCreate(BaseModel):
@@ -31,23 +38,12 @@ class PersonPatch(BaseModel):
 def _bad_request(e: Exception) -> HTTPException:
     if isinstance(e, people_svc.ConflictError):
         return HTTPException(status.HTTP_409_CONFLICT, str(e))
+    if isinstance(e, AgentRunError):
+        return agent_error(e)
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e))
 
 
 # --- people -------------------------------------------------------------------------------------
-
-@router.post("/search")
-async def search(req: SearchRequest, principal: Reader) -> SearchResponse:
-    try:
-        resp = await run_search(req)
-    except ValueError as e:
-        raise _bad_request(e) from e
-    resp.search_id = await record_search(principal, req, resp,
-                                         "api" if principal.via_api_key else "ui")
-    await activity.record("search", principal, str(resp.search_id),
-                          {**describe(req), "total": resp.total})
-    return resp
-
 
 @router.get("/people/{person_id}")
 async def get_person(person_id: str, _: Reader) -> dict:
@@ -128,6 +124,67 @@ async def import_people(file: Annotated[UploadFile, File()],
     job = jobs.spawn(f"embed import {file.filename}", embed)
     return {**summary, "job_id": job["id"]}
 
+
+# --- agentic storage and normalisation of one person ------------------------------------------
+
+class StoreBody(BaseModel):
+    passage: str = Field(min_length=1, max_length=MAX_PASSAGE)
+    options: StoreOptions = Field(default_factory=StoreOptions)
+
+
+def _source(principal: Principal, agent: str) -> Source:
+    """The passage came from this person (UI or API key); the agent only restructured it."""
+    base = Source.for_rest(principal)
+    ref = f"{base.ref} agent:{agent}" if base.ref else f"agent:{agent}"
+    return Source(base.kind, base.by, ref)
+
+
+async def _store(person_id: str, passage: str, options: StoreOptions,
+                 principal: Principal) -> StoreReport:
+    try:
+        report = await store.store(person_id, passage, options, principal,
+                                   _source(principal, "store"))
+    except (ValueError, AgentRunError) as e:
+        raise _bad_request(e) from e
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
+    await activity.record("person.store", principal, person_id, {
+        "items": [{"tag": i.tag, "action": i.action, "key": i.key} for i in report.items],
+        "created": report.created, "chars": len(passage)})
+    return report
+
+
+@router.post("/people/{person_id}/store")
+async def store_passage(person_id: str, body: StoreBody, principal: Writer) -> StoreReport:
+    return await _store(person_id, body.passage, body.options, principal)
+
+
+@router.post("/people/{person_id}/store/file")
+async def store_file(person_id: str, file: Annotated[UploadFile, File()],
+                     principal: Writer) -> StoreReport:
+    """A .txt or .md file as the passage, stored with the default options."""
+    data = await file.read(MAX_PASSAGE + 1)
+    if len(data) > MAX_PASSAGE:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "file larger than 20 kB")
+    try:
+        passage = data.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "file is not UTF-8 text") from e
+    if not passage.strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "file is empty")
+    return await _store(person_id, passage, StoreOptions(), principal)
+
+
+@router.post("/people/{person_id}/normalize")
+async def normalize_one(person_id: str, principal: Writer) -> NormalizeReport:
+    try:
+        report = await normalize_person.run(
+            person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"))
+    except (ValueError, AgentRunError) as e:
+        raise _bad_request(e) from e
+    if report is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
+    return report
 
 @router.get("/jobs")
 async def list_jobs(_: Reader) -> list[dict]:

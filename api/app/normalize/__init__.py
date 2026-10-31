@@ -4,7 +4,9 @@
 (`unmapped`: not recognised, an agent may map it; `non_normalizable`: the text says there is no
 value). `document` reads specs and enum sets from app.properties to find what a document still
 needs normalised. Nothing here writes: app.people stores the results beside the text (see
-app.history, `norm`).
+app.history, `norm`). `app.normalize.person` is the operation that brings one person up to date,
+parser first and the normaliser agent for what is left; it sits above people and the agents and
+is imported explicitly.
 """
 
 import hashlib

@@ -13,7 +13,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 from app import properties
 from app.agents.common import catalog_prompt, run_agent
 from app.properties import Property
-from app.search import FieldFilter, FieldQuery, filter_to_mongo
+from app.search.engine import FieldFilter, FieldQuery, filter_to_mongo
 
 AGENT_NAME = "planner"
 REQUEST_LIMIT = 3

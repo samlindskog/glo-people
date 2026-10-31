@@ -39,8 +39,8 @@ async def people_by_name(writer):
 # --- ask --------------------------------------------------------------------------------------------
 
 async def test_ask_plans_runs_and_answers(people_by_name, reader):
-    r = await reader.post("/api/ask", json={"question": "payments founders with mrr over 10000",
-                                            "options": {"threshold": 0.0}})
+    r = await reader.post("/api/search/ask", json={"question": "payments founders with mrr over 10000",
+                                                   "options": {"threshold": 0.0}})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["plan"]["semantic"] == [{"field": "bio",
@@ -60,11 +60,11 @@ async def test_ask_plans_runs_and_answers(people_by_name, reader):
     assert saved["params"]["ask"].startswith("payments") and saved["source"] == "ui"
 
     # no hits: a plain answer, no model call needed
-    r = await reader.post("/api/ask", json={"question": "robotics with mrr over 99999999"})
+    r = await reader.post("/api/search/ask", json={"question": "robotics with mrr over 99999999"})
     assert r.status_code == 200 and r.json()["total"] == 0
     assert "No one" in r.json()["answer"]
     # options are validated
-    assert (await reader.post("/api/ask", json={"question": "x", "options": {"k": 0}})
+    assert (await reader.post("/api/search/ask", json={"question": "x", "options": {"k": 0}})
             ).status_code == 422
 
 
@@ -82,7 +82,7 @@ async def test_ask_invalid_plan_is_retried_then_fails_clearly(people_by_name, re
             "semantic": [{"field": "bio", "query": "climate"}], "filters": []})])
 
     with planner.agent.override(model=FunctionModel(flaky)):
-        r = await reader.post("/api/ask", json={"question": "climate", "options": {"threshold": 0}})
+        r = await reader.post("/api/search/ask", json={"question": "climate", "options": {"threshold": 0}})
     assert r.status_code == 200, r.text
     assert attempts == [False, True]
     assert r.json()["results"][0]["person"]["name"] == "Bo"
@@ -92,7 +92,7 @@ async def test_ask_invalid_plan_is_retried_then_fails_clearly(people_by_name, re
             "semantic": [], "filters": [{"field": "stage", "op": "eq", "value": "Nonsense"}]})])
 
     with planner.agent.override(model=FunctionModel(hopeless)):
-        r = await reader.post("/api/ask", json={"question": "anything"})
+        r = await reader.post("/api/search/ask", json={"question": "anything"})
     assert r.status_code == 502 and "agent failed" in r.text
 
 

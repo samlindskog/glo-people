@@ -12,12 +12,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import activity, auth, properties
 from app import people as people_svc
-from app.agents import normalize_person as normalize_person_op
-from app.agents import store
-from app.agents.ask import AskOptions, ask
-from app.agents.store import StoreOptions
 from app.auth import Principal
 from app.history import Source
+from app.normalize import person as normalize_person_op
 from app.search import (
     MAX_LIMIT,
     FieldFilter,
@@ -27,7 +24,10 @@ from app.search import (
     describe,
     record_search,
     run_search,
+    store,
 )
+from app.search.ask import AskOptions, ask
+from app.search.store import StoreOptions
 
 WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
                          "normalize_person"})

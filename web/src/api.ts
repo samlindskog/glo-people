@@ -91,7 +91,7 @@ export const api = {
   properties: () => request<Property[]>('GET', '/api/properties'),
 
   ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<AskOptions> }) =>
-    request<AskResult>('POST', '/api/ask', body),
+    request<AskResult>('POST', '/api/search/ask', body),
   store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
     request<StoreReport>('POST', `/api/people/${id}/store`, { passage, options }),
   storeFile: (id: string, file: File) => {

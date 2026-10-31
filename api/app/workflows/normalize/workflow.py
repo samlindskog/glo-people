@@ -5,9 +5,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.agents import normalize_person
 from app.auth import Principal
 from app.history import Source
+from app.normalize import person as normalize_person
 from app.workflows.context import WorkflowDeps
 
 WORKFLOW = "normalize"

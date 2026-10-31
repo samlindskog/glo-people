@@ -1,6 +1,6 @@
-"""People search: literal per-property filters (Mongo) combined with per-property semantic
-similarity (pgvector). The one engine: the same `SearchRequest` backs the REST endpoint, the UI,
-the MCP tool and the planner agent, and `run_search` validates it against the property catalog."""
+"""The search engine: literal per-property filters (Mongo) combined with per-property semantic
+similarity (pgvector). The same `SearchRequest` backs the REST endpoint, the UI, the MCP tool and
+the planner agent (app.search.ask); `run_search` validates it against the property catalog."""
 
 import json
 import re
