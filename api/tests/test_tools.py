@@ -3,6 +3,7 @@ REST and MCP surfaces."""
 
 import pytest
 from pydantic_ai import ModelResponse
+from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
@@ -10,8 +11,12 @@ from app import embedder, jobs, properties
 from app.agents.fakes import _retried
 from app.assistants import runner
 from app.config import get_settings
+from app.history import Source
+from app.integrations.firecrawl import Budget
 from app.mongo import db
 from app.tools import plan as plan_tool
+from app.tools import repair as repair_tool
+from tests.test_assistants import FakeFirecrawl
 from tests.test_mcp import call, init
 
 CSV = """ID,Name,Bio,MRR,Stage,Notes
@@ -255,19 +260,155 @@ async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, 
     assert sorted(res["allocated"]) == ["region"] and res["rejected"] == {"warmth": ["Glowing"]}
 
 
+# --- repair -----------------------------------------------------------------------------------------
+
+def fake_firecrawl() -> FakeFirecrawl:
+    return FakeFirecrawl(api_key="fake", budget=Budget(max_scrapes=1, max_searches=0, max_credits=5))
+
+
+async def make(writer, fields_: dict, tier: str = "member") -> str:
+    r = await writer.post("/api/people", json={"tier": tier, "fields": fields_})
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def test_signals_and_mechanical_fixes():
+    doc = {"name": {"v": "AndrÃ© NiÃ±o", "h": []}, "linkedin": {"v": "https://linkedin.com/in/andre-nino", "h": []}}
+    assert repair_tool.signals(doc) == ["mojibake", "symbols in name"]
+    assert repair_tool.mechanical_fixes(doc) == {"name": "André Niño"}
+    doc = {"name": {"v": "elizabeth hsu", "h": []}, "email": {"v": "e@x.io", "h": []}}
+    assert repair_tool.signals(doc) == ["lowercase"]
+    assert repair_tool.mechanical_fixes(doc) == {"name": "Elizabeth Hsu"}
+    assert repair_tool.mechanical_fixes({"name": {"v": "polly.israni@gmail.com", "h": []}}) == {}
+    assert repair_tool.is_full_name("Ada Okafor") and not repair_tool.is_full_name("Polly I.")
+    assert not repair_tool.is_full_name("Ada")
+    assert repair_tool.title_case("o'neil mcdonald-smith") == "O'Neil Mcdonald-Smith"
+    assert repair_tool.title_case("Already Fine") == "Already Fine"
+    doc = {"name": {"v": "Vlad", "h": []}, "email": {"v": "v@x.io", "h": []}}
+    assert repair_tool.signals(doc) == ["single token"]
+    doc = {"name": {"v": "Raj - LootMogul accelerated by a16z", "h": []}}
+    assert set(repair_tool.signals(doc)) >= {"digits in name", "five or more tokens",
+                                             "nothing identifying besides the name"}
+    doc = {"name": {"v": "Alex Engkelidis", "h": []}, "linkedin": {"v": "https://linkedin.com/in/aex", "h": []}}
+    assert repair_tool.signals(doc) == ["name absent from linkedin slug"]
+
+
+async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
+    src = Source("agent", "repair", "test")
+    # mojibake and casing are fixed mechanically; a two-token name is complete: Person
+    pid = await make(writer, {"name": "andrÃ© niÃ±o", "bio": "Founder of a fintech."})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    assert res.mechanical == ["name"] and res.kind == "Person" and res.name_source == "unchanged"
+    person = (await reader.get(f"/api/people/{pid}")).json()
+    assert person["name"] == "André Niño" and person["record_kind"] == "Person"
+    assert [e["v"] for e in person["history"]["name"]] == ["andrÃ© niÃ±o", "André Niño"]
+    assert person["history"]["name"][-1]["src"] == {"kind": "system", "by": "repair"}
+    assert not res.provider_called and res.credits == 0
+    # a company recorded as a person
+    pid = await make(writer, {"name": "Light Node Ventures", "website": "https://lightnode.vc"})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    assert res.kind == "Company" and (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Company"
+    # an email as the name: the local part gives the full name (evidence), nothing invented
+    pid = await make(writer, {"name": "polly.israni@gmail.com", "email": "polly.israni@gmail.com"})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    assert res.name_source == "evidence" and res.kind == "Person"
+    person = (await reader.get(f"/api/people/{pid}")).json()
+    assert person["name"] == "Polly Israni" and person["history"]["name"][0]["v"] == "polly.israni@gmail.com"
+    assert person["history"]["name"][-1]["src"] == src.doc()
+    # a misfiled value moves to notes and is tombstoned where it was
+    pid = await make(writer, {"name": "Dana Whitfield", "website": "previously marketing manager at Gap Inc.",
+                              "notes": "met in June"})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    by = {(c.key, c.action): c for c in res.changes}
+    assert by[("website", "removed")].previous == "previously marketing manager at Gap Inc."
+    assert by[("notes", "set")].value == "met in June\npreviously marketing manager at Gap Inc."
+    person = (await reader.get(f"/api/people/{pid}")).json()
+    assert "website" not in person and person["history"]["website"][-1]["v"] is None
+
+
+async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentifiable(writer, reader):
+    src = Source("agent", "repair", "test")
+    # a first name with a LinkedIn profile the provider knows: the name comes from the profile
+    pid = await make(writer, {"name": "Ada", "linkedin": "https://www.linkedin.com/in/adaokafor"})
+    fc = fake_firecrawl()
+    res = await repair_tool.repair(pid, None, src, firecrawl=fc)
+    assert res.provider_called and res.credits == 5 and res.name_source == "provider"
+    assert res.kind == "Person"
+    person = (await reader.get(f"/api/people/{pid}")).json()
+    assert person["name"] == "Ada Okafor"
+    assert person["history"]["name"][-1]["src"] == {"kind": "agent", "by": "repair/fullenrich", "ref": "test"}
+    assert set(person) - {"id", "tier", "created_at", "updated_at", "schema_version", "norm", "norm_flags",
+                          "history", "history_norm", "name", "linkedin", "record_kind"} == set()  # nothing else written
+    # a profile the provider does not know: Unidentifiable, no credits spent
+    pid = await make(writer, {"name": "Bo", "linkedin": "https://www.linkedin.com/in/nobody-here"})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    assert res.provider_called and res.credits == 0 and res.kind == "Unidentifiable"
+    # no LinkedIn: no provider call, Unidentifiable
+    pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
+    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    assert not res.provider_called and res.kind == "Unidentifiable"
+    assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
+    # provider switched off: no call either
+    pid = await make(writer, {"name": "Cy", "linkedin": "https://www.linkedin.com/in/adaokafor"})
+    res = await repair_tool.repair(pid, None, src, repair_tool.RepairOptions(provider=False),
+                                   firecrawl=fake_firecrawl())
+    assert not res.provider_called and res.kind == "Unidentifiable"
+
+
+async def test_repair_validator_refuses_invented_names_and_allocates_kinds(writer, reader):
+    src = Source("agent", "repair", "test")
+    pid = await make(writer, {"name": "Sam", "bio": "Runs a bakery."})
+
+    def inventor(messages, info):
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {
+            "kind": "Person", "name": "Sam Baker", "name_complete": True, "confidence": "high"})])
+
+    with repair_tool.agent.override(model=FunctionModel(inventor)), pytest.raises(AgentRunError):
+        await repair_tool.repair(pid, None, src)
+    assert (await reader.get(f"/api/people/{pid}")).json()["name"] == "Sam"
+
+    def fund(messages, info):
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {
+            "kind": "Fund", "name": None, "name_complete": True, "confidence": "high"})])
+
+    pid = await make(writer, {"name": "Sequoia Scout Fund III", "website": "https://sequoia.com"})
+    with repair_tool.agent.override(model=FunctionModel(fund)):
+        res = await repair_tool.repair(pid, None, src, repair_tool.RepairOptions(allocate=False))
+        assert res.kind == "Person" and res.rejected == ["kind 'Fund' (allocation off)"]
+        res = await repair_tool.repair(pid, None, src)
+    assert res.kind == "Fund" and ("record_kind", "enum_value_added") in {(c.key, c.action) for c in res.changes}
+    assert "Fund" in await properties.enum_values("record_kind")
+
+
+async def test_normalize_repairs_once_unless_forced(people_by_name, writer, reader):
+    cy = people_by_name["Cy"]
+    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    assert res["repair"]["kind"] == "Unidentifiable"           # "Cy": one token, no LinkedIn
+    assert res["repair"]["provider_called"] is False           # no FIRECRAWL_API_KEY in tests
+    assert (await reader.get(f"/api/people/{cy}")).json()["record_kind"] == "Unidentifiable"
+    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    assert res["repair"] is None                               # already classified
+    res = (await writer.post(f"/api/people/{cy}/normalize", json={"options": {"force": True}})).json()
+    assert res["repair"]["kind"] == "Unidentifiable" and res["repair"]["agent_called"]
+    res = (await writer.post(f"/api/people/{cy}/normalize", json={"options": {"repair": False, "force": True}})).json()
+    assert res["repair"] is None
+
+
 async def test_normalize_assistant_run(people_by_name, writer, reader):
     r = await writer.post("/api/assistants/normalize/runs",
-                          json={"person_ids": [people_by_name["Cy"], people_by_name["Ada"]]})
+                          json={"person_ids": [people_by_name["Cy"], people_by_name["Ada"]],
+                                "options": {"provider": False}})
     assert r.status_code == 201, r.text
     await runner.drain()
     run = (await reader.get(f"/api/assistants/runs/{r.json()['id']}")).json()
     assert run["status"] == "done" and run["done"] == 2 and run["credits_used"] == 0
     by_person = {i["person_id"]: i for i in run["items"]}
     cy = by_person[people_by_name["Cy"]]["result"]
-    assert cy["text"] == "stage → Pre-seed (agent consulted)."
+    assert cy["text"] == "stage → Pre-seed; record kind: Unidentifiable (agent consulted)."
     assert by_change(cy)[("stage", "normalized")]["value"] == "Pre-seed"
+    assert cy["repair"]["kind"] == "Unidentifiable"
     ada = by_person[people_by_name["Ada"]]["result"]
-    assert ada["agent_called"] is False and ada["text"] == "Everything was already normalised."
+    assert ada["agent_called"] is False and ada["text"] == "record kind: Unidentifiable (agent consulted)."
     person = (await reader.get(f"/api/people/{people_by_name['Cy']}")).json()
     assert person["history_norm"]["stage"][-1]["src"]["by"] == "normalize/normalizer"
     specs = {w["key"]: w for w in (await reader.get("/api/assistants")).json()}

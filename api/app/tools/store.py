@@ -294,5 +294,6 @@ async def store(person_id: str, passage: str, opts: StoreOptions, principal: Pri
                     c = c.model_copy(update={"action": "append"})
                 result.changes.append(c)
     result.normalization = await normalize_tool.normalize(
-        person_id, principal, Source("agent", "normalizer", source.ref or "store"))
+        person_id, principal, Source("agent", "normalizer", source.ref or "store"),
+        normalize_tool.NormalizeOptions(repair=False))   # storage is not the moment to re-judge identity
     return result

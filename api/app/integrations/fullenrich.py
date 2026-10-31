@@ -25,6 +25,9 @@ class Company(BaseModel):
 class LinkedInProfile(BaseModel):
     """What the data-provider record says about the person."""
 
+    full_name: str | None = Field(None, description="The profile's name as the provider has it")
+    first_name: str | None = None
+    last_name: str | None = None
     headline: str | None = Field(None, description="Profile headline / tagline, verbatim")
     location: str | None = None
     summary: str | None = Field(None, description="The profile's about text")
@@ -72,6 +75,10 @@ def from_record(rec: dict[str, Any]) -> LinkedInProfile:
         else:
             sites.append(url)
     return LinkedInProfile(
+        full_name=(rec.get("full_name") or " ".join(
+            str(rec[k]) for k in ("first_name", "last_name") if rec.get(k)) or None),
+        first_name=rec.get("first_name") or None,
+        last_name=rec.get("last_name") or None,
         headline=rec.get("headline") or None,
         location=location,
         summary=rec.get("description") or None,

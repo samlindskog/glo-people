@@ -163,11 +163,17 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
 
 /** One line for a human from a normalize result: what was settled, flagged or left. */
 export function describeNormalization(result: NormalizeResult): string {
-  const parts = result.changes.map((c) =>
-    c.action === 'normalized' ? `${c.key} → ${formatValue(c.value)}` : c.action === 'enum_value_added' ? `${c.key}: new value “${formatValue(c.value)}”` : `${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`,
-  )
+  const parts = result.changes.flatMap((c) => {
+    if (c.action === 'normalized') return [`${c.key} → ${formatValue(c.value)}`]
+    if (c.action === 'enum_value_added') return [`${c.key}: new value “${formatValue(c.value)}”`]
+    if (c.action === 'flagged') return [`${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`]
+    if (c.action === 'set' && c.key === 'name') return [`name → ${formatValue(c.value)}${result.repair?.name_source === 'provider' ? ' (LinkedIn)' : ''}`]
+    if (c.action === 'removed') return [`${c.key} removed`]
+    return []
+  })
   for (const [k, vs] of Object.entries(result.rejected ?? {})) parts.push(`${k}: ${vs.join(', ')} not added (cap)`)
   for (const k of result.unmapped) parts.push(`${k}: still unmapped`)
+  if (result.repair?.kind) parts.push(`record kind: ${result.repair.kind}`)
   return parts.length ? `Normalised: ${parts.join(' · ')}` : 'Everything was already normalised.'
 }
 
@@ -175,7 +181,7 @@ function NormaliseNote({ result }: { result: NormalizeResult }) {
   return (
     <p className="mb-3 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600" data-testid="normalise-report">
       {describeNormalization(result)}
-      {result.agent_called && <span className="ml-1 text-xs text-slate-400">(agent consulted)</span>}
+      {(result.agent_called || result.repair?.agent_called) && <span className="ml-1 text-xs text-slate-400">(agent consulted)</span>}
     </p>
   )
 }

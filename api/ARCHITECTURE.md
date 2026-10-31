@@ -28,11 +28,12 @@ assistants carry it beside their text (`AssistantResult.changes`), surfaces rend
 | search | `run_search(SearchRequest)` | `SearchResponse` (read-only; `record_search` keeps the history) |
 | plan | `plan_search(question, tier, filters, Tuning)` | `PlanResult{request: SearchRequest, rationale}` |
 | store | `store(person_id, passage, StoreOptions, principal, source)` | `StoreResult{changes, confirmed, ignored, conflicts, created_properties, redirected, to_notes, normalization}` |
-| normalize | `normalize(person_id, principal, source, NormalizeOptions)` | `NormalizeResult{changes, agent_called, unmapped, merged, allocated, rejected}` — for enum properties the agent merges a text into an existing value (stored as an alias), allocates a new canonical value within `allocate` / `max_new_values`, or drops it |
+| normalize | `normalize(person_id, principal, source, NormalizeOptions, firecrawl)` | `NormalizeResult{changes, agent_called, unmapped, merged, allocated, rejected, repair}` — for enum properties the agent merges a text into an existing value (stored as an alias), allocates a new canonical value within `allocate` / `max_new_values`, or drops it |
+| repair | `repair(person_id, principal, source, RepairOptions, firecrawl)` | `RepairResult{kind, name_source, signals, mechanical, agent_called, provider_called, credits, confidence, rejected, changes}` — mechanical fixes (mojibake, Title Case), then the agent: `record_kind` (Person / Company / Unidentifiable, allocatable), a full name only from the record's own evidence or the FullEnrich profile behind the LinkedIn URL, misfiled values moved; a Person without a full name is Unidentifiable |
 | site | `read_site(deps, name, url, markdown, links, follow_cap)` | `SiteFindings` |
 | company | `research_company(deps, company, candidate, context, allow_search, pages_cap)` | `CompanySummary` |
 
-Tools may use other tools (`store → normalize`, `plan → search`) and the agent plumbing; never
+Tools may use other tools (`store → normalize`, `normalize → repair`, `plan → search`) and the agent plumbing; never
 assistants or surfaces.
 
 ## Assistants (level 3)

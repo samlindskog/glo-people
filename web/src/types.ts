@@ -212,11 +212,28 @@ export interface StoreOptions {
   near_duplicate: number
 }
 
+/** The identity repair inside a normalize result. */
+export interface RepairResult {
+  person_id: string | null
+  changes: Change[]
+  kind: string | null
+  name_source: 'evidence' | 'provider' | 'unchanged' | null
+  signals: string[]
+  mechanical: string[]
+  agent_called: boolean
+  provider_called: boolean
+  credits: number
+  confidence: string | null
+  note: string
+  rejected: string[]
+}
+
 export interface NormalizeResult {
   person_id: string | null
   changes: Change[]
   agent_called: boolean
   unmapped: string[]
+  repair: RepairResult | null
   /** Property → canonical value its text was merged into (the text became an alias). */
   merged: Record<string, string>
   /** Property → new canonical values the agent allocated. */

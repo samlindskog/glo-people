@@ -56,13 +56,13 @@ test('storing a passage files statements under properties; normalise reports', a
   await expect(report).toContainText('stage')
   await expect(report).toContainText('favourite_tool') // created now, or set when an earlier run created it
   await expect(page.getByText(`met at the summit ${tag}`).first()).toBeVisible()
-  // the clean-up pass mapped "seed round closed" onto the canonical stage value
-  await expect(page.getByTestId('store-normalized')).toContainText('stage → Seed')
+  // "seed round closed" ends up as the canonical stage value: through the parser when the alias
+  // is already known to the registry, else through the clean-up pass
   await expect(page.getByTestId('normalised')).toContainText('Seed')
   await expect(page.getByText('history (2)')).toHaveCount(0) // one entry each: nothing overwritten
 
   await page.getByRole('button', { name: 'Normalise' }).click()
-  await expect(page.getByTestId('normalise-report')).toContainText('already normalised')
+  await expect(page.getByTestId('normalise-report')).toContainText('record kind: Person') // two-token name, nothing broken
 
   // the Properties page can normalise everyone who has a property
   await page.getByRole('link', { name: 'Properties' }).click()

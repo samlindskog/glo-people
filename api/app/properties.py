@@ -207,6 +207,24 @@ async def add_enum_value(key: str, value: str, aliases: Sequence[str] = (),
     return bool(res.modified_count)
 
 
+MAX_ENUM_VALUE_CHARS = 40
+
+
+async def resolve_enum_value(key: str, proposed: str, allocate: bool,
+                             src: str) -> tuple[str | None, bool]:
+    """The canonical value a proposed enum value stands for: an existing value or alias (by
+    `fields.fold`), or, when `allocate`, a new canonical value added to the property's set with
+    `src`. Returns (value, allocated); (None, False) when it is neither known nor allocatable."""
+    value = " ".join(str(proposed).split())
+    canon = (await enum_lookup(key)).get(fields.fold(value))
+    if canon:
+        return canon, False
+    if not allocate or not fields.fold(value) or len(value) > MAX_ENUM_VALUE_CHARS:
+        return None, False
+    await add_enum_value(key, value, src=src)
+    return value, True
+
+
 async def add_alias(key: str, value: str, alias: str) -> bool:
     """Record that `alias` means the canonical `value` of an enum property (the parser matches
     aliases through `fields.fold`). False when it was known already or is the value itself."""

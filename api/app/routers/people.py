@@ -9,7 +9,10 @@ from sqlalchemy import select
 from app import activity, db, embeddings, importer, jobs
 from app import people as people_svc
 from app.auth import Principal, require
+from app.config import get_settings
 from app.history import Source
+from app.integrations.firecrawl import AsyncFirecrawl, Budget
+from app.integrations.fullenrich import MATCH_CREDITS
 from app.routers.search import agent_error
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
@@ -180,17 +183,31 @@ class NormalizeBody(BaseModel):
     options: NormalizeOptions = Field(default_factory=NormalizeOptions)
 
 
+def provider_client(options: NormalizeOptions) -> AsyncFirecrawl | None:
+    """A Firecrawl client with room for one FullEnrich name lookup, when the options ask for the
+    provider and a key is configured; the caller closes it."""
+    if not (options.repair and options.provider and get_settings().firecrawl_api_key):
+        return None
+    return AsyncFirecrawl(budget=Budget(max_scrapes=1, max_searches=0, max_credits=MATCH_CREDITS))
+
+
 @router.post("/people/{person_id}/normalize")
 async def normalize_one(person_id: str, principal: Writer,
                         body: NormalizeBody | None = None) -> NormalizeResult:
-    """Tool: re-parse the person's typed values; an agent decides what the parser cannot, merging
-    into or (within `options`) extending the enum sets."""
+    """Tool: re-parse the person's typed values (an agent decides what the parser cannot, merging
+    into or extending the enum sets) and, for a record without a record kind, repair its identity
+    data and classify it."""
+    options = (body or NormalizeBody()).options
+    client = provider_client(options)
     try:
         result = await normalize_tool.normalize(
             person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"),
-            (body or NormalizeBody()).options)
+            options, client)
     except (ValueError, AgentRunError) as e:
         raise _bad_request(e) from e
+    finally:
+        if client is not None:
+            await client.aclose()
     if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
     return result

@@ -4,8 +4,10 @@ with the person's context (bio, company, role, sectors) so it can judge. For enu
 agent may merge a text into an existing canonical value (recorded as an alias, so the parser
 handles it next time), allocate a new canonical value when the text names a category the list
 lacks and it fits the person (capped per call), or drop it as non-normalisable when it is not a
-value of that property at all. Returns the changes (normalized / flagged / enum_value_added),
-the merges and allocations, what was rejected by the caps, and what is still unmapped."""
+value of that property at all. Then, for a record that has no `record_kind` yet (or on `force`),
+the repair tool fixes broken identity data and classifies the record. Returns the changes
+(normalized / flagged / enum_value_added, plus the repair's), the merges and allocations, what was
+rejected by the caps, what is still unmapped, and the repair result."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -18,8 +20,11 @@ from app import normalize as parser
 from app.agents.common import run_agent
 from app.auth import Principal
 from app.history import Change, Source
+from app.integrations.firecrawl import AsyncFirecrawl
 from app.normalize import NON_NORMALIZABLE, Parsed
 from app.tools import ToolResult
+from app.tools import repair as repair_tool
+from app.tools.repair import RepairOptions, RepairResult
 
 AGENT_NAME = "normalizer"
 REQUEST_LIMIT = 3
@@ -30,12 +35,18 @@ MAX_CONTEXT_CHARS = 300
 
 
 class NormalizeOptions(BaseModel):
-    """Whether the agent may extend enum properties, and how far, in one call."""
+    """Whether the agents may extend enum properties, and whether the record is repaired."""
 
-    allocate: bool = Field(True, description="Let the agent add canonical values to enum "
+    allocate: bool = Field(True, description="Let the agents add canonical values to enum "
                                              "properties when a text names a category the list "
                                              "lacks (one per property per call)")
     max_new_values: int = Field(3, ge=0, le=10, description="New enum values per call, in total")
+    repair: bool = Field(True, description="Repair identity data and set record_kind for records "
+                                           "that have none yet")
+    provider: bool = Field(True, description="During repair, ask FullEnrich (5 credits) for the "
+                                             "full name when the record has a LinkedIn URL and "
+                                             "no full name")
+    force: bool = Field(False, description="Repair even when record_kind is already set")
 
 
 class NormalizeResult(ToolResult):
@@ -50,6 +61,7 @@ class NormalizeResult(ToolResult):
     rejected: dict[str, list[str]] = Field(default_factory=dict,
                                            description="Property → values the agent proposed "
                                                        "that the caps did not allow")
+    repair: RepairResult | None = Field(None, description="The identity repair, when it ran")
 
 
 # --- the normaliser agent ---------------------------------------------------------------------------
@@ -187,14 +199,29 @@ async def _decide(items: list[Item], lookups: dict[str, dict[str, str]], context
 # --- the tool -----------------------------------------------------------------------------------------
 
 async def normalize(person_id: str, principal: Principal | None, source: Source,
-                    opts: NormalizeOptions | None = None) -> NormalizeResult | None:
-    """Parser first, then the agent for what stayed unmapped. None if the person does not exist."""
+                    opts: NormalizeOptions | None = None,
+                    firecrawl: AsyncFirecrawl | None = None) -> NormalizeResult | None:
+    """Parser first, then the agent for what stayed unmapped, then the repair of the record.
+    None if the person does not exist."""
     opts = opts or NormalizeOptions()
     docs = await people.fetch([person_id])
     if not docs:
         return None
     doc = docs[0]
     result = NormalizeResult(person_id=person_id)
+    values = await _values(doc, person_id, principal, source, opts, result)
+    if opts.repair and (opts.force or history.current(values.get(repair_tool.KIND)) is None):
+        result.repair = await repair_tool.repair(
+            person_id, principal, Source("agent", repair_tool.AGENT_NAME, source.ref),
+            RepairOptions(provider=opts.provider, allocate=opts.allocate), firecrawl)
+        if result.repair is not None:
+            result.changes += result.repair.changes
+    return result
+
+
+async def _values(doc: dict, person_id: str, principal: Principal | None, source: Source,
+                  opts: NormalizeOptions, result: NormalizeResult) -> dict:
+    """The typed-value stages; returns the document as it stands afterwards."""
     parsed = await people.pending_normalization(doc)
     if parsed:
         write = await people.update_norm(principal, person_id, parsed, people.NORMALIZE_SRC)
@@ -218,7 +245,7 @@ async def normalize(person_id: str, principal: Principal | None, source: Source,
             lookups[key] = await properties.enum_lookup(key)
         items.append(Item(field=key, text=fields.text_of(value), type=sp.type, values=values))
     if not items:
-        return result
+        return doc
 
     result.agent_called = True
     decided_by_agent = await _decide(items, lookups, person_context(doc))
@@ -234,28 +261,23 @@ async def normalize(person_id: str, principal: Principal | None, source: Source,
         if item.type not in ENUM_TYPES:
             decided[m.field] = parser.parse(m.value, item.type, None)
             continue
-        lookup = lookups.get(m.field, {})
         proposed = m.value if isinstance(m.value, list) else [m.value]
         accepted: list[str] = []
         for value in proposed:
-            canon = lookup.get(fields.fold(value))
-            if canon:
-                accepted.append(canon)
-                if item.type == "enum" and await properties.add_alias(m.field, canon, item.text):
-                    result.merged[m.field] = canon
-            elif opts.allocate and allocated_total < opts.max_new_values \
-                    and m.field not in result.allocated:
-                aliases = [item.text] if item.type == "enum" and \
-                    fields.fold(item.text) != fields.fold(value) else []
-                await properties.add_enum_value(m.field, value, aliases=aliases,
-                                                src=f"agent:{AGENT_NAME} {source.ref or ''}".strip())
-                lookup = lookups[m.field] = await properties.enum_lookup(m.field)
-                allocated_total += 1
-                result.allocated.setdefault(m.field, []).append(value)
-                result.changes.append(Change(key=m.field, action="enum_value_added", value=value))
-                accepted.append(value)
-            else:
+            may_allocate = opts.allocate and allocated_total < opts.max_new_values \
+                and m.field not in result.allocated
+            canon, allocated = await properties.resolve_enum_value(
+                m.field, value, may_allocate, src=f"agent:{AGENT_NAME} {source.ref or ''}".strip())
+            if canon is None:
                 result.rejected.setdefault(m.field, []).append(value)
+                continue
+            accepted.append(canon)
+            if allocated:
+                allocated_total += 1
+                result.allocated.setdefault(m.field, []).append(canon)
+                result.changes.append(Change(key=m.field, action="enum_value_added", value=canon))
+            if item.type == "enum" and await properties.add_alias(m.field, canon, item.text):
+                result.merged[m.field] = canon
         if accepted:
             decided[m.field] = Parsed(accepted if item.type == "enum_list" else accepted[0])
     result.unmapped = sorted(i.field for i in items if i.field not in decided)
@@ -263,4 +285,5 @@ async def normalize(person_id: str, principal: Principal | None, source: Source,
         write = await people.update_norm(principal, person_id, decided, source)
         if write is not None:
             result.changes += write.changes
-    return result
+        doc = (await people.fetch([person_id]))[0]
+    return doc

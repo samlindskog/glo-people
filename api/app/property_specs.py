@@ -110,6 +110,11 @@ SPECS: dict[str, Spec] = {
     "funding": Spec("enum", FUNDING, description="Total funding raised, as a bucket"),
     "raised_funds": Spec("number", label="Raised funds (total funding raised)",
                          description="Total funding raised in USD"),
+    # the record itself
+    "record_kind": Spec("enum", ("Person", "Company", "Unidentifiable"),
+                        description="What the record is: a person, a company or organisation, or "
+                                    "a record whose identity cannot be resolved; agents may add "
+                                    "kinds"),
     # the relationship
     "status": Spec("enum", ("Active", "Removed")),
     "membership": Spec("enum", ("Standard", "Premium")),

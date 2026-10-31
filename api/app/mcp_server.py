@@ -15,6 +15,7 @@ from app import people as people_svc
 from app.assistants.ask import ask
 from app.auth import Principal
 from app.history import Source
+from app.routers.people import provider_client
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
 from app.tools.normalize import NormalizeOptions
@@ -288,22 +289,28 @@ async def normalize_person(
     ctx: Context,
     id: str,
     options: Annotated[NormalizeOptions | None,
-                       Field(description="allocate (may the agent add enum values), "
-                                         "max_new_values")] = None,
+                       Field(description="allocate, max_new_values, repair, provider, force")] = None,
 ) -> dict:
     """Tool: re-parse a person's typed properties and have an agent decide the values the parser
     could not map (requires people:write). For enum properties the agent merges a text into an
     existing value (recorded as an alias), allocates a new canonical value when the text names a
-    category the list lacks and fits the person (within options), or drops it. Returns every
-    change (normalized, flagged, enum_value_added), the merges, allocations and rejections, and
-    what is still unmapped."""
+    category the list lacks and fits the person (within options), or drops it. For a record
+    without a record_kind (or with force) the repair step fixes broken identity data from the
+    record's own facts (full name from FullEnrich via the LinkedIn URL when needed, 5 credits)
+    and classifies it as Person, Company or Unidentifiable. Returns every change, the merges,
+    allocations and rejections, what is still unmapped, and the repair result."""
     principal = await _principal(ctx, "people:write")
+    options = options or NormalizeOptions()
+    client = provider_client(options)
     try:
         result = await normalize_tool.normalize(
             id, principal, Source("agent", "normalizer", f"key:{principal.api_key_id}"),
-            options or NormalizeOptions())
+            options, client)
     except (ValueError, AgentRunError) as e:
         raise ToolError(str(e)) from e
+    finally:
+        if client is not None:
+            await client.aclose()
     if result is None:
         raise ToolError("person not found")
     return json.loads(result.model_dump_json())

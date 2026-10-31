@@ -160,6 +160,42 @@ def company(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
                        "evidence_url": None})
 
 
+def repair(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """Kind Company for company words in the name, else Person. A name is proposed when the
+    current one is broken and the evidence yields a full one: the text before " - ", a
+    parenthetical stripped, or an email local part with a dot ("polly.israni" -> Polly Israni).
+    name_complete = the resulting name has two tokens. A website value without a dot is
+    misfiled: move it to notes."""
+    prompt = _prompt(messages)
+    name = re.search(r"^Name: (.*)$", prompt, re.MULTILINE).group(1).strip()
+    evidence = prompt.split("Evidence:", 1)[-1]
+    kind = "Company" if re.search(r"\b(inc|llc|ltd|ventures?|capital|labs?|fund)\b", name,
+                                  re.IGNORECASE) else "Person"
+    proposed = None
+    if " - " in name:
+        proposed = name.split(" - ", 1)[0].strip()
+    elif "(" in name:
+        proposed = re.sub(r"\s*\(.*?\)\s*", " ", name).strip()
+    elif "@" in name:
+        local = name.split("@", 1)[0]
+        if "." in local:
+            proposed = " ".join(w.capitalize() for w in local.split("."))
+    else:
+        m = re.search(r"^email: ([^@\s]+)@", evidence, re.MULTILINE)
+        if len(name.split()) < 2 and m and "." in m.group(1):
+            proposed = " ".join(w.capitalize() for w in m.group(1).split("."))
+    if proposed and (len(proposed.split()) < 2 or fields.fold(proposed) == fields.fold(name)):
+        proposed = None
+    final = proposed or name
+    complete = kind == "Company" or len(final.split()) >= 2
+    misfiled = []
+    site = re.search(r"^website: (.*)$", evidence, re.MULTILINE)
+    if site and not re.search(r"\.[a-z]{2,}(/|$|\s)", site.group(1), re.IGNORECASE):
+        misfiled.append({"key": "website", "move_to": "notes"})   # prose, not a URL
+    return _out(info, {"kind": kind, "name": proposed, "name_evidence": "fake", "name_complete": complete,
+                       "misfiled": misfiled, "confidence": "high", "note": "fake repair"})
+
+
 FAKES: dict[str, Callable[[list[ModelMessage], AgentInfo], ModelResponse]] = {
     "agents.planner": planner,
     "agents.answer": answer,
@@ -167,6 +203,7 @@ FAKES: dict[str, Callable[[list[ModelMessage], AgentInfo], ModelResponse]] = {
     "agents.normalizer": normalizer,
     "agents.site_reader": site_reader,
     "agents.company": company,
+    "agents.repair": repair,
 }
 
 

@@ -113,6 +113,11 @@ export default function PeoplePage() {
                   <Link className="text-brand-700 hover:underline" to={`/people/${hit.id}`}>
                     {hit.person.name}
                   </Link>
+                  {typeof hit.person.record_kind === 'string' && hit.person.record_kind !== 'Person' && (
+                    <span className={`badge ml-2 ${hit.person.record_kind === 'Unidentifiable' ? 'bg-red-50 text-red-700' : 'bg-slate-100 text-slate-600'}`} title="record kind">
+                      {hit.person.record_kind}
+                    </span>
+                  )}
                 </td>
                 <td>
                   <TierBadge tier={hit.tier} />
