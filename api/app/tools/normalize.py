@@ -1,7 +1,11 @@
 """Tool (level 2): bring one person's normalised values up to date. The parser runs first (free,
 through the people store); whatever it left `unmapped` goes to the normaliser agent in one call,
-and the agent's decisions are written with the caller's source so the parser never redoes them.
-Returns the changes (normalized / flagged) and what is still unmapped."""
+with the person's context (bio, company, role, sectors) so it can judge. For enum properties the
+agent may merge a text into an existing canonical value (recorded as an alias, so the parser
+handles it next time), allocate a new canonical value when the text names a category the list
+lacks and it fits the person (capped per call), or drop it as non-normalisable when it is not a
+value of that property at all. Returns the changes (normalized / flagged / enum_value_added),
+the merges and allocations, what was rejected by the caps, and what is still unmapped."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -13,18 +17,39 @@ from app import fields, history, people, properties
 from app import normalize as parser
 from app.agents.common import run_agent
 from app.auth import Principal
-from app.history import Source
+from app.history import Change, Source
 from app.normalize import NON_NORMALIZABLE, Parsed
 from app.tools import ToolResult
 
 AGENT_NAME = "normalizer"
 REQUEST_LIMIT = 3
+ENUM_TYPES = ("enum", "enum_list")
+MAX_VALUE_CHARS = 40
+CONTEXT_KEYS = ("company", "role", "one_liner", "bio", "sectors", "company_description")
+MAX_CONTEXT_CHARS = 300
+
+
+class NormalizeOptions(BaseModel):
+    """Whether the agent may extend enum properties, and how far, in one call."""
+
+    allocate: bool = Field(True, description="Let the agent add canonical values to enum "
+                                             "properties when a text names a category the list "
+                                             "lacks (one per property per call)")
+    max_new_values: int = Field(3, ge=0, le=10, description="New enum values per call, in total")
 
 
 class NormalizeResult(ToolResult):
     agent_called: bool = False
     unmapped: list[str] = Field(default_factory=list,
                                 description="Typed properties still without a value afterwards")
+    merged: dict[str, str] = Field(default_factory=dict,
+                                   description="Property → canonical value its text was merged "
+                                               "into (the text became an alias)")
+    allocated: dict[str, list[str]] = Field(default_factory=dict,
+                                            description="Property → new canonical values")
+    rejected: dict[str, list[str]] = Field(default_factory=dict,
+                                           description="Property → values the agent proposed "
+                                                       "that the caps did not allow")
 
 
 # --- the normaliser agent ---------------------------------------------------------------------------
@@ -41,11 +66,13 @@ class Item(BaseModel):
 class Mapping(BaseModel):
     field: str
     value: str | int | float | bool | list[str] | None = Field(
-        None, description="The normalised value: a canonical value (or list of them), a number, "
-                          "an ISO date or true/false; null when the text gives no value")
+        None, description="The normalised value: a canonical value (or list of them) — or, for an "
+                          "enum property, a new canonical value when the text names a category "
+                          "the list lacks; a number; an ISO date; true/false. Null when the text "
+                          "gives no value of this property.")
     non_normalizable: bool = Field(
-        False, description="True when the text says there is no value or cannot be read as one "
-                           "of this type (then value is null)")
+        False, description="True when the text says there is no value, or is not a value of this "
+                           "property at all (e.g. an industry in a stage field); then value is null")
     note: str = Field("", max_length=200, description="Why, in a few words")
 
 
@@ -65,17 +92,33 @@ agent = Agent(
     output_type=Normalised,
     instructions="""\
 Each item is a text someone entered for a typed property, with the property's type and, for enum
-types, its canonical values. Give the normalised value the text expresses: for enum types one of
-the canonical values (for an enum list, every canonical value the text covers), for numbers a
-plain number (ranges: the lower bound; "pre-revenue": 0), for dates an ISO date, for booleans
-true/false. When the text clearly says there is no value, or is about something else entirely,
-mark it non_normalizable. Never guess a canonical value that the text does not support, and never
-invent a value not in the list; one answer per item, in the same order.""",
+types, its canonical values. You also see who the person is (company, role, bio, sectors).
+
+Give the normalised value the text expresses: for numbers a plain number (ranges: the lower
+bound; "pre-revenue": 0), for dates an ISO date, for booleans true/false. For enum properties:
+- Merge: when the text means the same as a canonical value, or is a variant or intensified form
+  of one ("seed round closed" → "Seed"; "Yes-future events" → "Yes, future events"; "super warm"
+  → "Warm"), answer that value in its exact spelling.
+- Allocate: when the text clearly names a category of this property that the list lacks and it
+  fits the person (a city not yet listed for region; a real sector; a stage the list does not
+  have), answer a new canonical value: short, in the style of the existing values, one category
+  only. Never allocate a variant of an existing value, a free-form remark, or a value that
+  belongs to another property.
+- Drop: when the text is not a value of this property for this person (an industry list in the
+  stage field, a note, "n/a", something about someone else), mark non_normalizable.
+For an enum list, answer every canonical value the text covers (merging or allocating per item).
+Never invent a value the text does not support; one answer per item, in the same order.""",
 )
+
+
+def _clean_value(text: str) -> str:
+    return " ".join(str(text).split())
 
 
 @agent.output_validator
 async def _admissible(ctx: RunContext[NormalizerDeps], out: Normalised) -> Normalised:
+    """Non-enum values must parse; enum values must be canonical, or well-formed new values (the
+    tool decides whether allocation is allowed). Canonical spellings are fixed here."""
     problems = []
     fixed = []
     for m in out.items:
@@ -86,10 +129,29 @@ async def _admissible(ctx: RunContext[NormalizerDeps], out: Normalised) -> Norma
         if m.non_normalizable or m.value is None:
             fixed.append(Mapping(field=m.field, value=None, non_normalizable=True, note=m.note))
             continue
-        parsed = parser.parse(m.value, item.type, ctx.deps.lookups.get(m.field))
+        if item.type in ENUM_TYPES:
+            raw = m.value if isinstance(m.value, list) else [m.value]
+            lookup = ctx.deps.lookups.get(m.field, {})
+            values = []
+            for v in raw:
+                v = _clean_value(v)
+                canon = lookup.get(fields.fold(v))
+                if canon:
+                    values.append(canon)
+                elif not v or len(v) > MAX_VALUE_CHARS or not fields.fold(v):
+                    problems.append(f"{m.field}: {v!r} is not a usable value (1–{MAX_VALUE_CHARS} "
+                                    "characters, words)")
+                else:
+                    values.append(v)
+            if item.type == "enum" and len(values) != 1:
+                problems.append(f"{m.field}: exactly one value for an enum property")
+                continue
+            fixed.append(Mapping(field=m.field, value=values if item.type == "enum_list"
+                                 else values[0], note=m.note))
+            continue
+        parsed = parser.parse(m.value, item.type, None)
         if parsed.value is None:
-            hint = f"; canonical values: {item.values}" if item.values else ""
-            problems.append(f"{m.field}: {m.value!r} is not a valid {item.type} value{hint}")
+            problems.append(f"{m.field}: {m.value!r} is not a valid {item.type} value")
             continue
         fixed.append(Mapping(field=m.field, value=_jsonable(parsed.value), note=m.note))
     if problems:
@@ -101,21 +163,33 @@ def _jsonable(value: Any) -> Any:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-async def _decide(items: list[Item], lookups: dict[str, dict[str, str]]) -> Normalised:
+def person_context(doc: dict) -> str:
+    """Who the person is, for the agent's judgement: a few short properties."""
+    lines = []
+    for key in ("name", *CONTEXT_KEYS):
+        value = history.current(doc.get(key))
+        if value not in (None, "", []):
+            text = fields.text_of(value)
+            lines.append(f"{key}: {text[:MAX_CONTEXT_CHARS]}")
+    return "\n".join(lines) or "(nothing else known)"
+
+
+async def _decide(items: list[Item], lookups: dict[str, dict[str, str]], context: str) -> Normalised:
     lines = []
     for it in items:
         values = f" values: {', '.join(it.values)}" if it.values else ""
         lines.append(f"- {it.field} ({it.type}{values}): {it.text!r}")
-    prompt = "Items:\n" + "\n".join(lines)
+    prompt = f"Person:\n{context}\n\nItems:\n" + "\n".join(lines)
     deps = NormalizerDeps({it.field: it for it in items}, lookups)
     return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
 
 
 # --- the tool -----------------------------------------------------------------------------------------
 
-async def normalize(person_id: str, principal: Principal | None,
-                    source: Source) -> NormalizeResult | None:
+async def normalize(person_id: str, principal: Principal | None, source: Source,
+                    opts: NormalizeOptions | None = None) -> NormalizeResult | None:
     """Parser first, then the agent for what stayed unmapped. None if the person does not exist."""
+    opts = opts or NormalizeOptions()
     docs = await people.fetch([person_id])
     if not docs:
         return None
@@ -147,16 +221,43 @@ async def normalize(person_id: str, principal: Principal | None,
         return result
 
     result.agent_called = True
-    decided_by_agent = await _decide(items, lookups)
+    decided_by_agent = await _decide(items, lookups, person_context(doc))
     decided: dict[str, Parsed] = {}
+    allocated_total = 0
     for m in decided_by_agent.items:
         item = next((i for i in items if i.field == m.field), None)
         if item is None:
             continue
         if m.non_normalizable or m.value is None:
             decided[m.field] = Parsed(None, NON_NORMALIZABLE)
-        else:
-            decided[m.field] = parser.parse(m.value, item.type, lookups.get(m.field))
+            continue
+        if item.type not in ENUM_TYPES:
+            decided[m.field] = parser.parse(m.value, item.type, None)
+            continue
+        lookup = lookups.get(m.field, {})
+        proposed = m.value if isinstance(m.value, list) else [m.value]
+        accepted: list[str] = []
+        for value in proposed:
+            canon = lookup.get(fields.fold(value))
+            if canon:
+                accepted.append(canon)
+                if item.type == "enum" and await properties.add_alias(m.field, canon, item.text):
+                    result.merged[m.field] = canon
+            elif opts.allocate and allocated_total < opts.max_new_values \
+                    and m.field not in result.allocated:
+                aliases = [item.text] if item.type == "enum" and \
+                    fields.fold(item.text) != fields.fold(value) else []
+                await properties.add_enum_value(m.field, value, aliases=aliases,
+                                                src=f"agent:{AGENT_NAME} {source.ref or ''}".strip())
+                lookup = lookups[m.field] = await properties.enum_lookup(m.field)
+                allocated_total += 1
+                result.allocated.setdefault(m.field, []).append(value)
+                result.changes.append(Change(key=m.field, action="enum_value_added", value=value))
+                accepted.append(value)
+            else:
+                result.rejected.setdefault(m.field, []).append(value)
+        if accepted:
+            decided[m.field] = Parsed(accepted if item.type == "enum_list" else accepted[0])
     result.unmapped = sorted(i.field for i in items if i.field not in decided)
     if decided:
         write = await people.update_norm(principal, person_id, decided, source)

@@ -207,6 +207,23 @@ async def add_enum_value(key: str, value: str, aliases: Sequence[str] = (),
     return bool(res.modified_count)
 
 
+async def add_alias(key: str, value: str, alias: str) -> bool:
+    """Record that `alias` means the canonical `value` of an enum property (the parser matches
+    aliases through `fields.fold`). False when it was known already or is the value itself."""
+    alias = " ".join(alias.split())
+    if not alias or fields.fold(alias) == fields.fold(value):
+        return False
+    if fields.fold(alias) in await enum_lookup(key):
+        return False
+    res = await mongo.db().fields.update_one({"_id": key, "enum.values.v": value},
+                                             {"$addToSet": {"enum.values.$.aliases": alias}})
+    if res.matched_count == 0:
+        raise PropertyError(f"{value!r} is not a value of {key!r}")
+    if res.modified_count:
+        reset()
+    return bool(res.modified_count)
+
+
 async def sync_specs() -> None:
     """Bring the registry in line with the source-code specs (startup, CLI). Idempotent: creates
     the typed properties, seeds their enum values, never removes anything, and re-embeds the

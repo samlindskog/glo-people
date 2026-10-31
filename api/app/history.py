@@ -32,14 +32,16 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = 2
 SourceKind = Literal["ui", "api", "mcp", "agent", "import", "legacy", "system"]
 NormFlag = Literal["unmapped", "non_normalizable"]
-ChangeAction = Literal["set", "append", "removed", "normalized", "flagged", "property_created"]
+ChangeAction = Literal["set", "append", "removed", "normalized", "flagged", "property_created",
+                       "enum_value_added"]
 
 
 class Change(BaseModel):
     """One thing that happened to a person's document: the vocabulary every writer, tool and
     assistant reports in. `set`/`append`/`removed` are value writes (`previous` is the value
     before), `normalized`/`flagged` are the typed form of a value (`flag` says why there is none),
-    `property_created` is a new property in the catalog."""
+    `property_created` and `enum_value_added` are catalog changes (a new property; a new canonical value
+    of an enum property)."""
 
     key: str
     action: ChangeAction

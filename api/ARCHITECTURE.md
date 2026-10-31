@@ -15,7 +15,7 @@ and `tests/test_architecture.py` enforces it.
 ## The shared vocabulary: `history.Change`
 
 ```
-Change{key, action: set | append | removed | normalized | flagged | property_created,
+Change{key, action: set | append | removed | normalized | flagged | property_created | enum_value_added,
        value, previous, flag}
 ```
 Writers produce it (`people.update`, `create`, `update_norm`), tools return it (`ToolResult.changes`),
@@ -28,7 +28,7 @@ assistants carry it beside their text (`AssistantResult.changes`), surfaces rend
 | search | `run_search(SearchRequest)` | `SearchResponse` (read-only; `record_search` keeps the history) |
 | plan | `plan_search(question, tier, filters, Tuning)` | `PlanResult{request: SearchRequest, rationale}` |
 | store | `store(person_id, passage, StoreOptions, principal, source)` | `StoreResult{changes, confirmed, ignored, conflicts, created_properties, redirected, to_notes, normalization}` |
-| normalize | `normalize(person_id, principal, source)` | `NormalizeResult{changes, agent_called, unmapped}` |
+| normalize | `normalize(person_id, principal, source, NormalizeOptions)` | `NormalizeResult{changes, agent_called, unmapped, merged, allocated, rejected}` — for enum properties the agent merges a text into an existing value (stored as an alias), allocates a new canonical value within `allocate` / `max_new_values`, or drops it |
 | site | `read_site(deps, name, url, markdown, links, follow_cap)` | `SiteFindings` |
 | company | `research_company(deps, company, candidate, context, allow_search, pages_cap)` | `CompanySummary` |
 

@@ -13,7 +13,7 @@ from app.history import Source
 from app.routers.search import agent_error
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
-from app.tools.normalize import NormalizeResult
+from app.tools.normalize import NormalizeOptions, NormalizeResult
 from app.tools.store import StoreOptions, StoreResult
 
 router = APIRouter(prefix="/api", tags=["people"])
@@ -176,12 +176,19 @@ async def store_file(person_id: str, file: Annotated[UploadFile, File()],
     return await _store(person_id, passage, StoreOptions(), principal)
 
 
+class NormalizeBody(BaseModel):
+    options: NormalizeOptions = Field(default_factory=NormalizeOptions)
+
+
 @router.post("/people/{person_id}/normalize")
-async def normalize_one(person_id: str, principal: Writer) -> NormalizeResult:
-    """Tool: re-parse the person's typed values; an agent decides what the parser cannot."""
+async def normalize_one(person_id: str, principal: Writer,
+                        body: NormalizeBody | None = None) -> NormalizeResult:
+    """Tool: re-parse the person's typed values; an agent decides what the parser cannot, merging
+    into or (within `options`) extending the enum sets."""
     try:
         result = await normalize_tool.normalize(
-            person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"))
+            person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"),
+            (body or NormalizeBody()).options)
     except (ValueError, AgentRunError) as e:
         raise _bad_request(e) from e
     if result is None:

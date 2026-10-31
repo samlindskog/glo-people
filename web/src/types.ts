@@ -183,7 +183,7 @@ export interface SearchRecord {
 
 // --- levels: what a writer, tool or assistant did to a document ------------------------------
 
-export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created'
+export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created' | 'enum_value_added'
 
 /** One thing that happened to a person's document (api/ARCHITECTURE.md). */
 export interface Change {
@@ -217,6 +217,12 @@ export interface NormalizeResult {
   changes: Change[]
   agent_called: boolean
   unmapped: string[]
+  /** Property → canonical value its text was merged into (the text became an alias). */
+  merged: Record<string, string>
+  /** Property → new canonical values the agent allocated. */
+  allocated: Record<string, string[]>
+  /** Property → values the agent proposed that the caps did not allow. */
+  rejected: Record<string, string[]>
 }
 
 export interface StoreResult {

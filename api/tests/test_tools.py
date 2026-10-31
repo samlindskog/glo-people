@@ -206,6 +206,55 @@ async def test_normalize_parses_then_asks_the_agent(people_by_name, writer, read
     assert (await reader.post(f"/api/people/{cy}/normalize")).status_code == 403
 
 
+async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, writer, reader):
+    # a stage text the parser cannot read, a region not in the list, an industry list in `stage`
+    # for another person, and a second person with the same stage wording
+    ada, bo, cy = (people_by_name[n] for n in ("Ada", "Bo", "Cy"))
+    await writer.patch(f"/api/people/{ada}", json={"fields": {"region": "Lisbon",
+                                                              "stage": "seed round closed"}})
+    r = await writer.post(f"/api/people/{ada}/normalize")
+    assert r.status_code == 200, r.text
+    res = r.json()
+    by = by_change(res)
+    assert by[("stage", "normalized")]["value"] == "Seed" and res["merged"] == {"stage": "Seed"}
+    assert by[("region", "enum_value_added")]["value"] == "Lisbon"
+    assert by[("region", "normalized")]["value"] == "Lisbon" and res["allocated"] == {"region": ["Lisbon"]}
+    assert res["rejected"] == {} and res["unmapped"] == []
+    # the registry remembers both: the alias and the new value with its source
+    assert "Lisbon" in await properties.enum_values("region")
+    lookup = await properties.enum_lookup("stage")
+    assert lookup["seed round closed"] == "Seed"
+    doc = await db().fields.find_one({"_id": "region"})
+    added = next(e for e in doc["enum"]["values"] if e["v"] == "Lisbon")
+    assert added["src"].startswith("agent:normalizer") and added["aliases"] == []
+    # so the parser alone handles the same wording for the next person: no agent call
+    await writer.patch(f"/api/people/{bo}", json={"fields": {"stage": "seed round closed",
+                                                             "region": "lisbon"}})
+    bo_doc = (await reader.get(f"/api/people/{bo}")).json()
+    assert bo_doc["norm"]["stage"] == "Seed" and bo_doc["norm"]["region"] == "Lisbon"
+    res = (await writer.post(f"/api/people/{bo}/normalize")).json()
+    assert not res["agent_called"]
+    # an industry list in the stage field is dropped, not allocated
+    await writer.patch(f"/api/people/{cy}", json={
+        "fields": {"stage": "Human Resources & Workforce, Artificial Intelligence"}})
+    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    assert by_change(res)[("stage", "flagged")]["flag"] == "non_normalizable"
+    assert res["allocated"] == {} and "Human Resources & Workforce, Artificial Intelligence" not in \
+        await properties.enum_values("stage")
+    # with allocation off a new category stays unmapped and is reported as rejected
+    await writer.patch(f"/api/people/{cy}", json={"fields": {"region": "Porto"}})
+    r = await writer.post(f"/api/people/{cy}/normalize", json={"options": {"allocate": False}})
+    res = r.json()
+    assert res["rejected"] == {"region": ["Porto"]} and res["unmapped"] == ["region"]
+    assert "Porto" not in await properties.enum_values("region")
+    assert (await reader.get(f"/api/people/{cy}")).json()["norm_flags"]["region"] == "unmapped"
+    # the cap counts new values per call
+    await writer.patch(f"/api/people/{cy}", json={"fields": {"warmth": "Glowing"}})
+    r = await writer.post(f"/api/people/{cy}/normalize", json={"options": {"max_new_values": 1}})
+    res = r.json()
+    assert sorted(res["allocated"]) == ["region"] and res["rejected"] == {"warmth": ["Glowing"]}
+
+
 async def test_normalize_assistant_run(people_by_name, writer, reader):
     r = await writer.post("/api/assistants/normalize/runs",
                           json={"person_ids": [people_by_name["Cy"], people_by_name["Ada"]]})

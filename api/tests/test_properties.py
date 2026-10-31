@@ -99,6 +99,18 @@ async def test_enum_values_are_stored_and_extensible():
         await properties.add_enum_value("model", "  ")
 
 
+async def test_add_alias_records_a_merge():
+    assert await properties.add_alias("model", "B2B", "business to business")
+    assert not await properties.add_alias("model", "B2B", "business to business")   # known
+    assert not await properties.add_alias("model", "B2B", "b2b")                    # the value itself
+    lookup = await properties.enum_lookup("model")
+    assert lookup["business to business"] == "B2B"
+    doc = await mongo_db().fields.find_one({"_id": "model"})
+    assert next(e for e in doc["enum"]["values"] if e["v"] == "B2B")["aliases"] == ["business to business"]
+    with pytest.raises(properties.PropertyError):
+        await properties.add_alias("model", "Nonexistent", "x")
+
+
 async def test_sync_names_follows_text_changes_and_removals():
     rows = await _name_rows()
     assert rows["model"] == "model: Business model. Values: B2B; B2C; Marketplace"

@@ -17,6 +17,7 @@ from app.auth import Principal
 from app.history import Source
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
+from app.tools.normalize import NormalizeOptions
 from app.tools.plan import Tuning
 from app.tools.plan import plan_search as plan_search_tool
 from app.tools.search import (
@@ -283,14 +284,24 @@ async def store_about_person(
 
 
 @mcp.tool()
-async def normalize_person(ctx: Context, id: str) -> dict:
+async def normalize_person(
+    ctx: Context,
+    id: str,
+    options: Annotated[NormalizeOptions | None,
+                       Field(description="allocate (may the agent add enum values), "
+                                         "max_new_values")] = None,
+) -> dict:
     """Tool: re-parse a person's typed properties and have an agent decide the values the parser
-    could not map (requires people:write). Returns every change (normalized, flagged) and what
-    is still unmapped."""
+    could not map (requires people:write). For enum properties the agent merges a text into an
+    existing value (recorded as an alias), allocates a new canonical value when the text names a
+    category the list lacks and fits the person (within options), or drops it. Returns every
+    change (normalized, flagged, enum_value_added), the merges, allocations and rejections, and
+    what is still unmapped."""
     principal = await _principal(ctx, "people:write")
     try:
         result = await normalize_tool.normalize(
-            id, principal, Source("agent", "normalizer", f"key:{principal.api_key_id}"))
+            id, principal, Source("agent", "normalizer", f"key:{principal.api_key_id}"),
+            options or NormalizeOptions())
     except (ValueError, AgentRunError) as e:
         raise ToolError(str(e)) from e
     if result is None:

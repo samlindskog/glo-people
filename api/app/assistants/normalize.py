@@ -6,19 +6,14 @@ with unmapped values."""
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
-
 from app.assistants.base import AssistantSpec, register
 from app.assistants.context import AssistantDeps
 from app.auth import Principal
 from app.history import Source
 from app.tools import normalize as normalize_tool
+from app.tools.normalize import NormalizeOptions
 
 ASSISTANT = "normalize"
-
-
-class NormalizeOptions(BaseModel):
-    """Nothing to tune: the parser is deterministic and the agent gets one call per person."""
 
 
 @dataclass
@@ -45,6 +40,10 @@ def describe(result: normalize_tool.NormalizeResult) -> str:
             parts.append(f"{c.key} → {c.value}")
         elif c.action == "flagged":
             parts.append(f"{c.key}: {'no value' if c.flag == 'non_normalizable' else 'not recognised'}")
+        elif c.action == "enum_value_added":
+            parts.append(f"{c.key}: new value {c.value!r}")
+    for key, values in result.rejected.items():
+        parts.append(f"{key}: {', '.join(repr(v) for v in values)} not added (cap)")
     for key in result.unmapped:
         parts.append(f"{key}: still unmapped")
     text = "; ".join(parts) if parts else "Everything was already normalised"
@@ -56,13 +55,15 @@ def describe(result: normalize_tool.NormalizeResult) -> str:
 async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     result = await normalize_tool.normalize(
         deps.person_id, deps.principal,
-        Source("agent", f"{ASSISTANT}/normalizer", f"run:{deps.run_id}/item:{deps.item_id}"))
+        Source("agent", f"{ASSISTANT}/normalizer", f"run:{deps.run_id}/item:{deps.item_id}"),
+        deps.options)
     if result is None:
         return {"status": "failed", "error": "person not found", "text": "Person not found.",
                 "changes": []}
     deps.changes.extend(result.changes)
     return {"text": describe(result), "changes": [c.model_dump() for c in result.changes],
-            "agent_called": result.agent_called, "unmapped": result.unmapped}
+            "agent_called": result.agent_called, "unmapped": result.unmapped,
+            "merged": result.merged, "allocated": result.allocated, "rejected": result.rejected}
 
 
 SPEC = register(AssistantSpec(

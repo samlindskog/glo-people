@@ -118,11 +118,13 @@ def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
 
 
 def normalizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    """Picks the first canonical value whose words appear in the text; else non-normalizable."""
+    """Per item: merge into the first canonical value whose words appear in the text; else, for
+    enum types, allocate the text itself when it looks like a label (a capitalised word or two,
+    no commas); else non-normalizable (an industry list, a remark)."""
     prompt = _prompt(messages)
     items = []
     for m in re.finditer(r"^- (\w+) \((\w+)(?: values: (.*?))?\): '(.*)'$", prompt, re.MULTILINE):
-        field, _ptype, values, text = m.groups()
+        field, ptype, values, text = m.groups()
         folded = fields.fold(text)
         choice = None
         for v in (values or "").split(", "):
@@ -130,7 +132,12 @@ def normalizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
                 choice = v
                 break
         if choice:
-            items.append({"field": field, "value": choice, "note": "fake match"})
+            items.append({"field": field, "value": [choice] if ptype == "enum_list" else choice,
+                          "note": "fake match"})
+        elif ptype in ("enum", "enum_list") and re.fullmatch(r"[A-Z][\w/&' -]{0,30}", text) \
+                and "," not in text:
+            items.append({"field": field, "value": [text] if ptype == "enum_list" else text,
+                          "note": "fake: new value"})
         else:
             items.append({"field": field, "value": None, "non_normalizable": True,
                           "note": "fake: no match"})

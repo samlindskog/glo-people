@@ -163,7 +163,10 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
 
 /** One line for a human from a normalize result: what was settled, flagged or left. */
 export function describeNormalization(result: NormalizeResult): string {
-  const parts = result.changes.map((c) => (c.action === 'normalized' ? `${c.key} → ${formatValue(c.value)}` : `${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`))
+  const parts = result.changes.map((c) =>
+    c.action === 'normalized' ? `${c.key} → ${formatValue(c.value)}` : c.action === 'enum_value_added' ? `${c.key}: new value “${formatValue(c.value)}”` : `${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`,
+  )
+  for (const [k, vs] of Object.entries(result.rejected ?? {})) parts.push(`${k}: ${vs.join(', ')} not added (cap)`)
   for (const k of result.unmapped) parts.push(`${k}: still unmapped`)
   return parts.length ? `Normalised: ${parts.join(' · ')}` : 'Everything was already normalised.'
 }

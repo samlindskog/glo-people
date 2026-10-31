@@ -351,6 +351,7 @@ const CHANGE_CLASS: Record<Change['action'], string> = {
   normalized: 'bg-sky-50 text-sky-700',
   flagged: 'bg-amber-50 text-amber-700',
   property_created: 'bg-brand-50 text-brand-700',
+  enum_value_added: 'bg-brand-50 text-brand-700',
 }
 
 export const CHANGE_LABEL: Record<Change['action'], string> = {
@@ -360,6 +361,7 @@ export const CHANGE_LABEL: Record<Change['action'], string> = {
   normalized: 'normalised',
   flagged: 'flagged',
   property_created: 'new property',
+  enum_value_added: 'new value',
 }
 
 /** One badge per change: the property key, coloured by what happened; the value on hover. */
