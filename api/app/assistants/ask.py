@@ -4,7 +4,7 @@ hits with citations. Nothing is written; the executed search is saved like any o
 re-run from the history. Tuning is per call."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -12,11 +12,15 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 from app import fields
 from app.agents.common import run_agent
 from app.assistants import AssistantResult
+from app.assistants.base import AssistantSpec, ItemSpec, register
+from app.assistants.context import AssistantDeps
 from app.auth import Principal
+from app.integrations.firecrawl import Budget
+from app.tools import Emit, silent
 from app.tools import plan as plan_tool
 from app.tools import search as search_tool
 from app.tools.plan import Tuning
-from app.tools.search import FieldFilter, SearchHit, SearchRequest
+from app.tools.search import FieldFilter, SearchHit, SearchRequest, describe
 
 AGENT_NAME = "answer"
 REQUEST_LIMIT = 3
@@ -110,30 +114,83 @@ def render(context: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _answer(question: str, contexts: list[dict[str, Any]]) -> Answer:
+async def _answer(question: str, contexts: list[dict[str, Any]], emit: Emit = silent) -> Answer:
     body = "\n\n".join(render(c) for c in contexts)[:MAX_CONTEXT_CHARS]
     prompt = f"Question: {question}\n\nPeople:\n{body}"
     deps = AnswerDeps(ids={str(c.get("id")) for c in contexts})
-    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
+    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
 # --- the assistant --------------------------------------------------------------------------------------
 
-async def ask(question: str, tuning: Tuning, principal: Principal, tier: str | None = None,
-              filters: list[FieldFilter] = (), source: str = "ui") -> AskResult:
-    planned = await plan_tool.plan_search(question, tier, filters, tuning)
+async def ask(question: str, tuning: Tuning, principal: Principal | None, tier: str | None = None,
+              filters: list[FieldFilter] = (), source: str = "ui", emit: Emit = silent) -> AskResult:
+    emit("step", "planning the search")
+    planned = await plan_tool.plan_search(question, tier, filters, tuning, emit=emit)
     req = planned.request
     resp = await search_tool.run_search(req)
+    emit("step", f"searched: {describe(req)} → {resp.total} result(s)", total=resp.total)
     keys = list(dict.fromkeys(["company", "role",
                                *(q.field for q in (req.semantic.queries if req.semantic else [])),
                                *(f.field for f in req.filters)]))
     contexts = [_context(h, keys) for h in resp.results]
     if contexts:
-        ans = await _answer(question, contexts)
+        emit("step", f"answering from {len(contexts)} record(s)")
+        ans = await _answer(question, contexts, emit)
     else:
         ans = Answer(text="No one in the database matches this search.")
-    search_id = await search_tool.record_search(principal, req, resp, source,
-                                                extra={"ask": question})
+    search_id = None
+    if principal is not None:
+        search_id = await search_tool.record_search(principal, req, resp, source,
+                                                    extra={"ask": question})
+    emit("step", "answered", citations=len(ans.citations))
     return AskResult(text=ans.text, citations=ans.citations, request=req,
                      rationale=planned.rationale, total=resp.total, results=resp.results,
                      search_id=search_id)
+
+
+# --- the run form: one item, the answer as its result ----------------------------------------------------
+
+ASSISTANT = "ask"
+
+
+class AskRunOptions(Tuning):
+    question: str = Field(min_length=1, max_length=2000)
+    tier: Literal["member", "plus_one"] | None = None
+    filters: list[FieldFilter] = Field(default_factory=list, max_length=10)
+
+
+async def prepare(body: dict[str, Any], options: AskRunOptions) -> list[ItemSpec]:
+    return [{"person_id": None, "payload": {}, "label": options.question[:120]}]
+
+
+async def make_deps(run_id: int, item: dict, options: AskRunOptions,
+                    principal: Principal | None) -> AssistantDeps:
+    return AssistantDeps(assistant=ASSISTANT, run_id=run_id, item_id=item["id"],
+                         payload=item["payload"], label=item.get("label"), principal=principal,
+                         budget=Budget(max_scrapes=0, max_searches=0, max_credits=0),
+                         options=options)
+
+
+async def run_item(deps: AssistantDeps) -> dict[str, Any]:
+    o: AskRunOptions = deps.options
+    source = "api" if deps.principal is not None and deps.principal.via_api_key else "ui"
+    result = await ask(o.question, Tuning(k=o.k, mode=o.mode, threshold=o.threshold),
+                       deps.principal, o.tier, o.filters, source=source, emit=deps.emit)
+    return {"text": result.text, "changes": [],
+            **result.model_dump(mode="json", exclude={"text", "changes"})}
+
+
+SPEC = register(AssistantSpec(
+    key=ASSISTANT,
+    label="Ask a question",
+    description=("Plans a search for the question, runs it and answers in text with citations; "
+                 "the search is saved in the history. Writes nothing."),
+    options_model=AskRunOptions,
+    make_deps=make_deps,
+    run_item=run_item,
+    item_cap=lambda options: 0,
+    scope="single",
+    permission="people:read",
+    prepare=prepare,
+))

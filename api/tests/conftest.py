@@ -84,6 +84,16 @@ async def _clean():
     yield
 
 
+async def import_people(client: httpx.AsyncClient, text: str, name: str, tier: str) -> dict:
+    """Import a CSV through the API and wait for its run; returns the import summary."""
+    r = await client.post("/api/people/import", data={"tier": tier},
+                          files={"file": (name, text.encode(), "text/csv")})
+    assert r.status_code == 201, r.text
+    run = await runner.wait(r.json()["run_id"])
+    assert run["status"] == "done", run
+    return r.json()
+
+
 async def make_user(username: str, role: str) -> int:
     async with db.engine().begin() as conn:
         return (await conn.execute(db.users.insert().values(

@@ -61,24 +61,27 @@ async def _people_items(body: RunRequest) -> list[ItemSpec]:
 
 
 @router.post("/{key}/runs", status_code=201)
-async def start_run(key: str, body: RunRequest, principal: Writer) -> dict:
+async def start_run(key: str, body: RunRequest, principal: Reader) -> dict:
     spec = REGISTRY.get(key)
     if spec is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown assistant")
+    if not principal.can(spec.permission):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"Missing permission: {spec.permission}")
     try:
         options = spec.options_model.model_validate(body.options)
-    except ValidationError as e:
+        if spec.scope == "people":
+            items = await _people_items(body)
+        elif spec.prepare is not None:
+            items = await spec.prepare(body.model_dump(), options)
+        else:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                f"{key} cannot be started with this request")
+    except (ValidationError, ValueError) as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
-    if spec.scope == "people":
-        items = await _people_items(body)
-    elif spec.prepare is not None:
-        items = await spec.prepare(body.model_dump(), options)
-    else:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
-                            f"{key} cannot be started with this request")
+    label = body.label or (items[0].get("label") if len(items) == 1 else None)
     run = await runner.create_run(spec, principal, items, {
-        "options": options.model_dump(), "selector": body.all_with_field, "tier": body.tier},
-        label=body.label)
+        "options": options.model_dump(mode="json"), "selector": body.all_with_field,
+        "tier": body.tier}, label=label)
     await runner.start(run["id"], principal)
     return await runner.get_run(run["id"])
 

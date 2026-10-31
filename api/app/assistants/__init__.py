@@ -2,9 +2,9 @@
 
 An assistant composes tools into something a person asks for and answers in text meant for a
 human, plus the normalised list of `changes` it caused through the tools, so every surface can
-show both. `ask` answers a question synchronously; `enrich` and `normalize` are per-person
-assistants that the runner (`assistants.runner`) executes over many people as a run, with
-budgets, progress and traces.
+show both. Every assistant runs as a run (`assistants.runner`): `enrich` and `normalize` per
+person, `import`, `embed` and `reparse` over batches, `ask` as one item whose result is the
+answer (MCP also calls `ask()` directly for a synchronous answer).
 """
 
 from pydantic import BaseModel, Field
@@ -21,8 +21,8 @@ class AssistantResult(BaseModel):
 
 
 def load_all() -> None:
-    """Import every per-person assistant so it registers itself."""
-    from app.assistants import enrich, normalize  # noqa: F401
+    """Import every assistant so it registers itself."""
+    from app.assistants import ask, embed, enrich, import_csv, normalize, reparse  # noqa: F401
 
 
 __all__ = ["REGISTRY", "AssistantResult", "AssistantSpec", "Budget", "Change", "StopRun",

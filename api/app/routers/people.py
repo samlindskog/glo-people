@@ -7,8 +7,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
-from app import activity, db, embeddings, fields, importer, jobs
+from app import activity, db, fields, importer
 from app import people as people_svc
+from app.assistants import import_csv, runner
+from app.assistants.import_csv import ImportOptions
 from app.auth import Principal, require
 from app.config import get_settings
 from app.history import Source
@@ -105,29 +107,27 @@ async def import_preview(file: Annotated[UploadFile, File()], _: Writer) -> dict
     return await importer.preview((await _read_upload(file)).lstrip("﻿"))
 
 
-@router.post("/people/import")
+@router.post("/people/import", status_code=201)
 async def import_people(file: Annotated[UploadFile, File()],
                         tier: Annotated[Literal["member", "plus_one"], Form()],
                         principal: Writer) -> dict:
+    """Assistant: import the CSV as a run of row batches (follow it on /api/assistants/runs)."""
     text = await _read_upload(file)
+    name = file.filename or "upload.csv"
+    options = ImportOptions(tier=tier)
     try:
-        result = await importer.import_csv(text, file.filename or "upload.csv", tier)
-    except ValueError as e:                      # includes people.ConflictError
+        parsed, created, items = await import_csv.prepare_csv(text, name, options)
+    except ValueError as e:
         raise _bad_request(e) from e
-    summary = {"file": file.filename, "tier": tier, "rows": result.rows,
-               "inserted": result.inserted, "updated": result.updated,
-               "skipped": result.skipped, "new_properties": result.new_properties}
-    await activity.record("people.import", principal, file.filename, summary)
-
-    async def embed(job: dict) -> int:
-        n = 0
-        for start in range(0, len(result.ids), 500):
-            n += await embeddings.sync_people(result.ids[start:start + 500])
-            job["progress"] = min(start + 500, len(result.ids))
-        return n
-
-    job = jobs.spawn(f"embed import {file.filename}", embed)
-    return {**summary, "job_id": job["id"]}
+    if not items:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no rows with a name")
+    run = await runner.create_run(import_csv.SPEC, principal, items, {
+        "options": options.model_dump(), "file": parsed.file}, label=parsed.file)
+    await runner.start(run["id"], principal)
+    summary = {"file": parsed.file, "tier": tier, "rows": parsed.total, "skipped": parsed.skipped,
+               "new_properties": created, "run_id": run["id"], "items": len(items)}
+    await activity.record("people.import", principal, parsed.file, summary)
+    return summary
 
 
 # --- tools on one person: invocations ------------------------------------------------------------------
@@ -234,12 +234,6 @@ async def normalize_one(person_id: str, principal: Writer, body: NormalizeBody |
                          Source("agent", "normalizer", f"user:{principal.username}"), wait,
                          firecrawl=provider_client(options), action="person.normalize.tool",
                          meta={"options": options.model_dump()}, opts=options)
-
-
-@router.get("/jobs")
-async def list_jobs(_: Reader) -> list[dict]:
-    """Recent background jobs (the embedding pass after an import)."""
-    return jobs.recent()
 
 
 # --- history ------------------------------------------------------------------------------------

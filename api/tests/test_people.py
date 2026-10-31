@@ -1,7 +1,8 @@
 import pytest
 
-from app import embedder, embeddings, jobs
+from app import embedder, embeddings
 from app.mongo import db
+from tests.conftest import import_people
 
 MEMBERS = """﻿ID,Name,Company,Sectors,Bio,MRR,Emails,Brand New Column
 m1,Ada Okafor,PayRail,"fintech, payments",Builds payments infrastructure for African merchants,"$12,000",ada@x.io;ada2@x.io,alpha
@@ -18,19 +19,15 @@ Ed Fox,ed@y.io,Gaming,
 
 
 async def _import(client, text, name, tier):
-    r = await client.post("/api/people/import", data={"tier": tier},
-                          files={"file": (name, text.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
-    return r.json()
+    return await import_people(client, text, name, tier)
 
 
 async def test_import_registry_and_coercion(writer):
     res = await _import(writer, MEMBERS, "members.csv", "member")
-    assert (res["rows"], res["inserted"], res["skipped"]) == (4, 3, 1)
+    assert (res["rows"], res["skipped"], res["items"]) == (4, 1, 1)
     assert res["new_properties"] == ["brand_new_column"]
-    jobs_seen = (await writer.get("/api/jobs")).json()
-    assert any(j["id"] == res["job_id"] and j["status"] == "done" for j in jobs_seen)
+    run = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()
+    assert run["status"] == "done" and run["items"][0]["result"]["inserted"] == 3
 
     fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
     assert fl["sectors"]["type"] == "list" and fl["mrr"]["type"] == "number"
@@ -56,7 +53,9 @@ async def test_reimport_upserts_and_adds_columns(writer):
     v2 = MEMBERS.replace("Brand New Column", "Brand New Column,Twitter").replace(
         "alpha\n", "alpha,@ada\n")
     res = await _import(writer, v2, "members.csv", "member")
-    assert res["inserted"] == 0 and res["updated"] == 3 and res["new_properties"] == ["twitter"]
+    assert res["new_properties"] == ["twitter"]
+    item = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()["items"][0]
+    assert item["result"]["inserted"] == 0 and item["result"]["updated"] == 3
     assert await db().people.count_documents({}) == 3
     ada = await db().people.find_one({"name.v": "Ada Okafor"})
     assert ada["twitter"]["v"] == "@ada"
@@ -201,7 +200,8 @@ async def test_legacy_documents_are_migrated(writer, reader):
 async def test_duplicate_rows_in_one_import_keep_every_entry(writer):
     csv = "ID,Name,Bio\nd1,Dup Person,first bio\nd1,Dup Person,second bio\n"
     res = await _import(writer, csv, "dups.csv", "member")
-    assert res["inserted"] == 1 and await db().people.count_documents({}) == 1
+    item = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()["items"][0]
+    assert item["result"]["inserted"] == 1 and await db().people.count_documents({}) == 1
     doc = await db().people.find_one({"source.source_id": "d1"})
     assert doc["bio"]["v"] == "second bio"
     assert [e["v"] for e in doc["bio"]["h"]] == ["first bio", "second bio"]

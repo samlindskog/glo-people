@@ -9,11 +9,12 @@ from pydantic_ai import ModelResponse
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
-from app import jobs, people
+from app import people
 from app.assistants import credits, runner
 from app.config import get_settings
 from app.mongo import db
 from app.tools import normalize as normalize_tool
+from tests.conftest import import_people
 from tests.test_mcp import call, init
 from tests.test_tools import CSV
 from tests.test_tools import _fakes as _fakes  # noqa: PLC0414  (fake embedder + agents)
@@ -21,10 +22,7 @@ from tests.test_tools import _fakes as _fakes  # noqa: PLC0414  (fake embedder +
 
 @pytest.fixture
 async def people_by_name(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("a.csv", CSV.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, CSV, "a.csv", "member")
     return {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
 
 
@@ -223,7 +221,8 @@ async def test_mcp_run_tools(people_by_name, writer, reader, client_factory):
     await init(c, rk)
     err, specs = await call(c, rk, "list_assistants", {})
     assert not err, specs
-    assert {s["key"] for s in specs} >= {"enrich", "normalize"} and specs[0]["scope"] == "people"
+    by_key = {s["key"]: s for s in specs}
+    assert {"enrich", "normalize"} <= set(by_key) and by_key["enrich"]["scope"] == "people"
     err, _ = await call(c, rk, "start_assistant", {"key": "normalize", "person_ids": [people_by_name["Cy"]]})
     assert err                                                      # reader: no write tools
     await init(c, w)

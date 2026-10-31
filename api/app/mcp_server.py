@@ -361,10 +361,10 @@ async def start_assistant(
     pause_run / resume_run / stop_run control it. A run pauses by itself when it reaches its
     credit cap (resume with a higher max_credits) or when the Firecrawl account is empty."""
     from app.routers.assistants import RunRequest, _people_items
-    principal = await _principal(ctx, "people:write")
     spec = REGISTRY.get(key)
     if spec is None:
         raise ToolError(f"unknown assistant {key!r}")
+    principal = await _principal(ctx, spec.permission)
     try:
         body = RunRequest(person_ids=person_ids, all_with_field=all_with_field, tier=tier,
                           options=options or {}, label=label)
@@ -377,8 +377,10 @@ async def start_assistant(
             raise ToolError(f"{key} cannot be started this way")
     except (ValueError, HTTPException) as e:
         raise ToolError(getattr(e, "detail", str(e))) from e
+    label = label or (items[0].get("label") if len(items) == 1 else None)
     run = await runner.create_run(spec, principal, items, {
-        "options": opts.model_dump(), "selector": all_with_field, "tier": tier}, label=label)
+        "options": opts.model_dump(mode="json"), "selector": all_with_field, "tier": tier},
+        label=label)
     await runner.start(run["id"], principal)
     return await runner.get_run(run["id"])
 

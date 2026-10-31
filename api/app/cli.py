@@ -1,9 +1,11 @@
 """Admin commands: python -m app.cli {create-user,set-password,import,embed,properties,classify,
-normalize,migrate-history}."""
+normalize,migrate-history}. import, embed and normalize run as assistant runs executed in this
+process (visible on the Assistants page like any other run)."""
 
 import argparse
 import asyncio
 import getpass
+import os
 import re
 import statistics
 import sys
@@ -12,7 +14,13 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from app import auth, db, embeddings, fields, importer, mongo, people, properties
+from app import assistants, auth, db, fields, mongo, observability, people, properties
+from app.assistants import embed as embed_assistant
+from app.assistants import import_csv, reparse, runner
+from app.assistants.base import REGISTRY
+from app.assistants.embed import EmbedOptions
+from app.assistants.import_csv import ImportOptions
+from app.assistants.reparse import ReparseOptions
 from app.permissions import is_role, roles
 
 
@@ -49,31 +57,52 @@ def _prompt_password() -> str:
     return pw
 
 
+def _show(msg: dict) -> None:
+    label = f" [{msg['item_id']}]" if msg.get("item_id") else ""
+    print(f"  {msg['kind']:8}{label} {msg['message']}")
+
+
+async def _run(spec_key: str, items: list, params: dict, label: str) -> dict:
+    """Create a run and execute it in this process, printing its activity."""
+    observability.setup()
+    assistants.load_all()
+    run = await runner.create_run(REGISTRY[spec_key], None, items, params, label=label)
+    print(f"run {run['id']} ({spec_key}): {run['total']} item(s)")
+    run = await runner.run_to_completion(run["id"], f"cli:{os.getpid()}", on_event=_show)
+    print(f"run {run['id']}: {run['status']}, {run['done']} done, {run['failed']} failed")
+    return run
+
+
 async def import_file(path: str, tier: str, embed: bool) -> None:
     await mongo.ensure_indexes()
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
-    result = await importer.import_csv(text, Path(path).name, tier)
-    print(f"{path}: {result.rows} rows, {result.inserted} inserted, {result.updated} updated, "
-          f"{result.skipped} skipped (no name)")
-    if result.new_properties:
-        print(f"new properties: {', '.join(result.new_properties)}")
-    if embed:
-        n = await embeddings.sync_people(result.ids)
-        print(f"embedded {n} field values")
+    options = ImportOptions(tier=tier, embed=embed)
+    parsed, created, items = await import_csv.prepare_csv(text, Path(path).name, options)
+    print(f"{path}: {parsed.total} rows, {len(parsed.rows)} with a name, {parsed.skipped} skipped")
+    if created:
+        print(f"new properties: {', '.join(created)}")
+    if not items:
+        sys.exit("nothing to import")
+    run = await _run("import", items, {"options": options.model_dump(), "file": parsed.file},
+                     parsed.file)
+    totals = {"inserted": 0, "updated": 0, "embedded": 0}
+    for it in await runner.get_items(run["id"], limit=10_000):
+        for k in totals:
+            totals[k] += int((it.get("result") or {}).get(k) or 0)
+    print(f"{totals['inserted']} inserted, {totals['updated']} updated, "
+          f"{totals['embedded']} vectors")
 
 
 async def embed(only: list[str] | None) -> None:
-    await properties.sync_specs()
-    names = await properties.sync_names()
-    keys = set(only) if only else None
-    n = await embeddings.backfill(keys, progress=lambda n: print(f"  {n} vectors", end="\r"))
-    print(f"\nembedded {n} field values and {names} property names")
+    options = EmbedOptions(fields=only)
+    items = await embed_assistant.prepare({}, options)
+    await _run("embed", items, {"options": options.model_dump()}, "embed")
 
 
 async def normalize_people() -> None:
-    await properties.sync_specs()
-    n = await people.normalize_all(progress=lambda n: print(f"  {n} documents", end="\r"))
-    print(f"\nnormalised {n} people documents")
+    options = ReparseOptions()
+    items = await reparse.prepare({}, options)
+    await _run("reparse", items, {"options": options.model_dump()}, "reparse")
 
 
 async def migrate_history(dry_run: bool) -> None:

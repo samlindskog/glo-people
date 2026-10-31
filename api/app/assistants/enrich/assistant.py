@@ -142,6 +142,18 @@ def _text(st: State, deps: AssistantDeps) -> str:
     return "; ".join(parts).capitalize() + "."
 
 
+def _recent(deps: AssistantDeps, key: str, agent: str) -> bool:
+    """An entry of `key` written by this assistant's `agent` within the TTL: a step that already
+    ran for this person (an earlier attempt was interrupted), not worth paying for again."""
+    ttl = datetime.now(UTC) - timedelta(days=get_settings().enrich_ttl_days)
+    for entry in ((deps.person or {}).get("history") or {}).get(key, []):
+        src = entry.get("src") or {}
+        if src.get("by") == f"{ASSISTANT}/{agent}" and entry.get("ts") \
+                and datetime.fromisoformat(entry["ts"]) >= ttl:
+            return True
+    return False
+
+
 async def _recently_enriched(deps: AssistantDeps, options: EnrichOptions) -> dict | None:
     """Step 0: a person enriched inside the TTL is skipped without spending anything."""
     if options.refresh:
@@ -188,6 +200,11 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     if not li:
         deps.skip("linkedin", "no linkedin.com/in URL on the record")
         return
+    if not st.options.refresh and _recent(deps, "linkedin_headline", "linkedin_reader"):
+        deps.skip("linkedin", "already read within the TTL (an earlier attempt)")
+        st.result["linkedin"] = "skipped"
+        return
+    deps.emit("step", f"LinkedIn: asking the data provider about {li}")
     if "linkedin" in st.previously_missing:
         deps.skip("linkedin", "no provider record last time; not retried within the TTL")
         st.result["linkedin"] = "not_found"
@@ -238,6 +255,7 @@ async def _step_sites(deps: AssistantDeps, st: State) -> None:
     if not candidates:
         deps.skip("sites", "no personal website known")
         return
+    deps.emit("step", f"sites: reading {', '.join(candidates[:CAPS['sites']])}")
     for site in candidates[:CAPS["sites"]]:
         try:
             page = await deps.firecrawl.scrape(site, formats=("markdown", "links"))
@@ -333,6 +351,11 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
         deps.skip("company", "no current company known")
         return
     company = str(company)
+    if not st.options.refresh and _recent(deps, "company_description", "company"):
+        deps.skip("company", "already summarised within the TTL (an earlier attempt)")
+        st.result["company"] = "resolved"
+        return
+    deps.emit("step", f"company: researching {company}")
     if "company" in st.previously_missing:
         deps.skip("company", "unresolved last time; not retried within the TTL")
         st.result["company"] = "unresolved"

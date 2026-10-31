@@ -7,9 +7,9 @@ and `tests/test_architecture.py` enforces it.
 | Level | Name | Modules | Contract |
 |---|---|---|---|
 | 0 | Rules & adapters | `fields`, `history`, `normalize` (the parser), `property_specs`, `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions. `fields.MAX_TEXT_CHARS` (about 5000 words) is the only cap on a text value, stored or shown to an agent |
-| 1 | Stores | `properties` (registry, enum sets, name vectors), `people` (documents; the only writer; `Transaction` stages one document's changes for one compare-and-set commit, replaying them on a concurrent write), `embeddings` (passage vectors) | typed reads; writers return `WriteResult{person, changes}`; compare-and-set |
+| 1 | Stores | `properties` (registry, enum sets, name vectors), `people` (documents; the only writer; `Transaction` stages one document's changes for one compare-and-set commit, replaying them on a concurrent write; `reparse`, `upsert_imported` are the batch APIs assistants drive), `embeddings` (passage vectors; `sync_people` per batch), `importer` (CSV parsing) | typed reads; writers return `WriteResult{person, changes}`; compare-and-set |
 | 2 | Tools | `tools/search`, `tools/plan`, `tools/record`, `tools/store`, `tools/normalize`, `tools/repair`, `tools/site`, `tools/company`; `tools/invoke` (running one); `agents/common`, `agents/fakes` (model plumbing) | **one record, one shot**: a writing tool takes a `ToolContext` and only *stages* on its transaction; `tools.invoke` commits once after it returns, so a stopped tool has written nothing; activity through `ctx.emit`, Firecrawl spend on the context's budget; a Pydantic result for programs built on `history.Change` with `credits` and `calls`; no prose for humans; each tool's model agent is defined inside the tool |
-| 3 | Assistants | `assistants/ask`; the per-item assistants `assistants/enrich`, `assistants/normalize`; `assistants/base`, `runner`, `context`, `credits` (runs over one or many records) | compose tools and change data only through them (`deps.tool`); return `text` for a human plus `changes`; a run persists its state, pauses, resumes, stops and survives a restart |
+| 3 | Assistants | per person: `assistants/enrich`, `assistants/normalize`; over batches: `assistants/import_csv`, `embed`, `reparse`; one item: `assistants/ask`; `assistants/base`, `runner`, `context`, `credits` | compose tools (per-person assistants change data only through `deps.tool`) or drive the level-1 batch APIs; return `text` for a human plus `changes`; every assistant is a run that persists its state, pauses, resumes, stops and survives a restart; the CLI executes its runs in its own process |
 | 4 | Surfaces | `routers/`, `mcp_server`, `cli`, `importer`, `main`, `web/` | adapt tools (structured) and assistants (text + changes) to REST, MCP, CLI, CSV, UI; no logic |
 
 ## The shared vocabulary: `history.Change`
@@ -58,11 +58,18 @@ assistants or surfaces.
 
 ## Assistants (level 3)
 
-| Assistant | Call | Result |
-|---|---|---|
-| ask | `ask(question, Tuning, principal, tier, filters, source)` | `AskResult{text, citations, request, rationale, total, results, search_id}` |
-| enrich | per person via the runner (`POST /api/assistants/enrich/runs`) | item result `{text, changes, skipped, not_found, credits, …}` |
-| normalize | per person via the runner | item result `{text, changes, agent_called, unmapped}` |
+| Assistant | Scope | Items | Item result |
+|---|---|---|---|
+| ask | single (`people:read`) | the question (`options.question`, tuning, tier, filters) | `{text, citations, request, rationale, total, results, search_id}`; MCP `ask_people` calls `ask()` directly for a synchronous answer |
+| enrich | people (selector `linkedin`) | one per person | `{text, changes, skipped, not_found, credits, …}`; a redo skips a paid step whose entry is already on the record (TTL) |
+| normalize | people (selector `name`) | one per person | `{text, changes, agent_called, unmapped, merged, allocated, rejected, repair}` |
+| import | batches | `ImportOptions{tier, batch, embed}`; the surface parses the CSV (`importer.parse_csv`), creates the properties and cuts the rows into items (`import_csv.prepare_csv`) | `{text, inserted, updated, embedded, people}` per batch (`people.upsert_imported` + `embeddings.sync_people`) |
+| embed | batches | `EmbedOptions{fields, batch}`; everyone or `person_ids`; property-name vectors synced in `prepare` | `{text, vectors}` per batch |
+| reparse | batches | `ReparseOptions{force, batch}` | `{text, written}` per batch (`people.reparse`) |
+
+`python -m app.cli import|embed|normalize --all` create these runs and execute them in the CLI
+process (`worker = cli:<pid>`), printing the events; the API's scheduler leaves a run alone while
+its owner heartbeats.
 
 ### Runs
 
@@ -93,7 +100,7 @@ Events of runs finished more than `run_events_retention_days` ago are pruned.
 ## Surfaces (level 4)
 
 REST: `POST /api/search` (tool), `POST /api/search/plan` (tool), `POST /api/search/ask`
-(assistant). Runs: `GET /api/assistants`, `POST /api/assistants/{key}/runs`, `GET /runs?status=active`,
+(assistant, synchronous), `POST /api/people/import` (multipart CSV → an import run). Runs: `GET /api/assistants`, `POST /api/assistants/{key}/runs`, `GET /runs?status=active`,
 `GET /runs/{id}` (+ `/items?status&after&limit`, `/events` as Server-Sent Events replayable with
 `Last-Event-ID`), `POST /runs/{id}/pause | resume {options} | stop` (`cancel` is an alias); `GET
 /api/credits` is the Firecrawl balance with the credits the running assistants reserve. A writing tool on one record is non-blocking: `POST

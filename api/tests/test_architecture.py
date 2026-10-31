@@ -11,15 +11,15 @@ LEVELS: dict[str, int] = {
     # 0 — rules and adapters
     **dict.fromkeys(["fields", "history", "normalize", "property_specs", "embedder", "urls",
                      "config", "db", "mongo", "auth", "permissions", "activity", "observability",
-                     "jobs", "integrations", "hub"], 0),
+                     "integrations", "hub"], 0),
     # 1 — stores
-    **dict.fromkeys(["properties", "people", "embeddings"], 1),
+    **dict.fromkeys(["properties", "people", "embeddings", "importer"], 1),
     # 2 — tools and the agent plumbing they share
     **dict.fromkeys(["tools", "agents"], 2),
     # 3 — assistants (per-person assistants, their runner, ask)
     "assistants": 3,
     # 4 — surfaces
-    **dict.fromkeys(["routers", "mcp_server", "cli", "main", "importer"], 4),
+    **dict.fromkeys(["routers", "mcp_server", "cli", "main"], 4),
 }
 
 # Imports allowed between different packages of the same level (importer → imported). Inside one
@@ -27,6 +27,7 @@ LEVELS: dict[str, int] = {
 PEERS: dict[str, set[str]] = {
     "people": {"properties"},
     "embeddings": {"people", "properties"},
+    "importer": {"people", "properties"},
     "tools": {"agents"},            # every tool may use the agent plumbing; agents use no tool
 }
 OPEN_LEVELS = {0, 3, 4}

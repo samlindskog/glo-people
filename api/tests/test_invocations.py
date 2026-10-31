@@ -10,13 +10,14 @@ from pydantic_ai.exceptions import AgentRunError, UnexpectedModelBehavior
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
-from app import jobs, people, properties
+from app import people, properties
 from app.history import Source
 from app.mongo import db
 from app.normalize import Parsed
 from app.tools import invoke
 from app.tools import normalize as normalize_tool
 from app.tools import repair as repair_tool
+from tests.conftest import import_people
 from tests.test_tools import CSV, by_change
 from tests.test_tools import _fakes as _fakes  # noqa: PLC0414  (the autouse fixture: fake embedder + agents)
 
@@ -25,10 +26,7 @@ SRC = Source("agent", "test", "t")
 
 @pytest.fixture
 async def people_by_name(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("a.csv", CSV.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, CSV, "a.csv", "member")
     return {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
 
 

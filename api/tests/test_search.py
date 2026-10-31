@@ -1,7 +1,8 @@
 import pytest
 
-from app import embedder, jobs
+from app import embedder
 from app.tools.search import FieldFilter, filter_to_mongo
+from tests.conftest import import_people
 
 PEOPLE = """Name,Role,Bio,One-liner,City,MRR
 Ada,founder,payments infrastructure for merchants,fintech payments founder,Lagos,9
@@ -14,10 +15,7 @@ Di,engineer,,robotics engineer,Austin,
 @pytest.fixture(autouse=True)
 async def _data(writer):
     embedder.set_embedder(embedder.FakeEmbedder(512))
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("p.csv", PEOPLE.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, PEOPLE, "p.csv", "member")
 
 
 def names(resp):

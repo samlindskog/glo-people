@@ -574,17 +574,19 @@ async def _import_set(cur: dict | None, sid: str, rows: list[tuple[int, dict[str
 
 
 async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_file: str,
-                          tier: str, now: datetime) -> tuple[int, int]:
+                          tier: str, now: datetime) -> tuple[int, int, list[str]]:
     """Bulk upsert of imported rows `(source_id, row_no, values)` keyed by (file, source_id).
     The caller has created the properties the rows use (`properties.ensure`).
 
     Rows sharing a source_id fold into one update applied in file order, so no row's entry is lost
     to a later $set of the same property. Each write is compare-and-set on the document's `rev`
     (a concurrent edit makes the upsert collide on the unique source index, and that row is
-    redone on its own). Returns (inserted, updated). Values are appended to the field histories
-    like any other write; unchanged values append nothing and leave `updated_at`.
+    redone on its own). Returns (inserted, updated, ids of the documents touched). Values are
+    appended to the field histories like any other write; unchanged values append nothing and
+    leave `updated_at`. Write hooks do not run: the caller embeds the ids itself.
     """
     inserted = updated = 0
+    ids: list[str] = []
     for start in range(0, len(rows), WRITE_BATCH):
         chunk = rows[start:start + WRITE_BATCH]
         groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
@@ -619,7 +621,8 @@ async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_fi
                                                             now)
             inserted += inserted_now
             updated += updated_now
-    return inserted, updated
+        ids += await find_ids({"source.file": source_file, "source.source_id": {"$in": sids}})
+    return inserted, updated, ids
 
 
 async def _reimport_one(sid: str, group: list[tuple[int, dict[str, Any]]], source_file: str,

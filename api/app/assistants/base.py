@@ -65,13 +65,15 @@ class AssistantSpec:
     run_item: Callable[[AssistantDeps], Awaitable[dict[str, Any]]]
     item_cap: Callable[[BaseModel], int]     # worst-case credits one item may spend
     scope: Scope = "people"
+    permission: str = "people:write"         # what starting a run requires
     selector_field: str | None = None        # people scope: "everyone with this field" bulk selector
     # non-people scopes: the request body -> the items of the run
     prepare: Callable[[dict[str, Any], BaseModel], Awaitable[list[ItemSpec]]] | None = None
 
     def public(self) -> dict[str, Any]:
         return {"key": self.key, "label": self.label, "description": self.description,
-                "scope": self.scope, "selector_field": self.selector_field,
+                "scope": self.scope, "permission": self.permission,
+                "selector_field": self.selector_field,
                 "options_schema": self.options_model.model_json_schema()}
 
 

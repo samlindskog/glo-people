@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app import embedder, history, importer, jobs, normalize, people, properties
+from app import embedder, history, importer, normalize, people, properties
 from app.auth import Principal
 from app.history import Source
 from app.mongo import db
 from app.normalize import NON_NORMALIZABLE, UNMAPPED, Parsed, parse
+from tests.conftest import import_people
 
 CSV = """ID,Name,MRR,Stage,Joined,In WhatsApp,Needs Stated,Bio
 1,Ada,"$12,000",seed,2026-06-05,Yes,capital; partners,payments infrastructure
@@ -27,10 +28,7 @@ def _fake_embedder():
 
 @pytest.fixture
 async def people_by_name(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("n.csv", CSV.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, CSV, "n.csv", "member")
     return {d["name"]["v"]: d async for d in db().people.find({})}
 
 
@@ -207,15 +205,16 @@ async def test_document_skips_up_to_date_properties(people_by_name):
     assert await people.pending_normalization({"_id": 1, "bio": {"v": "x", "h": []}}) == {}
 
 
-async def test_normalize_all_fills_legacy_documents_and_update_norm(people_by_name, writer):
+async def test_reparse_fills_legacy_documents_and_update_norm(people_by_name, writer):
     ts = datetime(2026, 1, 2, tzinfo=UTC)
     await db().people.insert_one({"name": {"v": "Old", "h": [{"v": "Old", "ts": ts}]},
                                   "mrr": {"v": "$5k", "h": [{"v": "$5k", "ts": ts}]},
                                   "tier": "member", "schema_version": 2})
-    assert await people.normalize_all() == 1
+    everyone = await people.find_ids({})
+    assert await people.reparse(everyone) == 1
     old = await db().people.find_one({"name.v": "Old"})
     assert old["mrr"]["norm"]["v"] == 5000 and old["rev"] == 1
-    assert await people.normalize_all() == 0                # same parser, same texts: no writes
+    assert await people.reparse(everyone) == 0              # same parser, same texts: no writes
 
     # the normaliser agent maps an unmapped value; a later text-unrelated write keeps it
     cy = str(people_by_name["Cy"]["_id"])
@@ -282,16 +281,14 @@ async def test_concurrent_updates_all_land(writer):
 
 
 async def test_import_concurrent_with_an_edit_loses_nothing(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("c.csv", b"ID,Name,Bio\n1,Ada,first\n",
-                                          "text/csv")})
-    assert r.status_code == 200
+    await import_people(writer, "ID,Name,Bio\n1,Ada,first\n", "c.csv", "member")
     pid = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
     principal = Principal(user_id=1, username="wendy", role="writer",
                           permissions=frozenset({"people:write"}))
     for i in range(5):
+        parsed = importer.parse_csv(f"ID,Name,Bio\n1,Ada,import {i}\n", "c.csv")
         await asyncio.gather(
-            importer.import_csv(f"ID,Name,Bio\n1,Ada,import {i}\n", "c.csv", "member"),
+            people.upsert_imported(parsed.rows, "c.csv", "member", datetime.now(UTC)),
             people.update(principal, pid, {"notes": f"note {i}"}))
     doc = await db().people.find_one({"_id": people._oid(pid)})
     assert [e["v"] for e in doc["bio"]["h"]] == ["first", *(f"import {i}" for i in range(5))]

@@ -7,7 +7,7 @@ from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
-from app import embedder, jobs, properties
+from app import embedder, properties
 from app.agents.fakes import _retried
 from app.assistants import runner
 from app.config import get_settings
@@ -17,6 +17,7 @@ from app.mongo import db
 from app.tools import invoke
 from app.tools import plan as plan_tool
 from app.tools import repair as repair_tool
+from tests.conftest import import_people
 from tests.test_assistants import FakeFirecrawl
 from tests.test_mcp import call, init
 
@@ -35,10 +36,7 @@ def _fakes(monkeypatch):
 
 @pytest.fixture
 async def people_by_name(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("a.csv", CSV.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, CSV, "a.csv", "member")
     return {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
 
 

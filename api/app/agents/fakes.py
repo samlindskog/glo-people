@@ -86,7 +86,8 @@ def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     props = dict(re.findall(r"^- ([a-z0-9_]+) \((\w+)", _section(prompt, "Properties"), re.MULTILINE))
     current = dict(re.findall(r"^([a-z0-9_]+): (.*?)(?:  \[|$)", _section(prompt, "Current values"), re.MULTILINE))
     out: dict = {"writes": [], "new_properties": [], "confirmed": [], "ignored": []}
-    for line in [ln.strip() for ln in re.split(r"(?<=[^0-9])\.\s+|\n+", passage) if ln.strip()]:
+    for line in [ln.strip() for ln in re.split(r"\.\s+(?=[a-z_]+\s*:)|(?<=[^0-9])\.\s+|\n+", passage)
+                 if ln.strip()]:
         line = line.rstrip(".")
         if line.lower().startswith("hi") and ":" not in line:
             out["ignored"].append(line)

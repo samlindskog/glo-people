@@ -1,6 +1,6 @@
-"""Generic CSV → people importer. Any columns are accepted; each header becomes a property key
-(created through `properties.ensure` when new). Parsing and coercion live here; the write is
-`people.upsert_imported`."""
+"""Generic CSV parsing for the import assistant (level 1). Any columns are accepted; each header
+becomes a property key. Parsing and coercion live here; the import assistant creates the new
+properties (`properties.ensure`) and writes the rows (`people.upsert_imported`) in batches."""
 
 import csv
 import hashlib
@@ -8,10 +8,9 @@ import io
 import re
 import statistics
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any
 
-from app import fields, people, properties
+from app import fields, properties
 
 _LIST_SEPARATORS = re.compile(r"\s*(?:\n|;|\s\|\s)\s*")
 # Free text that often contains commas/newlines but is never a list.
@@ -23,14 +22,15 @@ csv.field_size_limit(10_000_000)
 
 
 @dataclass
-class ImportResult:
-    rows: int = 0
-    inserted: int = 0
-    updated: int = 0
-    skipped: int = 0
-    columns: list[dict] = field(default_factory=list)
-    new_properties: list[str] = field(default_factory=list)
-    ids: list[str] = field(default_factory=list)
+class ParsedCsv:
+    """A CSV read into rows ready for `people.upsert_imported`: (source_id, row_no, values)."""
+
+    file: str
+    columns: list[dict]
+    rows: list[tuple[str, int, dict[str, Any]]]
+    total: int = 0                 # rows with content
+    skipped: int = 0               # rows without a name
+    used_keys: list[str] = field(default_factory=list)
 
 
 def _looks_like_list(values: list[str], split) -> bool:
@@ -115,10 +115,9 @@ def _source_id(doc: dict, raw_id: str | None, row_no: int) -> str:
     return hashlib.sha1(basis.encode()).hexdigest()
 
 
-async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
-    if tier not in fields.TIERS:
-        raise ValueError(f"tier must be one of {fields.TIERS}")
-    text = text.lstrip("﻿")
+def parse_csv(text: str, filename: str) -> ParsedCsv:
+    """Rows and the property keys they use; nothing is written."""
+    text = text.lstrip("\ufeff")
     reader = csv.reader(io.StringIO(text))
     headers = next(reader, None)
     if not headers:
@@ -134,9 +133,7 @@ async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
         sp = properties.spec(c["key"])
         kinds[c["key"]] = _column_kind(c["key"], values, sp.type if sp else None)
 
-    result = ImportResult(columns=cols)
-    now = datetime.now(UTC)
-    docs: list[tuple[str, dict]] = []
+    parsed = ParsedCsv(file=filename.rsplit("/", 1)[-1], columns=cols, rows=[], total=len(raw_rows))
     for row_no, row in enumerate(raw_rows, start=2):
         doc: dict[str, Any] = {}
         raw_id = None
@@ -153,17 +150,8 @@ async def import_csv(text: str, filename: str, tier: str) -> ImportResult:
             if first or last:
                 doc["name"] = f"{first} {last}".strip()
         if not doc.get("name"):
-            result.skipped += 1
+            parsed.skipped += 1
             continue
-        docs.append((_source_id(doc, raw_id, row_no), {**doc, "_row": row_no}))
-    result.rows = len(raw_rows)
-
-    used = {k for _, d in docs for k in d if k != "_row"}
-    result.new_properties = await properties.ensure(sorted(used), "import")
-
-    source_file = filename.rsplit("/", 1)[-1]
-    rows = [(source_id, d.pop("_row"), d) for source_id, d in docs]
-    result.inserted, result.updated = await people.upsert_imported(rows, source_file, tier, now)
-
-    result.ids = await people.find_ids({"source.file": source_file})
-    return result
+        parsed.rows.append((_source_id(doc, raw_id, row_no), row_no, doc))
+    parsed.used_keys = sorted({k for _, _, d in parsed.rows for k in d})
+    return parsed

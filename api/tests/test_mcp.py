@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from app import embedder, jobs
+from app import embedder
+from tests.conftest import import_people
 
 HEADERS = {"Accept": "application/json, text/event-stream",
            "Content-Type": "application/json", "MCP-Protocol-Version": "2025-06-18"}
@@ -45,9 +46,7 @@ async def call(client, key, tool, args):
 async def keys(writer, reader):
     embedder.set_embedder(embedder.FakeEmbedder(512))
     csv = "Name,Bio\nAda,payments infrastructure\nBo,climate investor\n"
-    await writer.post("/api/people/import", data={"tier": "member"},
-                      files={"file": ("p.csv", csv.encode(), "text/csv")})
-    await jobs.drain()
+    await import_people(writer, csv, "p.csv", "member")
     w = (await writer.post("/api/api-keys", json={"name": "w"})).json()["key"]
     r = (await reader.post("/api/api-keys", json={"name": "r"})).json()["key"]
     return w, r

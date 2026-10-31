@@ -13,6 +13,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 from app import people, properties
 from app.agents.common import catalog_prompt, run_agent
 from app.properties import Property
+from app.tools import Emit, silent
 from app.tools.search import FieldFilter, FieldQuery, SearchRequest, SemanticQuery, filter_to_mongo
 
 AGENT_NAME = "planner"
@@ -116,7 +117,8 @@ async def _executable(ctx: RunContext[PlannerDeps], plan: SearchPlan) -> SearchP
 
 
 async def plan_search(question: str, tier: str | None = None,
-                      filters: list[FieldFilter] = (), tuning: Tuning | None = None) -> PlanResult:
+                      filters: list[FieldFilter] = (), tuning: Tuning | None = None,
+                      emit: Emit = silent) -> PlanResult:
     """The executable search for a question: the agent's plan folded into a `SearchRequest`
     together with the caller's extra filters and tuning."""
     tuning = tuning or Tuning()
@@ -127,7 +129,7 @@ async def plan_search(question: str, tier: str | None = None,
     prompt = (f"Question: {question}\nTier: {tier or 'any'}\n\n"
               f"Properties:\n{catalog_prompt(catalog)}")
     plan: SearchPlan = await run_agent(agent, prompt, PlannerDeps(cat, lookups),
-                                       request_limit=REQUEST_LIMIT)
+                                       request_limit=REQUEST_LIMIT, on_event=emit)
     semantic = SemanticQuery(queries=plan.semantic, mode=tuning.mode,
                              threshold=tuning.threshold) if plan.semantic else None
     request = SearchRequest(tier=tier, filters=[*filters, *plan.filters], semantic=semantic,

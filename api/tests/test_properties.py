@@ -3,9 +3,10 @@
 import pytest
 from sqlalchemy import select
 
-from app import db, embedder, jobs, people, properties
+from app import db, embedder, people, properties
 from app.mongo import db as mongo_db
 from app.property_specs import SPECS, STAGES
+from tests.conftest import import_people
 
 CSV = """ID,Name,Bio,MRR,Stage,Brand New Column
 1,Ada,payments infrastructure for merchants,"$12,000",seed,alpha
@@ -19,11 +20,7 @@ def _fake_embedder():
 
 
 async def _import(client, text=CSV, name="p.csv"):
-    r = await client.post("/api/people/import", data={"tier": "member"},
-                          files={"file": (name, text.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
-    return r.json()
+    return await import_people(client, text, name, "member")
 
 
 async def _name_rows() -> dict[str, str]:

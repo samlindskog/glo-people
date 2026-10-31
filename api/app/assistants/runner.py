@@ -827,8 +827,9 @@ async def abort_all() -> None:
 
 async def run_to_completion(run_id: int, worker: str,
                             on_event: Any = None) -> dict:
-    """Execute one run in this process (the CLI): start a scheduler for it, follow its events,
-    return the run when it has finished or paused."""
+    """Execute one run in this process (the CLI): start a scheduler for it unless one runs
+    already, follow its events, return the run when it has finished or paused."""
+    own = _scheduler is None
     start_scheduler(worker)
     await start(run_id)
     try:
@@ -840,4 +841,5 @@ async def run_to_completion(run_id: int, worker: str,
                     break
         return await wait(run_id, timeout=86_400)
     finally:
-        await stop_scheduler()
+        if own:
+            await stop_scheduler()

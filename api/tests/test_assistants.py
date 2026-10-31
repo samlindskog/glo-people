@@ -15,7 +15,7 @@ from pydantic_ai import ModelMessage, ModelResponse
 from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from app import embedder, jobs
+from app import embedder
 from app.assistants import runner
 from app.assistants.enrich import assistant as enrich_workflow
 from app.assistants.enrich import budget as enrich_budget
@@ -32,6 +32,7 @@ from app.integrations.firecrawl import (
 from app.mongo import db
 from app.tools import company, site
 from app.urls import url_key
+from tests.conftest import import_people
 
 FIX = Path(__file__).parent / "fixtures" / "firecrawl"
 LINKEDIN_CREDITS = 5    # fullenrich/people/match
@@ -189,10 +190,7 @@ def _fakes(monkeypatch):
 
 @pytest.fixture
 async def people(writer):
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("p.csv", PEOPLE.encode(), "text/csv")})
-    assert r.status_code == 200, r.text
-    await jobs.drain()
+    await import_people(writer, PEOPLE, "p.csv", "member")
     return {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
 
 
@@ -205,9 +203,9 @@ async def run_for(client, ids, **options):
 
 
 async def test_workflow_listing_and_permissions(reader, writer):
-    specs = (await reader.get("/api/assistants")).json()
-    assert specs[0]["key"] == "enrich" and specs[0]["selector_field"] == "linkedin"
-    assert "refresh" in specs[0]["options_schema"]["properties"]
+    specs = {s["key"]: s for s in (await reader.get("/api/assistants")).json()}
+    assert specs["enrich"]["selector_field"] == "linkedin" and specs["enrich"]["scope"] == "people"
+    assert "refresh" in specs["enrich"]["options_schema"]["properties"]
     r = await reader.post("/api/assistants/enrich/runs", json={"person_ids": ["x"]})
     assert r.status_code == 403
     assert (await reader.get("/api/assistants/runs")).json() == {"items": [], "has_more": False}
