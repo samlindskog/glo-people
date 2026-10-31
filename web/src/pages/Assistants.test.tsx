@@ -1,10 +1,10 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
-import type { WorkflowRun, WorkflowRunItem } from '../types'
-import { RunDetail, RunsTable } from './Workflows'
+import type { AssistantRun, AssistantRunItem } from '../types'
+import { RunDetail, RunsTable } from './Assistants'
 
-const RUN: WorkflowRun = {
+const RUN: AssistantRun = {
   id: 7,
   workflow: 'enrich',
   status: 'running',
@@ -22,7 +22,7 @@ const RUN: WorkflowRun = {
   error: null,
 }
 
-const ITEMS: WorkflowRunItem[] = [
+const ITEMS: AssistantRunItem[] = [
   {
     id: 1,
     run_id: 7,
@@ -30,7 +30,11 @@ const ITEMS: WorkflowRunItem[] = [
     person_id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
     status: 'done',
     result: {
-      written: { github: 'https://github.com/adaok', company_description: 'PayRail builds payments rails.' },
+      text: 'LinkedIn profile matched; wrote github, company_description.',
+      changes: [
+        { key: 'github', action: 'set', value: 'https://github.com/adaok', previous: null, flag: null },
+        { key: 'company_description', action: 'set', value: 'PayRail builds payments rails.', previous: null, flag: null },
+      ],
       skipped: [{ step: 'sites', reason: 'no personal website known' }],
     },
     error: null,

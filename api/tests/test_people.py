@@ -29,6 +29,8 @@ async def test_import_registry_and_coercion(writer):
     res = await _import(writer, MEMBERS, "members.csv", "member")
     assert (res["rows"], res["inserted"], res["skipped"]) == (4, 3, 1)
     assert res["new_properties"] == ["brand_new_column"]
+    jobs_seen = (await writer.get("/api/jobs")).json()
+    assert any(j["id"] == res["job_id"] and j["status"] == "done" for j in jobs_seen)
 
     fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
     assert fl["sectors"]["type"] == "list" and fl["mrr"]["type"] == "number"

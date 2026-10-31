@@ -1,4 +1,4 @@
-"""Options of the enrichment workflow."""
+"""Options of the enrichment assistant."""
 
 from pydantic import BaseModel, Field
 

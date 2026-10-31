@@ -3,7 +3,7 @@ import { Link } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { ErrorNote, PageHeader } from '../components/Layout'
-import type { Property, WorkflowRun } from '../types'
+import type { AssistantRun, Property } from '../types'
 
 const SHOWN_VALUES = 6
 
@@ -14,13 +14,13 @@ export default function PropertiesPage() {
   const normalise = useMutation({
     mutationFn: (key: string) => api.startRun('normalize', { all_with_field: key }),
   })
-  const started: WorkflowRun | undefined = normalise.data
+  const started: AssistantRun | undefined = normalise.data
 
   return (
     <div>
       <PageHeader title="Properties">
         {can('people:write') && (
-          <button className="btn-secondary" disabled={normalise.isPending} onClick={() => normalise.mutate('name')} title="Run the normalise workflow for everyone">
+          <button className="btn-secondary" disabled={normalise.isPending} onClick={() => normalise.mutate('name')} title="Run the normalise assistant for everyone">
             Normalise all
           </button>
         )}
@@ -34,8 +34,8 @@ export default function PropertiesPage() {
       {started && (
         <p className="mb-3 rounded-md bg-brand-50 px-3 py-2 text-sm text-brand-800" data-testid="normalise-started">
           Normalise run #{started.id} started for {started.total} {started.total === 1 ? 'person' : 'people'} ·{' '}
-          <Link to="/workflows" className="underline">
-            follow it on Workflows
+          <Link to="/assistants" className="underline">
+            follow it on Assistants
           </Link>
         </p>
       )}

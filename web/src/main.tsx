@@ -8,6 +8,7 @@ import './index.css'
 import AccountsPage from './pages/Accounts'
 import ActivityPage from './pages/Activity'
 import ApiKeysPage from './pages/ApiKeys'
+import AssistantsPage from './pages/Assistants'
 import ImportPage from './pages/Import'
 import LoginPage from './pages/Login'
 import PeoplePage from './pages/People'
@@ -15,7 +16,6 @@ import PersonPage from './pages/Person'
 import PersonNewPage from './pages/PersonNew'
 import PropertiesPage from './pages/Properties'
 import SearchesPage from './pages/Searches'
-import WorkflowsPage from './pages/Workflows'
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
@@ -41,7 +41,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/people/import" element={<RequireAuth permission="people:write"><ImportPage /></RequireAuth>} />
               <Route path="/people/:id" element={<RequireAuth permission="people:read"><PersonPage /></RequireAuth>} />
               <Route path="/properties" element={<RequireAuth permission="people:read"><PropertiesPage /></RequireAuth>} />
-              <Route path="/workflows" element={<RequireAuth permission="people:read"><WorkflowsPage /></RequireAuth>} />
+              <Route path="/assistants" element={<RequireAuth permission="people:read"><AssistantsPage /></RequireAuth>} />
               <Route path="/searches" element={<RequireAuth permission="searches:read_own"><SearchesPage /></RequireAuth>} />
               <Route path="/activity" element={<RequireAuth permission="activity:read"><ActivityPage /></RequireAuth>} />
               <Route path="/accounts" element={<RequireAuth permission="accounts:manage"><AccountsPage /></RequireAuth>} />

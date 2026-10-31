@@ -1,21 +1,26 @@
-"""Agent: turn a passage about a person into writes against their properties.
-
-It sees the passage, the person's current values and the whole property catalog, and proposes
-one write per property (a value in the form the property's type expects, or the text as written
-when unclear — the normaliser cleans that up), new properties only for recurring kinds of fact,
-and says what it confirmed or ignored. `check` validates a proposal against the catalog and is
-shared with the apply path, so a program-edited proposal meets the same bar."""
+"""Tool (level 2): store what a passage says about a person. The storage agent (defined here)
+reads the passage, the person's current values and the catalog with its descriptions, and
+proposes one write per property: typed values in the type's form, list items appended, restated
+values confirmed, contradictions marked, new properties only for recurring kinds of fact. The
+tool resolves new properties (redirect near-duplicates, create up to `max_new`, send the rest to
+notes), writes everything in one `people.update`, then runs `tools.normalize` so flagged values
+get their typed form. One shot; the result carries every change."""
 
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import fields
+from app import embedder, fields, people, properties
 from app.agents.common import catalog_prompt, run_agent
+from app.auth import Principal
+from app.history import Change, Source
 from app.properties import Property
+from app.tools import ToolResult
+from app.tools import normalize as normalize_tool
+from app.tools.normalize import NormalizeResult
 
 AGENT_NAME = "storage"
 REQUEST_LIMIT = 4
@@ -92,7 +97,8 @@ Rules:
 - A new property only for a kind of fact that other people could also have and the catalog
   lacks (give a clear key, label and a one-sentence description). One-off remarks, context and
   anything that fits nowhere go to `notes`. Prefer an existing property over a new one.
-- `ignored`: greetings, requests, and anything not about this person.
+- `ignored`: greetings, requests, and anything not about this person — copy the passage words
+  themselves, do not explain.
 - `evidence`: copy the passage words the write rests on, verbatim. Never invent facts.""",
 )
 
@@ -174,7 +180,7 @@ def render_person(person: dict) -> str:
     return "\n".join(lines) or "(no values yet)"
 
 
-async def propose(passage: str, person: dict, catalog: list[Property]) -> Proposal:
+async def _propose(passage: str, person: dict, catalog: list[Property]) -> Proposal:
     passage = passage.strip()[:MAX_PASSAGE_CHARS]
     prompt = (f"Person: {person.get('name') or 'unnamed'}\n\n"
               f"Current values:\n{render_person(person)}\n\n"
@@ -182,3 +188,111 @@ async def propose(passage: str, person: dict, catalog: list[Property]) -> Propos
               f"Properties:\n{catalog_prompt(catalog)}")
     deps = StorageDeps({p.key: p for p in catalog}, passage)
     return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
+
+
+# --- the tool -----------------------------------------------------------------------------------------
+
+NOTES = "notes"
+
+
+class StoreOptions(BaseModel):
+    """Caps on new properties."""
+
+    max_new: int = Field(2, ge=0, le=5, description="New properties one passage may create; "
+                                                    "the rest of the new facts go to notes")
+    near_duplicate: float = Field(0.8, ge=0, le=1,
+                                  description="A proposed new property whose name is at least "
+                                              "this similar to an existing one is redirected to it")
+
+
+class StoreResult(ToolResult):
+    confirmed: list[str] = Field(default_factory=list,
+                                 description="Properties whose current value the passage restated")
+    ignored: list[str] = Field(default_factory=list,
+                               description="Passage parts not about the person or not storable")
+    conflicts: list[str] = Field(default_factory=list,
+                                 description="Properties whose new value contradicts the old one")
+    created_properties: list[str] = Field(default_factory=list)
+    redirected: dict[str, str] = Field(default_factory=dict,
+                                       description="Proposed property → existing one used instead")
+    to_notes: list[str] = Field(default_factory=list,
+                                description="Facts filed under notes because max_new was reached")
+    normalization: NormalizeResult | None = Field(None, description="The clean-up pass")
+
+
+def _merge_list(current: Any, items: list[str]) -> list[str]:
+    base = list(current) if isinstance(current, list) else ([current] if current else [])
+    seen = {fields.fold(str(v)) for v in base}
+    for item in items:
+        if fields.fold(item) not in seen:
+            base.append(item)
+            seen.add(fields.fold(item))
+    return base
+
+
+def _as_text(value: Value) -> str:
+    return "; ".join(value) if isinstance(value, list) else value
+
+
+async def store(person_id: str, passage: str, opts: StoreOptions, principal: Principal,
+                source: Source) -> StoreResult | None:
+    """File a passage into the person's properties. None if the person does not exist."""
+    person = await people.get(person_id)
+    if person is None:
+        return None
+    catalog = await properties.catalog(await people.coverage())
+    cat = {p.key: p for p in catalog}
+    proposal = await _propose(passage, person, catalog)
+
+    result = StoreResult(person_id=person_id, confirmed=list(proposal.confirmed),
+                         ignored=list(proposal.ignored),
+                         conflicts=[w.key for w in proposal.writes if w.conflict])
+    values: dict[str, Any] = {}
+    appended: set[str] = set()
+
+    def put(key: str, value: Value, append: bool) -> None:
+        prop = cat.get(key)
+        if prop is not None and prop.type in LIST_TYPES:
+            incoming = value if isinstance(value, list) else [value]
+            if append or key in values:
+                values[key] = _merge_list(values.get(key, person.get(key)), incoming)
+                appended.add(key)
+            else:
+                values[key] = incoming
+        else:
+            text = _as_text(value)
+            values[key] = f"{values[key]}\n{text}" if key in values else text
+
+    for w in proposal.writes:
+        put(w.key, w.value, w.action == "append")
+
+    if proposal.new_properties:
+        vectors = await embedder.embed_texts([f"{n.label}: {n.description}"
+                                              for n in proposal.new_properties])
+        nearest = await properties.nearest(vectors, k=1)
+        for n, near in zip(proposal.new_properties, nearest, strict=True):
+            best = near[0] if near else None
+            if best is not None and best[1] >= opts.near_duplicate:
+                result.redirected[n.key] = best[0]
+                put(best[0], n.value, append=True)
+            elif len(result.created_properties) < opts.max_new:
+                await properties.ensure([n.key], "agent", descriptions={n.key: n.description})
+                cat[n.key] = await properties.get(n.key)  # type: ignore[assignment]
+                result.created_properties.append(n.key)
+                result.changes.append(Change(key=n.key, action="property_created",
+                                             value=n.description))
+                put(n.key, n.value, append=False)
+            else:
+                result.to_notes.append(n.label)
+                put(NOTES, f"{n.label}: {_as_text(n.value)}", append=False)
+
+    if values:
+        write = await people.update(principal, person_id, values, source=source)
+        if write is not None:
+            for c in write.changes:
+                if c.action == "set" and c.key in appended:
+                    c = c.model_copy(update={"action": "append"})
+                result.changes.append(c)
+    result.normalization = await normalize_tool.normalize(
+        person_id, principal, Source("agent", "normalizer", source.ref or "store"))
+    return result

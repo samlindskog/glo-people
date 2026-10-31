@@ -1,4 +1,6 @@
-"""Agent: read a personal website and pull out GitHub / related links and a one-liner."""
+"""Tool (level 2): read a personal website and report what it says about its owner: whether it
+is their own site, GitHub and related links, a one-liner. One model call on a fetched page; the
+agent may follow one more page of the same site within the caller's budget."""
 
 from typing import Literal
 
@@ -55,8 +57,8 @@ async def fetch_page(ctx: RunContext[AgentDeps], url: str) -> str:
                                 allowed=lambda u: same_site(u, home))
 
 
-async def read(deps: AgentDeps, person_name: str, url: str, markdown: str,
-               links: list[str], follow_cap: int) -> SiteFindings:
+async def read_site(deps: AgentDeps, person_name: str, url: str, markdown: str,
+                    links: list[str], follow_cap: int) -> SiteFindings:
     deps.notes["site_home"] = url
     deps.notes["site_follow"] = 0
     deps.notes["site_follow_cap"] = follow_cap

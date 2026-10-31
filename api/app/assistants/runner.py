@@ -1,9 +1,11 @@
-"""Workflow runs: Postgres-backed state, in-process execution (the API runs one worker).
+"""Assistant runs: Postgres-backed state, in-process execution (the API runs one worker).
 
-A run holds one item per person. Items run concurrently up to `workflow_concurrency`, each in its
-own Logfire span; a run-level credit cap stops the run early and marks the rest `skipped`. The
-runner is generic: a workflow builds its own dependencies (`spec.make_deps`), reports spend through
-`deps.budget.credits`, and raises `StopRun` when the whole run must stop.
+A run executes one per-person assistant over many people, one item each. Items run concurrently
+up to `workflow_concurrency`, each in its own Logfire span; a run-level credit cap stops the run
+early and marks the rest `skipped`. The runner is generic: an assistant builds its own
+dependencies (`spec.make_deps`), reports spend through `deps.budget.credits`, returns text and
+changes per person, and raises `StopRun` when the whole run must stop. The tables keep their
+historical names (`workflow_runs`, `workflow_run_items`; the `workflow` column is the key).
 """
 
 import asyncio
@@ -17,10 +19,10 @@ from sqlalchemy import func, select, update
 
 from app import activity, db
 from app import people as people_svc
+from app.assistants.base import REGISTRY, AssistantSpec, StopRun
+from app.assistants.context import AssistantDeps
 from app.auth import Principal
 from app.config import get_settings
-from app.workflows.base import REGISTRY, StopRun, WorkflowSpec
-from app.workflows.context import WorkflowDeps
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ def _item_public(row: Any) -> dict:
 
 # --- creating and reading runs --------------------------------------------------------------------
 
-async def create_run(spec: WorkflowSpec, principal: Principal, person_ids: list[str],
+async def create_run(spec: AssistantSpec, principal: Principal, person_ids: list[str],
                      params: dict[str, Any]) -> dict:
     async with db.engine().begin() as conn:
         run_id = (await conn.execute(db.workflow_runs.insert().values(
@@ -60,8 +62,8 @@ async def create_run(spec: WorkflowSpec, principal: Principal, person_ids: list[
             await conn.execute(db.workflow_run_items.insert(), [
                 {"run_id": run_id, "workflow": spec.key, "person_id": pid, "status": "queued"}
                 for pid in person_ids])
-    await activity.record("workflow.run", principal, str(run_id),
-                          {"workflow": spec.key, "people": len(person_ids), **params})
+    await activity.record("assistant.run", principal, str(run_id),
+                          {"assistant": spec.key, "people": len(person_ids), **params})
     return await get_run(run_id)
 
 
@@ -163,7 +165,7 @@ async def _run(run_id: int, principal: Principal) -> None:
     run = await get_run(run_id)
     spec = REGISTRY.get(run["workflow"]) if run else None
     if spec is None:
-        await _finish(run_id, "failed", "unknown workflow")
+        await _finish(run_id, "failed", "unknown assistant")
         return
     options = spec.options_model.model_validate(run["params"].get("options") or {})
     run_cap = int(getattr(options, "max_credits", 0) or 0)
@@ -210,7 +212,7 @@ async def _run(run_id: int, principal: Principal) -> None:
             async with cond:
                 credits_used += max(credits, 0)
                 if credits == -1:                 # the workflow asked to stop the run
-                    stopped = "stopped by the workflow"
+                    stopped = "stopped by the assistant"
                 cond.notify_all()
 
     await asyncio.gather(*(one(it) for it in items))
@@ -230,7 +232,7 @@ async def _mark(item_id: int, status: str, result: dict | None = None, error: st
             trace_id=trace_id, finished_at=_now()))
 
 
-async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
+async def _run_item(spec: AssistantSpec, options: Any, run_id: int, item: dict,
                     principal: Principal) -> int:
     """Run one person; returns the credits spent, or -1 when the workflow raised StopRun."""
     async with db.engine().begin() as conn:
@@ -241,7 +243,7 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
     if res.rowcount == 0:        # cancel() skipped it between our check and this transition
         return 0
     trace_id = None
-    deps: WorkflowDeps | None = None
+    deps: AssistantDeps | None = None
 
     def credits() -> int:
         return deps.budget.credits if deps is not None else 0
@@ -250,12 +252,12 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
         """What a failed item still has to show: writes and skips so far, and the spend."""
         out: dict[str, Any] = {"credits": credits()}
         if deps is not None:
-            out.update(written=deps.written, skipped=deps.skipped,
+            out.update(changes=[c.model_dump() for c in deps.changes], skipped=deps.skipped,
                        calls=getattr(deps.budget, "calls", None))
         return out
 
     try:
-        with logfire.span("workflow {workflow} item {item_id}", workflow=spec.key,
+        with logfire.span("assistant {assistant} item {item_id}", assistant=spec.key,
                           run_id=run_id, item_id=item["id"],
                           person_id=item["person_id"]) as span:
             ctx = span.get_span_context()
@@ -277,7 +279,7 @@ async def _run_item(spec: WorkflowSpec, options: Any, run_id: int, item: dict,
                     trace_id=trace_id)
         return -1
     except Exception as e:
-        log.exception("workflow %s item %s failed", spec.key, item["id"])
+        log.exception("assistant %s item %s failed", spec.key, item["id"])
         await _mark(item["id"], "failed", result=partial(), error=f"{type(e).__name__}: {e}"[:500],
                     credits=credits(), trace_id=trace_id)
         return credits()

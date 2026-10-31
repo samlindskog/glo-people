@@ -1,27 +1,38 @@
-"""Agent: turn a question about people into a search plan over the property catalog.
-
-The plan is the agent-authored subset of `search.SearchRequest`: a passage per embeddable
-property to compare by meaning, and literal filters on typed or text properties. The output
-validator makes every plan executable (known properties, operators allowed for the type,
-canonical enum values) by sending problems back to the model."""
+"""Tool (level 2): plan a search from a question. The planner agent reads the property catalog and
+turns a question into literal filters on typed properties and passages for embeddable ones; the
+output validator keeps every plan executable (known properties, operators allowed for the type,
+canonical enum values). The result is an ordinary `SearchRequest` a program runs with
+`tools.search.run_search` — asking for N people is a limit, not a filter."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import properties
+from app import people, properties
 from app.agents.common import catalog_prompt, run_agent
 from app.properties import Property
-from app.search.engine import FieldFilter, FieldQuery, filter_to_mongo
+from app.tools.search import FieldFilter, FieldQuery, SearchRequest, SemanticQuery, filter_to_mongo
 
 AGENT_NAME = "planner"
 REQUEST_LIMIT = 4
 OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
+_sem_defaults = SemanticQuery.model_fields
+
+
+class Tuning(BaseModel):
+    """How strictly a planned search is run; the planner decides what to search."""
+
+    k: int = Field(12, ge=1, le=50, description="People to return")
+    mode: Literal["avg", "max"] = Field(_sem_defaults["mode"].default,
+                                        description="How a person's property scores combine")
+    threshold: float = Field(_sem_defaults["threshold"].default, ge=-1, le=1,
+                             description="Minimum aggregate similarity for a semantic hit")
 
 
 class SearchPlan(BaseModel):
-    """How to find the people a question is about."""
+    """The agent's output: the agent-authored part of a SearchRequest."""
 
     semantic: list[FieldQuery] = Field(
         default_factory=list, max_length=6,
@@ -33,6 +44,11 @@ class SearchPlan(BaseModel):
         description="Literal conditions on typed or text properties (AND). Use canonical enum "
                     "values, numbers for number properties, ISO dates for dates.")
     rationale: str = Field("", max_length=300, description="One sentence on the choice")
+
+
+class PlanResult(BaseModel):
+    request: SearchRequest = Field(description="Executable with tools.search.run_search")
+    rationale: str = ""
 
 
 @dataclass
@@ -99,10 +115,21 @@ async def _executable(ctx: RunContext[PlannerDeps], plan: SearchPlan) -> SearchP
     return plan
 
 
-async def plan(question: str, tier: str | None, catalog: list[Property]) -> SearchPlan:
+async def plan_search(question: str, tier: str | None = None,
+                      filters: list[FieldFilter] = (), tuning: Tuning | None = None) -> PlanResult:
+    """The executable search for a question: the agent's plan folded into a `SearchRequest`
+    together with the caller's extra filters and tuning."""
+    tuning = tuning or Tuning()
+    catalog = await properties.catalog(await people.coverage())
     cat = {p.key: p for p in catalog}
     lookups = {k: await properties.enum_lookup(k) for k, p in cat.items()
                if p.type in ("enum", "enum_list")}
     prompt = (f"Question: {question}\nTier: {tier or 'any'}\n\n"
               f"Properties:\n{catalog_prompt(catalog)}")
-    return await run_agent(agent, prompt, PlannerDeps(cat, lookups), request_limit=REQUEST_LIMIT)
+    plan: SearchPlan = await run_agent(agent, prompt, PlannerDeps(cat, lookups),
+                                       request_limit=REQUEST_LIMIT)
+    semantic = SemanticQuery(queries=plan.semantic, mode=tuning.mode,
+                             threshold=tuning.threshold) if plan.semantic else None
+    request = SearchRequest(tier=tier, filters=[*filters, *plan.filters], semantic=semantic,
+                            limit=tuning.k)
+    return PlanResult(request=request, rationale=plan.rationale)

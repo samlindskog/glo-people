@@ -181,13 +181,57 @@ export interface SearchRecord {
   created_at: string
 }
 
-// --- agent operations -------------------------------------------------------------------------
+// --- levels: what a writer, tool or assistant did to a document ------------------------------
 
-export interface AskOptions {
+export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created'
+
+/** One thing that happened to a person's document (api/ARCHITECTURE.md). */
+export interface Change {
+  key: string
+  action: ChangeAction
+  value: unknown
+  previous: unknown
+  flag: NormFlag | null
+}
+
+// --- tools (level 2): structured, one shot ----------------------------------------------------
+
+export interface Tuning {
   k: number
   mode: 'avg' | 'max'
   threshold: number
 }
+
+export interface PlanResult {
+  request: SearchRequest
+  rationale: string
+}
+
+export interface StoreOptions {
+  max_new: number
+  near_duplicate: number
+}
+
+export interface NormalizeResult {
+  person_id: string | null
+  changes: Change[]
+  agent_called: boolean
+  unmapped: string[]
+}
+
+export interface StoreResult {
+  person_id: string | null
+  changes: Change[]
+  confirmed: string[]
+  ignored: string[]
+  conflicts: string[]
+  created_properties: string[]
+  redirected: Record<string, string>
+  to_notes: string[]
+  normalization: NormalizeResult | null
+}
+
+// --- assistants (level 3): text for a human plus the changes ---------------------------------
 
 export interface Citation {
   person_id: string
@@ -195,80 +239,16 @@ export interface Citation {
   value: string
 }
 
-export interface SearchPlan {
-  semantic: FieldQuery[]
-  filters: FieldFilter[]
-  rationale: string
-}
-
 export interface AskResult {
-  answer: string
+  text: string
+  changes: Change[]
   citations: Citation[]
-  plan: SearchPlan
-  /** The search that was executed; re-runnable as an ordinary search. */
+  /** The search that was run; re-runnable as an ordinary search. */
   request: SearchRequest
+  rationale: string
   total: number
   results: SearchHit[]
   search_id: number | null
-}
-
-export interface StoreOptions {
-  max_new: number
-  near_duplicate: number
-  dry_run: boolean
-}
-
-/** The storage agent's proposal: writes against existing properties, new properties, and what it confirmed or ignored. */
-export interface StoreWrite {
-  key: string
-  value: string | string[]
-  action: 'set' | 'append'
-  conflict: boolean
-  evidence: string
-}
-
-export interface StoreNewProperty {
-  key: string
-  label: string
-  description: string
-  value: string | string[]
-  evidence: string
-}
-
-export interface StoreProposal {
-  writes: StoreWrite[]
-  new_properties: StoreNewProperty[]
-  confirmed: string[]
-  ignored: string[]
-}
-
-export type StoreAction = 'set' | 'append' | 'confirmed' | 'created' | 'redirected' | 'to_notes' | 'ignored'
-
-export interface StoredItem {
-  key: string | null
-  action: StoreAction
-  value: unknown
-  conflict: boolean
-  evidence: string | null
-  reason: string | null
-}
-
-export interface StoreReport {
-  proposal: StoreProposal
-  applied: boolean
-  items: StoredItem[]
-  written: Record<string, unknown>
-  created: string[]
-  normalized: NormalizeReport | null
-  person: Person | null
-}
-
-export interface NormalizeReport {
-  parsed: string[]
-  mapped: Record<string, unknown>
-  non_normalizable: string[]
-  unmapped: string[]
-  agent_called: boolean
 }
 
 export interface ActivityItem {
@@ -303,7 +283,7 @@ export interface ApiKey {
   key?: string
 }
 
-export interface WorkflowSpec {
+export interface AssistantSpec {
   key: string
   label: string
   description: string
@@ -314,7 +294,7 @@ export interface WorkflowSpec {
 export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 export type RunItemStatus = 'queued' | 'running' | 'done' | 'failed' | 'skipped'
 
-export interface WorkflowRun {
+export interface AssistantRun {
   id: number
   workflow: string
   status: RunStatus
@@ -332,14 +312,16 @@ export interface WorkflowRun {
   error: string | null
 }
 
-export interface WorkflowRunItem {
+export interface AssistantRunItem {
   id: number
   run_id: number
   workflow: string
   person_id: string
   status: RunItemStatus
+  /** The assistant's result for this person: text for a human, the changes, and its own details. */
   result: {
-    written?: Record<string, unknown>
+    text?: string
+    changes?: Change[]
     skipped?: { step: string; reason: string }[]
     not_found?: string[]
     linkedin?: string
@@ -354,6 +336,6 @@ export interface WorkflowRunItem {
   finished_at: string | null
 }
 
-export interface WorkflowRunDetail extends WorkflowRun {
-  items: WorkflowRunItem[]
+export interface AssistantRunDetail extends AssistantRun {
+  items: AssistantRunItem[]
 }

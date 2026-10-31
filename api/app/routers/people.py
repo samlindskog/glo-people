@@ -8,14 +8,13 @@ from sqlalchemy import select
 
 from app import activity, db, embeddings, importer, jobs
 from app import people as people_svc
-from app.agents.storage import Proposal
 from app.auth import Principal, require
 from app.history import Source
-from app.normalize import person as normalize_person
-from app.normalize.person import NormalizeReport
 from app.routers.search import agent_error
-from app.search import store
-from app.search.store import StoreOptions, StoreReport
+from app.tools import normalize as normalize_tool
+from app.tools import store as store_tool
+from app.tools.normalize import NormalizeResult
+from app.tools.store import StoreOptions, StoreResult
 
 router = APIRouter(prefix="/api", tags=["people"])
 
@@ -60,7 +59,7 @@ async def get_person(person_id: str, _: Reader) -> dict:
 @router.post("/people", status_code=201)
 async def create_person(body: PersonCreate, principal: Writer) -> dict:
     try:
-        return await people_svc.create(principal, body.tier, body.fields)
+        return (await people_svc.create(principal, body.tier, body.fields)).person
     except people_svc.PersonError as e:
         raise _bad_request(e) from e
 
@@ -68,12 +67,12 @@ async def create_person(body: PersonCreate, principal: Writer) -> dict:
 @router.patch("/people/{person_id}")
 async def patch_person(person_id: str, body: PersonPatch, principal: Writer) -> dict:
     try:
-        person = await people_svc.update(principal, person_id, body.fields, body.tier)
+        res = await people_svc.update(principal, person_id, body.fields, body.tier)
     except people_svc.PersonError as e:
         raise _bad_request(e) from e
-    if not person:
+    if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    return person
+    return res.person
 
 
 @router.delete("/people/{person_id}", status_code=204)
@@ -133,11 +132,6 @@ class StoreBody(BaseModel):
     options: StoreOptions = Field(default_factory=StoreOptions)
 
 
-class ApplyBody(BaseModel):
-    proposal: Proposal
-    options: StoreOptions = Field(default_factory=StoreOptions)
-
-
 def _source(principal: Principal, agent: str) -> Source:
     """The passage came from this person (UI or API key); the agent only restructured it."""
     base = Source.for_rest(principal)
@@ -146,50 +140,30 @@ def _source(principal: Principal, agent: str) -> Source:
 
 
 async def _store(person_id: str, passage: str, options: StoreOptions,
-                 principal: Principal) -> StoreReport:
+                 principal: Principal) -> StoreResult:
     try:
-        report = await store.store(person_id, passage, options, principal,
-                                   _source(principal, "store"))
+        result = await store_tool.store(person_id, passage, options, principal,
+                                        _source(principal, "store"))
     except (ValueError, AgentRunError) as e:
         raise _bad_request(e) from e
-    if report is None:
+    if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    await _record_store(principal, person_id, report, chars=len(passage))
-    return report
-
-
-async def _record_store(principal: Principal, person_id: str, report: StoreReport, **meta) -> None:
-    if report.applied:
-        await activity.record("person.store", principal, person_id, {
-            "items": [{"key": i.key, "action": i.action} for i in report.items],
-            "created": report.created, **meta})
+    await activity.record("person.store", principal, person_id, {
+        "changes": [{"key": c.key, "action": c.action} for c in result.changes],
+        "created": result.created_properties, "chars": len(passage)})
+    return result
 
 
 @router.post("/people/{person_id}/store")
-async def store_passage(person_id: str, body: StoreBody, principal: Writer) -> StoreReport:
-    """Store what a passage says about the person. With options.dry_run the agent's proposal
-    comes back with what would happen and nothing is written."""
+async def store_passage(person_id: str, body: StoreBody, principal: Writer) -> StoreResult:
+    """Tool: store what a passage says about the person; returns every change."""
     return await _store(person_id, body.passage, body.options, principal)
-
-
-@router.post("/people/{person_id}/store/apply")
-async def store_apply(person_id: str, body: ApplyBody, principal: Writer) -> StoreReport:
-    """Apply a proposal (from a dry run, possibly edited); it is checked like the agent's."""
-    try:
-        report = await store.apply(person_id, body.proposal, body.options, principal,
-                                   _source(principal, "store"), commit=not body.options.dry_run)
-    except (ValueError, AgentRunError) as e:
-        raise _bad_request(e) from e
-    if report is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    await _record_store(principal, person_id, report, applied_proposal=True)
-    return report
 
 
 @router.post("/people/{person_id}/store/file")
 async def store_file(person_id: str, file: Annotated[UploadFile, File()],
-                     principal: Writer) -> StoreReport:
-    """A .txt or .md file as the passage, stored with the default options."""
+                     principal: Writer) -> StoreResult:
+    """Tool: a .txt or .md file as the passage, stored with the default options."""
     data = await file.read(MAX_PASSAGE + 1)
     if len(data) > MAX_PASSAGE:
         raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "file larger than 20 kB")
@@ -203,18 +177,21 @@ async def store_file(person_id: str, file: Annotated[UploadFile, File()],
 
 
 @router.post("/people/{person_id}/normalize")
-async def normalize_one(person_id: str, principal: Writer) -> NormalizeReport:
+async def normalize_one(person_id: str, principal: Writer) -> NormalizeResult:
+    """Tool: re-parse the person's typed values; an agent decides what the parser cannot."""
     try:
-        report = await normalize_person.run(
+        result = await normalize_tool.normalize(
             person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"))
     except (ValueError, AgentRunError) as e:
         raise _bad_request(e) from e
-    if report is None:
+    if result is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    return report
+    return result
+
 
 @router.get("/jobs")
 async def list_jobs(_: Reader) -> list[dict]:
+    """Recent background jobs (the embedding pass after an import)."""
     return jobs.recent()
 
 

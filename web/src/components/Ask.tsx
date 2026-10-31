@@ -80,7 +80,7 @@ export function AskAnswer({ result, onRunAsSearch }: { result: AskResult; onRunA
   return (
     <div className="space-y-3 border-t border-slate-100 pt-3" data-testid="ask-result">
       <p className="whitespace-pre-wrap text-sm" data-testid="ask-answer">
-        {result.answer}
+        {result.text}
       </p>
       {grouped.size > 0 && (
         <ul className="space-y-1 text-xs text-slate-600" aria-label="Citations">
@@ -102,7 +102,7 @@ export function AskAnswer({ result, onRunAsSearch }: { result: AskResult; onRunA
         <span data-testid="ask-plan">
           Searched: {describeSearch(result.request)} · {result.total.toLocaleString()} {result.total === 1 ? 'person' : 'people'}
         </span>
-        {result.plan.rationale && <span title="Planner's rationale">— {result.plan.rationale}</span>}
+        {result.rationale && <span title="Planner's rationale">— {result.rationale}</span>}
         <button type="button" className="btn-secondary ml-auto" onClick={onRunAsSearch}>
           Run as search
         </button>

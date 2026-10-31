@@ -4,25 +4,25 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from app import auth, db, embeddings, jobs, mongo, observability, properties, workflows
+from app import assistants, auth, db, embeddings, jobs, mongo, observability, properties
 from app import people as people_svc
+from app.assistants import runner
 from app.config import get_settings
 from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
 from app.routers import accounts
+from app.routers import assistants as assistants_router
 from app.routers import auth as auth_router
 from app.routers import people as people_router
 from app.routers import properties as properties_router
 from app.routers import search as search_router
-from app.routers import workflows as workflows_router
-from app.workflows import runner
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 observability.setup()
 
 mcp_app = build_mcp_app()
-workflows.load_all()
+assistants.load_all()
 # Composition root: what reacts to a person write (people.py itself knows no consumer).
 people_svc.on_write(embeddings.sync_person)
 
@@ -68,7 +68,7 @@ api.include_router(people_router.router)
 api.include_router(properties_router.router)
 api.include_router(search_router.router)
 api.include_router(accounts.router)
-api.include_router(workflows_router.router)
+api.include_router(assistants_router.router)
 observability.instrument_app(api)
 
 

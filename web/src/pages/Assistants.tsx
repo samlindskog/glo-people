@@ -5,26 +5,26 @@ import { api } from '../api'
 import { useAuth } from '../auth'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import { formatDate, formatValue } from '../lib'
-import type { Person, RunItemStatus, RunStatus, WorkflowRun, WorkflowRunItem, WorkflowSpec } from '../types'
+import type { AssistantRun, AssistantRunItem, AssistantSpec, Change, Person, RunItemStatus, RunStatus } from '../types'
 import { Pager } from './Searches'
 
 const PAGE = 25
 const ACTIVE: RunStatus[] = ['queued', 'running']
 
-export default function WorkflowsPage() {
+export default function AssistantsPage() {
   const { can } = useAuth()
   const qc = useQueryClient()
   const [offset, setOffset] = useState(0)
   const [selected, setSelected] = useState<number | null>(null)
 
-  const specs = useQuery({ queryKey: ['workflows'], queryFn: api.workflows })
+  const specs = useQuery({ queryKey: ['assistants'], queryFn: api.assistants })
   const runs = useQuery({
-    queryKey: ['workflow-runs', offset],
+    queryKey: ['assistant-runs', offset],
     queryFn: () => api.runs({ limit: PAGE, offset }),
     refetchInterval: (q) => (q.state.data?.items.some((r) => ACTIVE.includes(r.status)) ? 1500 : false),
   })
   const detail = useQuery({
-    queryKey: ['workflow-run', selected],
+    queryKey: ['assistant-run', selected],
     queryFn: () => api.run(selected!),
     enabled: selected !== null,
     refetchInterval: (q) => (q.state.data && ACTIVE.includes(q.state.data.status) ? 1500 : false),
@@ -32,25 +32,25 @@ export default function WorkflowsPage() {
   const cancel = useMutation({
     mutationFn: (id: number) => api.cancelRun(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['workflow-runs'] })
-      qc.invalidateQueries({ queryKey: ['workflow-run'] })
+      qc.invalidateQueries({ queryKey: ['assistant-runs'] })
+      qc.invalidateQueries({ queryKey: ['assistant-run'] })
     },
   })
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Workflows" />
+      <PageHeader title="Assistants" />
       <ErrorNote error={specs.error ?? runs.error ?? cancel.error} />
       <div className="grid gap-4 lg:grid-cols-2">
         {(specs.data ?? []).map((spec) => (
-          <WorkflowCard
+          <AssistantCard
             key={spec.key}
             spec={spec}
             canRun={can('people:write')}
             onStarted={(run) => {
               setOffset(0)
               setSelected(run.id)
-              qc.invalidateQueries({ queryKey: ['workflow-runs'] })
+              qc.invalidateQueries({ queryKey: ['assistant-runs'] })
             }}
           />
         ))}
@@ -78,7 +78,7 @@ export default function WorkflowsPage() {
   )
 }
 
-function WorkflowCard({ spec, canRun, onStarted }: { spec: WorkflowSpec; canRun: boolean; onStarted: (run: WorkflowRun) => void }) {
+function AssistantCard({ spec, canRun, onStarted }: { spec: AssistantSpec; canRun: boolean; onStarted: (run: AssistantRun) => void }) {
   const [target, setTarget] = useState<'one' | 'all'>('one')
   const [query, setQuery] = useState('')
   const [person, setPerson] = useState<Person | null>(null)
@@ -88,12 +88,12 @@ function WorkflowCard({ spec, canRun, onStarted }: { spec: WorkflowSpec; canRun:
   )
 
   const lookup = useQuery({
-    queryKey: ['workflow-person-lookup', query],
+    queryKey: ['assistant-person-lookup', query],
     queryFn: () => api.search({ tier: null, filters: [{ field: 'name', op: 'contains', value: query }], sort: 'score', limit: 8, page: 1 }),
     enabled: target === 'one' && query.trim().length >= 2 && !person,
   })
   const count = useQuery({
-    queryKey: ['workflow-selector-count', spec.selector_field],
+    queryKey: ['assistant-selector-count', spec.selector_field],
     queryFn: () => api.search({ tier: null, filters: [{ field: spec.selector_field, op: 'exists', value: true }], sort: 'score', limit: 1, page: 1 }),
     enabled: target === 'all',
   })
@@ -104,7 +104,7 @@ function WorkflowCard({ spec, canRun, onStarted }: { spec: WorkflowSpec; canRun:
   })
 
   return (
-    <div className="card space-y-3 p-4" data-testid={`workflow-${spec.key}`}>
+    <div className="card space-y-3 p-4" data-testid={`assistant-${spec.key}`}>
       <div>
         <h2 className="font-semibold">{spec.label}</h2>
         <p className="mt-1 text-sm text-slate-600">{spec.description}</p>
@@ -215,7 +215,7 @@ export function RunsTable({
   onSelect,
   onCancel,
 }: {
-  runs: WorkflowRun[]
+  runs: AssistantRun[]
   selected: number | null
   onSelect: (id: number) => void
   onCancel?: (id: number) => void
@@ -227,7 +227,7 @@ export function RunsTable({
         <thead>
           <tr>
             <th>#</th>
-            <th>Workflow</th>
+            <th>Assistant</th>
             <th>Status</th>
             <th>Progress</th>
             <th>Failed</th>
@@ -275,7 +275,7 @@ export function RunsTable({
 }
 
 /** Presentational: one run with its per-person items. */
-export function RunDetail({ run, items }: { run: WorkflowRun; items: WorkflowRunItem[] }) {
+export function RunDetail({ run, items }: { run: AssistantRun; items: AssistantRunItem[] }) {
   return (
     <div className="space-y-3">
       <p className="text-sm text-slate-600">
@@ -296,7 +296,7 @@ export function RunDetail({ run, items }: { run: WorkflowRun; items: WorkflowRun
             <tr>
               <th>Person</th>
               <th>Status</th>
-              <th>Written</th>
+              <th>Outcome</th>
               <th>Skipped</th>
               <th>Credits</th>
               <th>Trace</th>
@@ -314,14 +314,9 @@ export function RunDetail({ run, items }: { run: WorkflowRun; items: WorkflowRun
                   <StatusBadge status={it.status} />
                   {it.error && <div className="mt-1 max-w-sm text-xs text-red-700">{it.error}</div>}
                 </td>
-                <td>
-                  <div className="flex max-w-md flex-wrap gap-1">
-                    {Object.entries(it.result.written ?? {}).map(([k, v]) => (
-                      <span key={k} className="badge bg-emerald-50 text-emerald-700" title={formatValue(v)}>
-                        {k}
-                      </span>
-                    ))}
-                  </div>
+                <td className="max-w-md">
+                  {it.result.text && <p className="text-sm">{it.result.text}</p>}
+                  <ChangeBadges changes={it.result.changes ?? []} />
                 </td>
                 <td className="max-w-sm text-xs text-slate-500">
                   {(it.result.skipped ?? []).map((s, i) => (
@@ -345,6 +340,39 @@ export function RunDetail({ run, items }: { run: WorkflowRun; items: WorkflowRun
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+const CHANGE_CLASS: Record<Change['action'], string> = {
+  set: 'bg-emerald-50 text-emerald-700',
+  append: 'bg-emerald-50 text-emerald-700',
+  removed: 'bg-red-50 text-red-700',
+  normalized: 'bg-sky-50 text-sky-700',
+  flagged: 'bg-amber-50 text-amber-700',
+  property_created: 'bg-brand-50 text-brand-700',
+}
+
+export const CHANGE_LABEL: Record<Change['action'], string> = {
+  set: 'set',
+  append: 'added to',
+  removed: 'removed',
+  normalized: 'normalised',
+  flagged: 'flagged',
+  property_created: 'new property',
+}
+
+/** One badge per change: the property key, coloured by what happened; the value on hover. */
+export function ChangeBadges({ changes }: { changes: Change[] }) {
+  if (changes.length === 0) return null
+  return (
+    <div className="mt-1 flex flex-wrap gap-1" data-testid="change-badges">
+      {changes.map((c, i) => (
+        <span key={i} className={`badge ${CHANGE_CLASS[c.action]}`} title={`${CHANGE_LABEL[c.action]}${c.value !== null && c.value !== undefined ? `: ${formatValue(c.value)}` : ''}${c.flag ? ` (${c.flag})` : ''}`}>
+          {c.key}
+          {c.action !== 'set' && <span className="ml-1 opacity-70">{CHANGE_LABEL[c.action]}</span>}
+        </span>
+      ))}
     </div>
   )
 }

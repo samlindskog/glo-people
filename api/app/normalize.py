@@ -1,12 +1,10 @@
 """Normalised values: the typed form of a property's text (app.property_specs decides the type).
 
-`parse` is pure: text → number / boolean / date / canonical enum value(s), or a flag saying why not
-(`unmapped`: not recognised, an agent may map it; `non_normalizable`: the text says there is no
-value). `document` reads specs and enum sets from app.properties to find what a document still
-needs normalised. Nothing here writes: app.people stores the results beside the text (see
-app.history, `norm`). `app.normalize.person` is the operation that brings one person up to date,
-parser first and the normaliser agent for what is left; it sits above people and the agents and
-is imported explicitly.
+Pure (level 0): text → number / boolean / date / canonical enum value(s), or a flag saying why
+not (`unmapped`: not recognised, an agent may map it; `non_normalizable`: the text says there is
+no value). What a document still needs normalised is decided by `people.pending_normalization`;
+the tool that brings a person up to date (parser first, then the normaliser agent) is
+`app.tools.normalize`. Nothing here writes.
 """
 
 import hashlib
@@ -15,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app import fields, history, properties
+from app import fields
 from app.property_specs import NORMALISABLE
 
 UNMAPPED = "unmapped"
@@ -158,29 +156,3 @@ def parse(value: Any, ptype: str, lookup: dict[str, str] | None = None) -> Parse
         if d is not None:
             return Parsed(d)
     return Parsed(None, NON_NORMALIZABLE if _is_marker(folded) else UNMAPPED)
-
-
-async def document(doc: dict, force: bool = False) -> dict[str, Parsed]:
-    """What a document still needs normalised: every normalisable property whose current text
-    is not the one its last norm entry derives from. A removed value normalises to nothing.
-    With `force` (a parser upgrade) the parser's own earlier results are redone too; what an
-    agent or a person decided for the current text is always kept."""
-    out: dict[str, Parsed] = {}
-    for key, prop in doc.items():
-        if key in fields.SYSTEM_FIELDS or not history.is_prop(prop):
-            continue
-        sp = properties.spec(key)
-        if sp is None or sp.type not in NORMALISABLE:
-            continue
-        value = history.current(prop)
-        last = history.norm_entries(prop)
-        if last and last[-1].get("of") == text_hash(value) and \
-                not (force and (last[-1].get("src") or {}).get("kind") == "system"):
-            continue
-        if value is None:
-            if last:
-                out[key] = Parsed()
-            continue
-        lookup = await properties.enum_lookup(key) if sp.type in ("enum", "enum_list") else None
-        out[key] = parse(value, sp.type, lookup)
-    return out

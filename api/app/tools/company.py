@@ -1,4 +1,6 @@
-"""Agent: find a company's official website (when not already known) and summarise it."""
+"""Tool (level 2): resolve a company's official website (when not already known) and summarise
+what it does, with a confidence and the page it rests on. One model run with a bounded number
+of page fetches and at most one web search, within the caller's budget."""
 
 from typing import Literal
 
@@ -89,8 +91,8 @@ async def web_search(ctx: RunContext[AgentDeps], query: str) -> str:
     return "\n".join(f"{h.title} — {h.url} — {h.description[:200]}" for h in hits)
 
 
-async def research(deps: AgentDeps, company: str, candidate_site: str | None,
-                   context: str, allow_search: bool, pages_cap: int) -> CompanySummary:
+async def research_company(deps: AgentDeps, company: str, candidate_site: str | None,
+                           context: str, allow_search: bool, pages_cap: int) -> CompanySummary:
     deps.notes["company_pages"] = 0
     deps.notes["company_pages_cap"] = pages_cap
     deps.notes["company_search"] = 0

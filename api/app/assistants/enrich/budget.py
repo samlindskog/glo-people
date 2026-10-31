@@ -1,7 +1,7 @@
-"""Credit discipline for the enrichment workflow: the per-item caps and what each step may spend."""
+"""Credit discipline for the enrichment assistant: the per-item caps and what each step may spend."""
 
+from app.assistants.enrich.models import EnrichOptions
 from app.integrations.firecrawl import Budget
-from app.workflows.enrich.models import EnrichOptions
 
 CAPS = {"max_scrapes": 4, "max_searches": 1, "max_credits": 60,
         "sites": 2, "follow": 1, "company_pages": 2}

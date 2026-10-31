@@ -1,9 +1,11 @@
-"""The enrichment ladder: LinkedIn (FullEnrich) → personal sites → GitHub and links → company,
-one function per step, cheapest step first.
+"""Assistant (level 3): the enrichment ladder — LinkedIn (FullEnrich) → personal sites → GitHub
+and links → company — one function per step, cheapest step first, using the site and company
+tools and the data providers.
 
 Every paid call is preceded by a free check and a missing input skips the step; nothing is
 searched for when the record gives no lead. Nothing is overwritten: all writes append history
-entries attributed to `enrich/<agent>`.
+entries attributed to `enrich/<agent>`. Per person it returns text for the run table plus the
+changes it caused.
 """
 
 import logging
@@ -15,8 +17,11 @@ from typing import Any
 import logfire
 from pydantic import BaseModel
 
-from app.agents import company as company_agent
-from app.agents import site_reader
+from app.assistants import runner
+from app.assistants.base import StopRun
+from app.assistants.context import AssistantDeps
+from app.assistants.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
+from app.assistants.enrich.models import EnrichOptions
 from app.auth import Principal
 from app.config import get_settings
 from app.integrations import fullenrich, github
@@ -30,6 +35,8 @@ from app.integrations.firecrawl import (
     TermsRequired,
 )
 from app.integrations.fullenrich import LinkedInProfile
+from app.tools import company as company_tool
+from app.tools import site as site_tool
 from app.urls import (
     github_profile,
     host_mentions,
@@ -40,28 +47,23 @@ from app.urls import (
     normalize_url,
     url_key,
 )
-from app.workflows import runner
-from app.workflows.base import StopRun
-from app.workflows.context import WorkflowDeps
-from app.workflows.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
-from app.workflows.enrich.models import EnrichOptions
 
 log = logging.getLogger(__name__)
-WORKFLOW = "enrich"
+ASSISTANT = "enrich"
 MAX_RELATED_LINKS = 50        # a person record is not a link directory
 MAX_HEADLINE_CHARS = 300
 MAX_SUMMARY_CHARS = 1200
 
 
 async def make_deps(run_id: int, item_id: int, person: dict, options: BaseModel,
-                    principal: Principal) -> WorkflowDeps:
+                    principal: Principal) -> AssistantDeps:
     budget = budget_for(options)
-    return WorkflowDeps(firecrawl=AsyncFirecrawl(budget=budget), workflow=WORKFLOW, run_id=run_id,
+    return AssistantDeps(firecrawl=AsyncFirecrawl(budget=budget), assistant=ASSISTANT, run_id=run_id,
                         item_id=item_id, person=person, principal=principal, budget=budget,
                         options=options)
 
 
-async def run_item(deps: WorkflowDeps) -> dict[str, Any]:
+async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     try:
         return await _ladder(deps)
     except CreditsExhausted as e:           # the Firecrawl account itself is empty
@@ -82,7 +84,7 @@ class State:
         "linkedin": "absent", "company": "absent", "not_found": []})
 
 
-def _has_url(deps: WorkflowDeps, key: str, url: str) -> bool:
+def _has_url(deps: AssistantDeps, key: str, url: str) -> bool:
     wanted = url_key(url)
     return any(url_key(v) == wanted for v in deps.history_values(key) if isinstance(v, str))
 
@@ -103,12 +105,12 @@ def split_urls(value: Any) -> list[str]:
     return [p for p in re.split(r"[\s,;|]+", value) if p and "." in p]
 
 
-async def _ladder(deps: WorkflowDeps) -> dict[str, Any]:
+async def _ladder(deps: AssistantDeps) -> dict[str, Any]:
     options: EnrichOptions = deps.options
     skip = await _recently_enriched(deps, options)
     if skip is not None:
         return skip
-    last = await runner.last_done_item(WORKFLOW, deps.person_id)
+    last = await runner.last_done_item(ASSISTANT, deps.person_id)
     st = State(options=options, name=str(deps.current("name") or ""),
                previously_missing=set((last or {}).get("result", {}).get("not_found", []))
                if last and not options.refresh else set())
@@ -116,14 +118,36 @@ async def _ladder(deps: WorkflowDeps) -> dict[str, Any]:
     await _step_sites(deps, st)
     await _step_github_and_links(deps, st)
     await _step_company(deps, st)
-    return {**st.result, "written": deps.written, "skipped": deps.skipped}
+    return {**st.result, "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
+            "skipped": deps.skipped}
 
 
-async def _recently_enriched(deps: WorkflowDeps, options: EnrichOptions) -> dict | None:
+_STEP_TEXT = {
+    ("linkedin", "matched"): "LinkedIn profile matched",
+    ("linkedin", "not_found"): "no LinkedIn record at the data provider",
+    ("linkedin", "absent"): "no LinkedIn URL on the record",
+    ("linkedin", "error"): "the LinkedIn lookup failed",
+    ("linkedin", "skipped"): "LinkedIn skipped",
+    ("github", "matched"): "GitHub account summarised",
+    ("company", "resolved"): "company website resolved and summarised",
+    ("company", "unresolved"): "company not resolved",
+}
+
+
+def _text(st: State, deps: AssistantDeps) -> str:
+    """One sentence for the run table: what happened and what was written."""
+    parts = [_STEP_TEXT[(step, st.result[step])] for step in ("linkedin", "github", "company")
+             if (step, st.result.get(step)) in _STEP_TEXT]
+    written = sorted(deps.written)
+    parts.append(f"wrote {', '.join(written)}" if written else "nothing new to write")
+    return "; ".join(parts).capitalize() + "."
+
+
+async def _recently_enriched(deps: AssistantDeps, options: EnrichOptions) -> dict | None:
     """Step 0: a person enriched inside the TTL is skipped without spending anything."""
     if options.refresh:
         return None
-    last = await runner.last_done_item(WORKFLOW, deps.person_id)
+    last = await runner.last_done_item(ASSISTANT, deps.person_id)
     if not last or not last.get("finished_at"):
         return None
     ttl = timedelta(days=get_settings().enrich_ttl_days)
@@ -131,10 +155,11 @@ async def _recently_enriched(deps: WorkflowDeps, options: EnrichOptions) -> dict
         return None
     deps.skip("all", f"enriched {last['finished_at'][:10]}; use refresh to run again")
     return {"linkedin": "absent", "company": "absent", "not_found": [], "status": "skipped",
-            "skipped": deps.skipped}
+            "text": f"Enriched on {last['finished_at'][:10]}; not run again within the TTL.",
+            "changes": [], "skipped": deps.skipped}
 
 
-async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
+async def _provider_call(deps: AssistantDeps, st: State, step: str, call):
     """Run one data-provider call with the ladder's error policy: a miss is `not_found`,
     unaccepted provider terms or a provider error are `error` (the rest of the ladder still runs),
     an exhausted item budget is a skipped step."""
@@ -158,7 +183,7 @@ async def _provider_call(deps: WorkflowDeps, st: State, step: str, call):
     return None
 
 
-async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
+async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     """Step 1: the person's FullEnrich record (exact LinkedIn URL, 5 credits; a miss is free)."""
     li = linkedin_profile(deps.current("linkedin"))
     if not li:
@@ -196,7 +221,7 @@ async def _step_linkedin(deps: WorkflowDeps, st: State) -> None:
     await deps.write("linkedin_reader", values)
 
 
-def _site_candidates(deps: WorkflowDeps, st: State) -> list[str]:
+def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
     raws = [*(st.profile.personal_sites if st.profile else []),
             *split_urls(deps.current("website")),
             *(u for v in deps.history_values("website") for u in split_urls(v))]
@@ -208,7 +233,7 @@ def _site_candidates(deps: WorkflowDeps, st: State) -> list[str]:
     return out
 
 
-async def _step_sites(deps: WorkflowDeps, st: State) -> None:
+async def _step_sites(deps: AssistantDeps, st: State) -> None:
     """Step 2: read the person's own site(s): the profile's, plus any already on the record."""
     candidates = _site_candidates(deps, st)
     if not candidates:
@@ -232,20 +257,20 @@ async def _step_sites(deps: WorkflowDeps, st: State) -> None:
             deps.skip("sites", f"{site}: HTTP {page.status_code}, {len(page.markdown)} chars")
             continue
         with logfire.span("site_reader {site}", site=site):
-            findings = await site_reader.read(deps, st.name, site, page.markdown, page.links,
+            findings = await site_tool.read_site(deps, st.name, site, page.markdown, page.links,
                                               CAPS["follow"])
         if not findings.is_personal:
             # A company or unrelated site: its links are about the company, not the person.
             deps.skip("sites", f"{site}: not the person's own site")
             continue
         if not _has_url(deps, "website", site):
-            await deps.write(site_reader.AGENT_NAME, {"website": site})
+            await deps.write(site_tool.AGENT_NAME, {"website": site})
         st.github_urls += [g for g in map(github_profile, [*page.links, *findings.github_urls])
                            if g]
         st.related += [link.url for link in findings.related_links]
 
 
-async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
+async def _step_github_and_links(deps: AssistantDeps, st: State) -> None:
     """Step 3: GitHub and related links come only from what the record and pages gave us (no
     searching); a known GitHub account is summarised through the github-com data tool."""
     github_urls = list(dict.fromkeys(g for g in st.github_urls if g))
@@ -255,7 +280,7 @@ async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
         github_urls = [current_github]
     if github_urls:
         if not _has_url(deps, "github", github_urls[0]):
-            await deps.write(site_reader.AGENT_NAME, {"github": github_urls[0]})
+            await deps.write(site_tool.AGENT_NAME, {"github": github_urls[0]})
         await _github_facts(deps, st, github_urls[0])
     else:
         st.result["not_found"].append("github")
@@ -269,10 +294,10 @@ async def _step_github_and_links(deps: WorkflowDeps, st: State) -> None:
     current = current if isinstance(current, list) else []
     merged = list(dict.fromkeys([*current, *links]))[:MAX_RELATED_LINKS]
     if len(merged) > len(current):
-        await deps.write(site_reader.AGENT_NAME, {"related_links": merged})
+        await deps.write(site_tool.AGENT_NAME, {"related_links": merged})
 
 
-async def _github_facts(deps: WorkflowDeps, st: State, github_url: str) -> None:
+async def _github_facts(deps: AssistantDeps, st: State, github_url: str) -> None:
     if deps.current("github_summary") and url_key(deps.current("github")) == url_key(github_url) \
             and not st.options.refresh:
         deps.skip("github", "already summarised for this account")
@@ -290,7 +315,7 @@ async def _github_facts(deps: WorkflowDeps, st: State, github_url: str) -> None:
     await deps.write("github", values)
 
 
-def _company_candidate(deps: WorkflowDeps, st: State, company: str) -> str | None:
+def _company_candidate(deps: AssistantDeps, st: State, company: str) -> str | None:
     """The cheapest plausible company website: the provider's, else a website on the record whose
     host names the company."""
     if st.profile and st.profile.current_company and st.profile.current_company.website:
@@ -301,7 +326,7 @@ def _company_candidate(deps: WorkflowDeps, st: State, company: str) -> str | Non
     return None
 
 
-async def _step_company(deps: WorkflowDeps, st: State) -> None:
+async def _step_company(deps: AssistantDeps, st: State) -> None:
     """Step 4: resolve and summarise the current company; low confidence writes nothing."""
     company = (st.profile.current_company.name if st.profile and st.profile.current_company
                else None) or deps.current("company")
@@ -320,7 +345,7 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
                    f"{_clip(st.profile.current_company.description, 400)}"
     try:
         with logfire.span("company {company}", company=company):
-            summary = await company_agent.research(
+            summary = await company_tool.research_company(
                 deps, company, _company_candidate(deps, st, company), context,
                 allow_search=deps.budget.searches < deps.budget.max_searches,
                 pages_cap=CAPS["company_pages"])
@@ -351,4 +376,4 @@ async def _step_company(deps: WorkflowDeps, st: State) -> None:
         deps.skip("company", "summary kept: same website as before")
     if not deps.current("company"):
         values["company"] = company
-    await deps.write(company_agent.AGENT_NAME, values)
+    await deps.write(company_tool.AGENT_NAME, values)

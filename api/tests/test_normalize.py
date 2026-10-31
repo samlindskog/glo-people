@@ -190,21 +190,21 @@ async def test_create_normalises(writer):
 
 async def test_document_skips_up_to_date_properties(people_by_name):
     ada = people_by_name["Ada"]
-    assert await normalize.document(ada) == {}
-    forced = await normalize.document(ada, force=True)      # a parser upgrade redoes its own work
+    assert await people.pending_normalization(ada) == {}
+    forced = await people.pending_normalization(ada, force=True)      # a parser upgrade redoes its own work
     assert set(forced) == {"mrr", "stage", "joined", "in_whatsapp", "needs_stated"}
     assert forced["mrr"] == Parsed(12000)                   # ...and append_norm then dedupes it
     assert history.append_norm(ada["mrr"], 12000, people.NORMALIZE_SRC, datetime.now(UTC),
                                normalize.text_hash("$12,000")) is None
     ada["stage"]["norm"]["h"][-1]["src"] = {"kind": "agent", "by": "normalizer"}
-    assert "stage" not in await normalize.document(ada, force=True)   # an agent's call is kept
+    assert "stage" not in await people.pending_normalization(ada, force=True)   # an agent's call is kept
     ada["mrr"]["v"] = "$13,000"                           # text changed, norm not yet
-    assert await normalize.document(ada) == {"mrr": Parsed(13000)}
+    assert await people.pending_normalization(ada) == {"mrr": Parsed(13000)}
     ada["mrr"]["v"] = None                                # removed: norm to be cleared
-    assert await normalize.document(ada) == {"mrr": Parsed()}
+    assert await people.pending_normalization(ada) == {"mrr": Parsed()}
     del ada["mrr"]["norm"]
-    assert await normalize.document(ada) == {}           # removed and never normalised: nothing
-    assert await normalize.document({"_id": 1, "bio": {"v": "x", "h": []}}) == {}
+    assert await people.pending_normalization(ada) == {}           # removed and never normalised: nothing
+    assert await people.pending_normalization({"_id": 1, "bio": {"v": "x", "h": []}}) == {}
 
 
 async def test_normalize_all_fills_legacy_documents_and_update_norm(people_by_name, writer):
@@ -220,7 +220,7 @@ async def test_normalize_all_fills_legacy_documents_and_update_norm(people_by_na
     # the normaliser agent maps an unmapped value; a later text-unrelated write keeps it
     cy = str(people_by_name["Cy"]["_id"])
     agent = Source("agent", "normalizer", "run:1/item:2")
-    got = await people.update_norm(None, cy, {"stage": Parsed("Pre-seed")}, agent)
+    got = (await people.update_norm(None, cy, {"stage": Parsed("Pre-seed")}, agent)).person
     assert got["norm"]["stage"] == "Pre-seed" and got["norm_flags"] == {
         "mrr": "non_normalizable", "joined": "non_normalizable", "in_whatsapp": "unmapped"}
     assert got["history_norm"]["stage"][-1]["src"] == agent.doc()

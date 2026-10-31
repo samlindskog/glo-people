@@ -7,7 +7,7 @@ import { ErrorNote, PageHeader } from '../components/Layout'
 import PersonEditor from '../components/PersonEditor'
 import StoreBox from '../components/StoreBox'
 import { formatDate, formatValue } from '../lib'
-import type { FieldEntry, NormFlag, NormalizeReport } from '../types'
+import type { FieldEntry, NormFlag, NormalizeResult } from '../types'
 import { TierBadge } from './People'
 
 const SYSTEM = new Set(['id', 'tier', 'name', 'source', 'created_at', 'updated_at', 'schema_version', 'history', 'norm', 'norm_flags', 'history_norm'])
@@ -75,7 +75,7 @@ export default function PersonPage() {
         )}
       </PageHeader>
       <ErrorNote error={remove.error ?? normalise.error} />
-      {normalise.data && <NormaliseNote report={normalise.data} />}
+      {normalise.data && <NormaliseNote result={normalise.data} />}
 
       {editing ? (
         <PersonEditor
@@ -121,8 +121,8 @@ export default function PersonPage() {
         <div className="mt-4">
           <StoreBox
             personId={id}
-            onStored={(updated) => {
-              qc.setQueryData(['person', id], updated)
+            onStored={() => {
+              qc.invalidateQueries({ queryKey: ['person', id] })
               qc.invalidateQueries({ queryKey: ['search'] })
               qc.invalidateQueries({ queryKey: ['properties'] })
             }}
@@ -161,16 +161,18 @@ function FieldValue({ value, type }: { value: unknown; type?: string }) {
   return <div className="whitespace-pre-wrap break-words">{s}</div>
 }
 
-function NormaliseNote({ report }: { report: NormalizeReport }) {
-  const parts: string[] = []
-  if (report.parsed.length) parts.push(`parsed ${report.parsed.join(', ')}`)
-  for (const [k, v] of Object.entries(report.mapped)) parts.push(`${k} → ${formatValue(v)}`)
-  if (report.non_normalizable.length) parts.push(`no value: ${report.non_normalizable.join(', ')}`)
-  if (report.unmapped.length) parts.push(`still unmapped: ${report.unmapped.join(', ')}`)
+/** One line for a human from a normalize result: what was settled, flagged or left. */
+export function describeNormalization(result: NormalizeResult): string {
+  const parts = result.changes.map((c) => (c.action === 'normalized' ? `${c.key} → ${formatValue(c.value)}` : `${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`))
+  for (const k of result.unmapped) parts.push(`${k}: still unmapped`)
+  return parts.length ? `Normalised: ${parts.join(' · ')}` : 'Everything was already normalised.'
+}
+
+function NormaliseNote({ result }: { result: NormalizeResult }) {
   return (
     <p className="mb-3 rounded-md bg-slate-50 px-3 py-2 text-sm text-slate-600" data-testid="normalise-report">
-      {parts.length ? `Normalised: ${parts.join(' · ')}` : 'Everything was already normalised.'}
-      {report.agent_called && <span className="ml-1 text-xs text-slate-400">(agent consulted)</span>}
+      {describeNormalization(result)}
+      {result.agent_called && <span className="ml-1 text-xs text-slate-400">(agent consulted)</span>}
     </p>
   )
 }

@@ -1,28 +1,28 @@
 import type {
   ActivityItem,
   ApiKey,
-  AskOptions,
   AskResult,
+  AssistantRun,
+  AssistantRunDetail,
+  AssistantSpec,
   FieldFilter,
   ImportPreview,
   ImportResult,
   Job,
   Me,
-  NormalizeReport,
+  NormalizeResult,
   Page,
   Person,
+  PlanResult,
   Property,
   SearchRecord,
   SearchRequest,
   SearchResponse,
   StoreOptions,
-  StoreProposal,
-  StoreReport,
+  StoreResult,
   Tier,
+  Tuning,
   User,
-  WorkflowRun,
-  WorkflowRunDetail,
-  WorkflowSpec,
 } from './types'
 
 export class ApiError extends Error {
@@ -91,18 +91,20 @@ export const api = {
 
   properties: () => request<Property[]>('GET', '/api/properties'),
 
-  ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<AskOptions> }) =>
-    request<AskResult>('POST', '/api/search/ask', body),
+  // tools (structured, one shot)
+  plan: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
+    request<PlanResult>('POST', '/api/search/plan', body),
   store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
-    request<StoreReport>('POST', `/api/people/${id}/store`, { passage, options }),
-  applyStore: (id: string, proposal: StoreProposal, options?: Partial<StoreOptions>) =>
-    request<StoreReport>('POST', `/api/people/${id}/store/apply`, { proposal, options }),
+    request<StoreResult>('POST', `/api/people/${id}/store`, { passage, options }),
   storeFile: (id: string, file: File) => {
     const fd = new FormData()
     fd.append('file', file)
-    return request<StoreReport>('POST', `/api/people/${id}/store/file`, fd)
+    return request<StoreResult>('POST', `/api/people/${id}/store/file`, fd)
   },
-  normalizePerson: (id: string) => request<NormalizeReport>('POST', `/api/people/${id}/normalize`),
+  normalizePerson: (id: string) => request<NormalizeResult>('POST', `/api/people/${id}/normalize`),
+  // assistants (text for a human plus the changes)
+  ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
+    request<AskResult>('POST', '/api/search/ask', body),
 
   searches: (params: { all?: boolean; user_id?: number; limit?: number; offset?: number }) =>
     request<Page<SearchRecord>>('GET', `/api/searches${qs(params)}`),
@@ -132,13 +134,13 @@ export const api = {
   revokeUserKey: (userId: number, id: number) =>
     request<void>('DELETE', `/api/users/${userId}/api-keys/${id}`),
 
-  workflows: () => request<WorkflowSpec[]>('GET', '/api/workflows'),
+  assistants: () => request<AssistantSpec[]>('GET', '/api/assistants'),
   startRun: (
     key: string,
     body: { person_ids?: string[]; all_with_field?: string; tier?: Tier | null; options?: Record<string, unknown> },
-  ) => request<WorkflowRun>('POST', `/api/workflows/${key}/runs`, body),
+  ) => request<AssistantRun>('POST', `/api/assistants/${key}/runs`, body),
   runs: (params: { limit?: number; offset?: number } = {}) =>
-    request<Page<WorkflowRun>>('GET', `/api/workflows/runs${qs(params)}`),
-  run: (id: number) => request<WorkflowRunDetail>('GET', `/api/workflows/runs/${id}`),
-  cancelRun: (id: number) => request<WorkflowRun>('POST', `/api/workflows/runs/${id}/cancel`),
+    request<Page<AssistantRun>>('GET', `/api/assistants/runs${qs(params)}`),
+  run: (id: number) => request<AssistantRunDetail>('GET', `/api/assistants/runs/${id}`),
+  cancelRun: (id: number) => request<AssistantRun>('POST', `/api/assistants/runs/${id}/cancel`),
 }

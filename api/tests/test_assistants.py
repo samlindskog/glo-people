@@ -1,4 +1,5 @@
-"""The enrichment workflow end to end against a fake Firecrawl and fake models.
+"""The per-person assistants (enrich, normalize) and their runs, end to end against a fake
+Firecrawl and fake models, plus the ask assistant.
 
 The fakes count every call, so these tests pin down the credit discipline: what runs, what is
 skipped and why, and that nothing is ever overwritten.
@@ -15,7 +16,9 @@ from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart, Use
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app import embedder, jobs
-from app.agents import company, site_reader
+from app.assistants import runner
+from app.assistants.enrich import assistant as enrich_workflow
+from app.assistants.enrich import budget as enrich_budget
 from app.integrations.firecrawl import (
     SCRAPE_CREDITS,
     SEARCH_CREDITS,
@@ -27,10 +30,8 @@ from app.integrations.firecrawl import (
     SearchHit,
 )
 from app.mongo import db
+from app.tools import company, site
 from app.urls import url_key
-from app.workflows import runner
-from app.workflows.enrich import budget as enrich_budget
-from app.workflows.enrich import workflow as enrich_workflow
 
 FIX = Path(__file__).parent / "fixtures" / "firecrawl"
 LINKEDIN_CREDITS = 5    # fullenrich/people/match
@@ -42,6 +43,12 @@ Bo Chen,Leafy,Berlin,https://linkedin.com/in/bochen,https://bochen.me,Climate fo
 Cy Diaz,,,,,Doctor turned investor
 Dee Evans,,,https://www.linkedin.com/in/exchange-fail,,Operator
 """
+
+def written(result: dict) -> dict:
+    """Property → value an item wrote (set or append changes)."""
+    return {c["key"]: c["value"] for c in result.get("changes", [])
+            if c["action"] in ("set", "append")}
+
 
 PAGES = {
     "https://adaokafor.dev": ("site_ada.md", SCRAPE_CREDITS, None,
@@ -175,7 +182,7 @@ def _fakes(monkeypatch):
     monkeypatch.setattr(enrich_workflow, "AsyncFirecrawl",
                         lambda budget: FakeFirecrawl(api_key="fake", budget=budget))
     with ExitStack() as stack:
-        stack.enter_context(site_reader.agent.override(model=FunctionModel(site_model)))
+        stack.enter_context(site.agent.override(model=FunctionModel(site_model)))
         stack.enter_context(company.agent.override(model=FunctionModel(company_model)))
         yield
 
@@ -190,26 +197,26 @@ async def people(writer):
 
 
 async def run_for(client, ids, **options):
-    r = await client.post("/api/workflows/enrich/runs", json={"person_ids": ids,
+    r = await client.post("/api/assistants/enrich/runs", json={"person_ids": ids,
                                                               "options": options})
     assert r.status_code == 201, r.text
     await runner.drain()
-    return (await client.get(f"/api/workflows/runs/{r.json()['id']}")).json()
+    return (await client.get(f"/api/assistants/runs/{r.json()['id']}")).json()
 
 
 async def test_workflow_listing_and_permissions(reader, writer):
-    specs = (await reader.get("/api/workflows")).json()
+    specs = (await reader.get("/api/assistants")).json()
     assert specs[0]["key"] == "enrich" and specs[0]["selector_field"] == "linkedin"
     assert "refresh" in specs[0]["options_schema"]["properties"]
-    r = await reader.post("/api/workflows/enrich/runs", json={"person_ids": ["x"]})
+    r = await reader.post("/api/assistants/enrich/runs", json={"person_ids": ["x"]})
     assert r.status_code == 403
-    assert (await reader.get("/api/workflows/runs")).json() == {"items": [], "has_more": False}
-    r = await writer.post("/api/workflows/enrich/runs", json={"person_ids": []})
+    assert (await reader.get("/api/assistants/runs")).json() == {"items": [], "has_more": False}
+    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": []})
     assert r.status_code == 422
-    r = await writer.post("/api/workflows/enrich/runs", json={"person_ids": ["x"],
+    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": ["x"],
                                                               "options": {"max_credits": 0}})
     assert r.status_code == 422
-    r = await writer.post("/api/workflows/nope/runs", json={"person_ids": ["x"]})
+    r = await writer.post("/api/assistants/nope/runs", json={"person_ids": ["x"]})
     assert r.status_code == 404
 
 
@@ -221,7 +228,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     res = item["result"]
     assert res["linkedin"] == "matched" and res["linkedin_provider"] == "fullenrich"
     assert res["company"] == "resolved" and res["github"] == "matched"
-    assert res["written"] == {
+    assert written(res) == {
         "linkedin_headline": "Building payments infrastructure for African merchants · CEO at PayRail",
         "github": "https://github.com/adaok",
         "github_summary": "Ada Okafor — payments rails. 6 public repos, 120 followers, at PayRail. "
@@ -232,7 +239,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                            "Africa, with next-day local settlement.",
     }
     # Her own site, location and company are already on the record: not re-added.
-    assert not {"location", "company"} & set(res["written"])
+    assert not {"location", "company"} & set(written(res))
     assert item["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
     assert item["credits"] == run["credits_used"]
     assert [c for c in FakeFirecrawl.calls if c[0] == "search"] == []
@@ -263,7 +270,7 @@ async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, r
     assert third["items"][0]["status"] == "done" and third["credits_used"] == first["credits_used"]
     after = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()["history"]
     assert {k: len(v) for k, v in after.items()} == {k: len(v) for k, v in before.items()}
-    assert third["items"][0]["result"]["written"] == {}
+    assert written(third["items"][0]["result"]) == {}
 
 
 async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, people):
@@ -296,7 +303,7 @@ async def test_provider_error_is_a_skipped_step(writer, people):
 
 
 def test_company_fetch_allowlist_skips_social_and_directory_hosts():
-    from app.agents.company import _allow, allow_hosts
+    from app.tools.company import _allow, allow_hosts
     deps = type("D", (), {"notes": {}})()
     allow_hosts(deps, [SearchHit("https://www.linkedin.com/company/tuttiai", "", ""),
                        SearchHit("https://www.crunchbase.com/organization/tutti", "", ""),
@@ -323,7 +330,7 @@ async def test_item_budget_is_respected(writer, people, monkeypatch):
     steps = {s["step"]: s["reason"] for s in item["result"]["skipped"]}
     assert "credit cap" in steps["linkedin"]             # 5 expected > 4: never attempted
     assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
-    assert item["credits"] <= 4 and "linkedin_headline" not in item["result"]["written"]
+    assert item["credits"] <= 4 and "linkedin_headline" not in written(item["result"])
 
 
 async def test_run_credit_cap_stops_the_run(writer, people):
@@ -348,7 +355,7 @@ async def test_run_cap_above_one_item_lets_a_bigger_batch_finish(writer, people)
 
 
 def test_split_urls_handles_lists_and_separators():
-    from app.workflows.enrich.workflow import split_urls
+    from app.assistants.enrich.assistant import split_urls
     assert split_urls("https://altschoolafrica.com/ , https:/Talentql.com") == [
         "https://altschoolafrica.com/", "https:/Talentql.com"]
     assert split_urls(["a.com; b.com", "c.com"]) == ["a.com", "b.com", "c.com"]
@@ -356,14 +363,17 @@ def test_split_urls_handles_lists_and_separators():
 
 
 async def test_bulk_selector_and_listing(writer, people):
-    r = await writer.post("/api/workflows/enrich/runs", json={"all_with_field": "linkedin"})
+    r = await writer.post("/api/assistants/enrich/runs", json={"all_with_field": "linkedin"})
     assert r.status_code == 201 and r.json()["total"] == 3
     await runner.drain()
-    runs = (await writer.get("/api/workflows/runs")).json()["items"]
+    runs = (await writer.get("/api/assistants/runs")).json()["items"]
     assert runs[0]["id"] == r.json()["id"] and runs[0]["username"] == "wendy"
     assert runs[0]["status"] == "done" and runs[0]["done"] == 3
-    acts = (await writer.get("/api/activity?action=workflow.run")).json()["items"]
-    assert acts[0]["meta"]["people"] == 3 and acts[0]["meta"]["workflow"] == "enrich"
+    acts = (await writer.get("/api/activity?action=assistant.run")).json()["items"]
+    assert acts[0]["meta"]["people"] == 3 and acts[0]["meta"]["assistant"] == "enrich"
+    item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
+    assert item["result"]["text"].startswith("Linkedin profile matched") or "LinkedIn" in item["result"]["text"]
+    assert all({"key", "action", "value", "previous", "flag"} <= set(c) for c in item["result"]["changes"])
 
 
 async def test_reconcile_fails_interrupted_runs(writer, people):
@@ -377,10 +387,10 @@ async def test_reconcile_fails_interrupted_runs(writer, people):
         await conn.execute(insert(pg.workflow_run_items).values(
             run_id=rid, workflow="enrich", person_id=people["Cy Diaz"], status="running"))
     await runner.reconcile()
-    run = (await writer.get(f"/api/workflows/runs/{rid}")).json()
+    run = (await writer.get(f"/api/assistants/runs/{rid}")).json()
     assert run["status"] == "failed" and run["error"] == "interrupted by restart"
     assert run["items"][0]["status"] == "failed"
-    assert (await writer.post(f"/api/workflows/runs/{rid}/cancel")).status_code == 409
+    assert (await writer.post(f"/api/assistants/runs/{rid}/cancel")).status_code == 409
 
 
 async def test_unconfigured_firecrawl_fails_fast(writer, people, monkeypatch):

@@ -1,6 +1,8 @@
-"""The search engine: literal per-property filters (Mongo) combined with per-property semantic
-similarity (pgvector). The same `SearchRequest` backs the REST endpoint, the UI, the MCP tool and
-the planner agent (app.search.ask); `run_search` validates it against the property catalog."""
+"""Tool (level 2): search people. Literal per-property filters (Mongo) combined with per-property
+semantic similarity (pgvector) behind one `SearchRequest`; `run_search` validates the request
+against the property catalog and returns a `SearchResponse`. Read-only, apart from
+`record_search`, which keeps the user's search history (the `searches` table this tool owns).
+The same request model backs REST, MCP, the UI and the plan tool."""
 
 import json
 import re

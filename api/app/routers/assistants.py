@@ -1,14 +1,17 @@
+"""Assistant runs over HTTP (level 4 surface): list the per-person assistants, start a run for
+chosen people or everyone with a property, follow and cancel runs."""
+
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationError
 
 from app import people
+from app.assistants import REGISTRY, runner
 from app.auth import Principal, require
-from app.search import FieldFilter, SearchRequest, mongo_query
-from app.workflows import REGISTRY, runner
+from app.tools.search import FieldFilter, SearchRequest, mongo_query
 
-router = APIRouter(prefix="/api/workflows", tags=["workflows"])
+router = APIRouter(prefix="/api/assistants", tags=["assistants"])
 
 Reader = Annotated[Principal, Depends(require("people:read"))]
 Writer = Annotated[Principal, Depends(require("people:write"))]
@@ -24,7 +27,8 @@ class RunRequest(BaseModel):
 
 
 @router.get("")
-async def list_workflows(_: Reader) -> list[dict]:
+async def list_assistants(_: Reader) -> list[dict]:
+    """The per-person assistants that can be run over many people."""
     return [spec.public() for spec in REGISTRY.values()]
 
 
@@ -32,7 +36,7 @@ async def list_workflows(_: Reader) -> list[dict]:
 async def start_run(key: str, body: RunRequest, principal: Writer) -> dict:
     spec = REGISTRY.get(key)
     if spec is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown workflow")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown assistant")
     try:
         options = spec.options_model.model_validate(body.options)
     except ValidationError as e:

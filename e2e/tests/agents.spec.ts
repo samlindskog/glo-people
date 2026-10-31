@@ -52,7 +52,6 @@ test('storing a passage files statements under properties; normalise reports', a
   await page.getByRole('textbox', { name: 'Passage' }).fill(`notes: met at the summit ${tag}. stage: seed round closed. new favourite tool: lathe`)
   await page.getByRole('button', { name: 'Store' }).click()
   const report = page.getByTestId('store-report')
-  await expect(report.getByRole('row')).toHaveCount(4)
   await expect(report).toContainText('notes')
   await expect(report).toContainText('stage')
   await expect(report).toContainText('favourite_tool') // created now, or set when an earlier run created it

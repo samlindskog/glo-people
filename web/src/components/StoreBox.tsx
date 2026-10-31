@@ -2,32 +2,32 @@ import { useMutation } from '@tanstack/react-query'
 import { useRef, useState, type FormEvent } from 'react'
 import { api } from '../api'
 import { formatValue } from '../lib'
-import type { NormalizeReport, Person, StoreAction, StoreReport } from '../types'
+import { describeNormalization } from '../pages/Person'
+import type { Change, StoreResult } from '../types'
 import { ErrorNote } from './Layout'
 
 const DEFAULTS = { near_duplicate: 0.8, max_new: 2 }
-const ACTION_CLASS: Record<StoreAction, string> = {
+const CHANGE_CLASS: Record<Change['action'], string> = {
   set: 'bg-emerald-50 text-emerald-700',
   append: 'bg-emerald-50 text-emerald-700',
-  created: 'bg-brand-50 text-brand-700',
-  redirected: 'bg-sky-50 text-sky-700',
-  to_notes: 'bg-sky-50 text-sky-700',
-  confirmed: 'bg-slate-100 text-slate-600',
-  ignored: 'bg-slate-100 text-slate-400',
+  removed: 'bg-red-50 text-red-700',
+  normalized: 'bg-sky-50 text-sky-700',
+  flagged: 'bg-amber-50 text-amber-700',
+  property_created: 'bg-brand-50 text-brand-700',
 }
-const ACTION_LABEL: Record<StoreAction, string> = { set: 'set', append: 'added to', created: 'new property', redirected: 'redirected', to_notes: 'to notes', confirmed: 'confirmed', ignored: 'ignored' }
+const CHANGE_LABEL: Record<Change['action'], string> = { set: 'set', append: 'added to', removed: 'removed', normalized: 'normalised', flagged: 'flagged', property_created: 'new property' }
 
 /** Add free text about a person: an agent splits it into statements and files each under the
  * best-matching property (or a new free-text one, within the caps). */
-export default function StoreBox({ personId, onStored }: { personId: string; onStored: (person: Person) => void }) {
+export default function StoreBox({ personId, onStored }: { personId: string; onStored: () => void }) {
   const [passage, setPassage] = useState('')
   const [nearDuplicate, setNearDuplicate] = useState(DEFAULTS.near_duplicate)
   const [maxNew, setMaxNew] = useState(DEFAULTS.max_new)
   const fileRef = useRef<HTMLInputElement>(null)
   const store = useMutation({
     mutationFn: (file?: File) => (file ? api.storeFile(personId, file) : api.store(personId, passage.trim(), { near_duplicate: nearDuplicate, max_new: maxNew })),
-    onSuccess: (report) => {
-      if (report.person) onStored(report.person)
+    onSuccess: () => {
+      onStored()
       setPassage('')
       if (fileRef.current) fileRef.current.value = ''
     },
@@ -86,56 +86,57 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
         </div>
       </form>
       <ErrorNote error={store.error} />
-      {store.data && <Report report={store.data} />}
+      {store.data && <Report result={store.data} />}
     </section>
   )
 }
 
-function Report({ report }: { report: StoreReport }) {
-  if (report.items.length === 0) return <p className="text-sm text-slate-500">Nothing about the person was found in the passage.</p>
+function Report({ result }: { result: StoreResult }) {
+  const lines: string[] = []
+  if (result.confirmed.length) lines.push(`Confirmed (already there): ${result.confirmed.join(', ')}`)
+  if (result.conflicts.length) lines.push(`Replaced a different value (kept in history): ${result.conflicts.join(', ')}`)
+  if (Object.keys(result.redirected).length) lines.push(`Redirected to existing properties: ${Object.entries(result.redirected).map(([a, b]) => `${a} → ${b}`).join(', ')}`)
+  if (result.to_notes.length) lines.push(`Filed under notes (new-property cap): ${result.to_notes.join(', ')}`)
+  if (result.ignored.length) lines.push(`Ignored: ${result.ignored.join(' · ')}`)
+  if (result.changes.length === 0 && lines.length === 0) return <p className="text-sm text-slate-500">Nothing about the person was found in the passage.</p>
   return (
     <div className="space-y-2">
-      <table className="data-table" data-testid="store-report">
-        <thead>
-          <tr>
-            <th>Property</th>
-            <th>Value</th>
-            <th>Why</th>
-          </tr>
-        </thead>
-        <tbody>
-          {report.items.map((it, i) => (
-            <tr key={i} title={it.evidence ? `“${it.evidence}”` : undefined}>
-              <td className="whitespace-nowrap">
-                <span className={`badge ${ACTION_CLASS[it.action]}`}>{ACTION_LABEL[it.action]}</span>
-                {it.key && <span className="ml-1 font-mono text-xs">{it.key}</span>}
-                {it.conflict && (
-                  <span className="badge ml-1 bg-amber-50 text-amber-700" title="Differs from the value it replaces (kept in history)">
-                    conflict
-                  </span>
-                )}
-              </td>
-              <td className="max-w-md">{formatValue(it.value)}</td>
-              <td className="max-w-xs text-xs text-slate-500">{it.reason}</td>
+      {result.changes.length > 0 && (
+        <table className="data-table" data-testid="store-report">
+          <thead>
+            <tr>
+              <th>Property</th>
+              <th>Change</th>
+              <th>Value</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-      {report.normalized && <NormalizedLine report={report.normalized} />}
+          </thead>
+          <tbody>
+            {result.changes.map((c, i) => (
+              <tr key={i}>
+                <td className="font-mono text-xs">{c.key}</td>
+                <td>
+                  <span className={`badge ${CHANGE_CLASS[c.action]}`}>{CHANGE_LABEL[c.action]}</span>
+                  {c.flag && <span className="ml-1 text-xs text-slate-500">{c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}</span>}
+                </td>
+                <td className="max-w-md">
+                  {c.previous !== null && c.previous !== undefined && c.action === 'set' && <span className="text-slate-400 line-through">{formatValue(c.previous)} </span>}
+                  {formatValue(c.value)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {lines.map((l) => (
+        <p key={l} className="text-xs text-slate-500">
+          {l}
+        </p>
+      ))}
+      {result.normalization && (
+        <p className="text-xs text-slate-500" data-testid="store-normalized">
+          {describeNormalization(result.normalization)}
+        </p>
+      )}
     </div>
-  )
-}
-
-function NormalizedLine({ report }: { report: NormalizeReport }) {
-  const parts = [
-    ...Object.entries(report.mapped).map(([k, v]) => `${k} → ${formatValue(v)}`),
-    ...report.non_normalizable.map((k) => `${k}: no value`),
-    ...report.unmapped.map((k) => `${k}: still unmapped`),
-  ]
-  if (parts.length === 0) return null
-  return (
-    <p className="text-xs text-slate-500" data-testid="store-normalized">
-      Normalised: {parts.join(' · ')}
-    </p>
   )
 }

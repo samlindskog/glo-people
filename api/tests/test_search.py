@@ -1,7 +1,7 @@
 import pytest
 
 from app import embedder, jobs
-from app.search import FieldFilter, filter_to_mongo
+from app.tools.search import FieldFilter, filter_to_mongo
 
 PEOPLE = """Name,Role,Bio,One-liner,City,MRR
 Ada,founder,payments infrastructure for merchants,fintech payments founder,Lagos,9

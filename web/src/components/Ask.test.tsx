@@ -7,9 +7,10 @@ import type { AskResult } from '../types'
 import Ask from './Ask'
 
 const RESULT: AskResult = {
-  answer: 'Ada Okafor matches: she builds payments infrastructure in Lagos.',
+  text: 'Ada Okafor matches: she builds payments infrastructure in Lagos.',
+  changes: [],
   citations: [{ person_id: 'a'.repeat(24), field: 'bio', value: 'payments infrastructure' }],
-  plan: { semantic: [{ field: 'bio', query: 'payments founder' }], filters: [{ field: 'mrr', op: 'gte', value: 10000 }], rationale: 'bio for the topic, mrr for the figure' },
+  rationale: 'bio for the topic, mrr for the figure',
   request: {
     tier: null,
     filters: [{ field: 'mrr', op: 'gte', value: 10000 }],

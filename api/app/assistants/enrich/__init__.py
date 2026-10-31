@@ -1,12 +1,12 @@
-"""Enrich from LinkedIn and the web: the first workflow (see workflow.py for the ladder)."""
+"""Assistant (level 3): enrich a person from LinkedIn and the web (see assistant.py for the ladder)."""
 
-from app.workflows.base import WorkflowSpec, register
-from app.workflows.enrich.budget import item_cap
-from app.workflows.enrich.models import EnrichOptions
-from app.workflows.enrich.workflow import WORKFLOW, make_deps, run_item
+from app.assistants.base import AssistantSpec, register
+from app.assistants.enrich.assistant import ASSISTANT, make_deps, run_item
+from app.assistants.enrich.budget import item_cap
+from app.assistants.enrich.models import EnrichOptions
 
-SPEC = register(WorkflowSpec(
-    key=WORKFLOW,
+SPEC = register(AssistantSpec(
+    key=ASSISTANT,
     label="Enrich from LinkedIn and the web",
     description=("Resolves the person's LinkedIn profile through FullEnrich (Firecrawl "
                  "Alexandria, 5 credits per match), reads their personal site(s), summarises a "

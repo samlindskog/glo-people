@@ -12,6 +12,7 @@ registers (e.g. embeddings).
 
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,8 +22,9 @@ from pymongo.errors import BulkWriteError, DuplicateKeyError
 
 from app import activity, fields, history, mongo, normalize, properties
 from app.auth import Principal
-from app.history import Source
+from app.history import Change, Source
 from app.mongo import db
+from app.normalize import Parsed
 from app.property_specs import NORMALISABLE
 
 log = logging.getLogger(__name__)
@@ -41,6 +43,15 @@ class PersonError(ValueError):
 
 class ConflictError(PersonError):
     """Another writer kept changing the document; the caller may retry."""
+
+
+@dataclass
+class WriteResult:
+    """What a write did: the person afterwards (public view with history) and the changes, in
+    the shared `history.Change` vocabulary, including the inline normalisation."""
+
+    person: dict[str, Any]
+    changes: list[Change] = field(default_factory=list)
 
 
 def on_write(hook: Callable[[str], Awaitable[None]]) -> None:
@@ -179,19 +190,67 @@ def _check_tier(tier: str) -> None:
         raise PersonError(f"tier must be one of {fields.TIERS}")
 
 
-async def _normalize_into(doc: dict, to_set: dict[str, Any], now: datetime,
-                          src: Source = NORMALIZE_SRC) -> list[str]:
-    """Add norm entries to `to_set` for every typed property of the prospective document (`doc`
-    with `to_set` applied) whose text changed. Returns the keys normalised."""
-    prospective = {**doc, **to_set}
-    parsed = await normalize.document(prospective)
+async def pending_normalization(doc: dict, force: bool = False) -> dict[str, Parsed]:
+    """What a document still needs normalised: every typed property whose current text is not
+    the one its last norm entry derives from. A removed value normalises to nothing. With
+    `force` (a parser upgrade) the parser's own earlier results are redone too; what an agent or
+    a person decided for the current text is always kept."""
+    out: dict[str, Parsed] = {}
+    for key, prop in doc.items():
+        if key in fields.SYSTEM_FIELDS or not history.is_prop(prop):
+            continue
+        sp = properties.spec(key)
+        if sp is None or sp.type not in NORMALISABLE:
+            continue
+        value = history.current(prop)
+        last = history.norm_entries(prop)
+        if last and last[-1].get("of") == normalize.text_hash(value) and \
+                not (force and (last[-1].get("src") or {}).get("kind") == "system"):
+            continue
+        if value is None:
+            if last:
+                out[key] = Parsed()
+            continue
+        lookup = await properties.enum_lookup(key) if sp.type in ("enum", "enum_list") else None
+        out[key] = normalize.parse(value, sp.type, lookup)
+    return out
+
+
+def _norm_change(key: str, prop: Any, p: Parsed) -> Change | None:
+    """The Change a norm entry represents (None for clearing a removed value's norm)."""
+    previous = history.jsonable(history.norm_value(prop))
+    if p.value is not None:
+        return Change(key=key, action="normalized", value=history.jsonable(p.value),
+                      previous=previous)
+    if p.flag:
+        return Change(key=key, action="flagged", flag=p.flag, previous=previous)
+    return None
+
+
+def _apply_norm(doc_props: dict, parsed: dict[str, Parsed], to_set: dict[str, Any],
+                src: Source, now: datetime) -> list[Change]:
+    """Append norm entries for `parsed` to `to_set` (keyed by property) and return the changes."""
+    changes = []
     for key, p in parsed.items():
-        prop = prospective[key]
+        prop = doc_props[key]
         new = history.append_norm(prop, p.value, src, now,
                                   normalize.text_hash(history.current(prop)), p.flag)
-        if new is not None:
-            to_set[key] = new
-    return list(parsed)
+        if new is None:
+            continue
+        to_set[key] = new
+        change = _norm_change(key, prop, p)
+        if change:
+            changes.append(change)
+    return changes
+
+
+async def _normalize_into(doc: dict, to_set: dict[str, Any], now: datetime,
+                          src: Source = NORMALIZE_SRC) -> list[Change]:
+    """Add norm entries to `to_set` for every typed property of the prospective document (`doc`
+    with `to_set` applied) whose text changed. Returns the normalisation changes."""
+    prospective = {**doc, **to_set}
+    parsed = await pending_normalization(prospective)
+    return _apply_norm(prospective, parsed, to_set, src, now)
 
 
 def _rev_filter(doc: dict | None) -> dict[str, Any]:
@@ -211,32 +270,33 @@ async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any]) -> bool:
 
 
 async def create(principal: Principal, tier: str, values: dict[str, Any],
-                 source: Source | None = None) -> dict:
+                 source: Source | None = None) -> WriteResult:
     _check_tier(tier)
     cleaned = await _clean(values)
     if not cleaned.get("name"):
         raise PersonError("name is required")
     src = source or Source.for_rest(principal)
     now = datetime.now(UTC)
-    doc: dict[str, Any] = {k: history.new_prop(v, src, now) for k, v in cleaned.items()
-                           if v is not None}
+    present = {k: v for k, v in cleaned.items() if v is not None}
+    doc: dict[str, Any] = {k: history.new_prop(v, src, now) for k, v in present.items()}
     doc.update({"tier": tier, "created_at": now, "updated_at": now,
                 "schema_version": history.SCHEMA_VERSION, "rev": 1})
     norm: dict[str, Any] = {}
-    await _normalize_into(doc, norm, now)
+    changes = [Change(key=k, action="set", value=v) for k, v in present.items()]
+    changes += await _normalize_into(doc, norm, now)
     doc.update(norm)
     res = await db().people.insert_one(doc)
     pid = str(res.inserted_id)
     await _after_write(pid)
     await activity.record("person.create", principal, pid,
-                          {"fields": sorted(k for k in cleaned if cleaned[k] is not None),
-                           "src": src.kind})
-    return await get(pid)
+                          {"fields": sorted(present), "src": src.kind})
+    return WriteResult(await get(pid), changes)
 
 
 async def update(principal: Principal, person_id: str, values: dict[str, Any],
-                 tier: str | None = None, source: Source | None = None) -> dict | None:
-    """Append new values to the person's fields. Returns the person, or None if not found."""
+                 tier: str | None = None, source: Source | None = None) -> WriteResult | None:
+    """Append new values to the person's fields. Returns the write result (person and
+    changes), or None if the person does not exist."""
     oid = _oid(person_id)
     cleaned = await _clean(values)
     if "name" in cleaned and cleaned["name"] is None:
@@ -250,14 +310,19 @@ async def update(principal: Principal, person_id: str, values: dict[str, Any],
         if doc is None:
             return None
         now = datetime.now(UTC)
+        before = {k: history.jsonable(history.current(doc.get(k))) for k in cleaned}
         to_set, changed, removed, unchanged = history.apply(doc, cleaned, src, now,
                                                             fields.SYSTEM_FIELDS)
+        changes = [Change(key=k, action="set", value=cleaned[k], previous=before[k])
+                   for k in changed]
+        changes += [Change(key=k, action="removed", previous=before[k]) for k in removed]
         if tier is not None and tier != doc.get("tier"):
             to_set["tier"] = tier
             changed.append("tier")
+            changes.append(Change(key="tier", action="set", value=tier, previous=doc.get("tier")))
         if changed or removed:
             to_set["updated_at"] = now
-        await _normalize_into(doc, to_set, now)
+        changes += await _normalize_into(doc, to_set, now)
         if not to_set and doc.get("schema_version") == history.SCHEMA_VERSION:
             break
         to_set["schema_version"] = history.SCHEMA_VERSION
@@ -271,43 +336,40 @@ async def update(principal: Principal, person_id: str, values: dict[str, Any],
     await activity.record("person.update", principal, person_id,
                           {"set": sorted(changed), "unset": sorted(removed),
                            "unchanged": sorted(unchanged), "src": src.kind})
-    return await get(person_id)
+    return WriteResult(await get(person_id), changes)
 
 
-async def _write_norm(doc: dict, parsed: dict[str, normalize.Parsed], src: Source,
-                      now: datetime) -> dict[str, Any]:
-    """The `$set` that records `parsed` on `doc`'s typed properties (empty when nothing changes)."""
-    to_set: dict[str, Any] = {}
-    for key, p in parsed.items():
-        prop = doc.get(key)
+def _write_norm(doc: dict, parsed: dict[str, Parsed], src: Source,
+                now: datetime) -> tuple[dict[str, Any], list[Change]]:
+    """The `$set` that records `parsed` on `doc`'s typed properties (empty when nothing changes)
+    and the changes it represents."""
+    for key in parsed:
         sp = properties.spec(key)
-        if sp is None or sp.type not in NORMALISABLE or not history.is_prop(prop):
+        if sp is None or sp.type not in NORMALISABLE or not history.is_prop(doc.get(key)):
             raise PersonError(f"{key!r} is not a typed property of this person")
-        new = history.append_norm(prop, p.value, src, now,
-                                  normalize.text_hash(history.current(prop)), p.flag)
-        if new is not None:
-            to_set[key] = new
-    return to_set
+    to_set: dict[str, Any] = {}
+    changes = _apply_norm(doc, parsed, to_set, src, now)
+    return to_set, changes
 
 
-async def update_norm(principal: Principal | None, person_id: str,
-                      parsed: dict[str, normalize.Parsed], source: Source) -> dict | None:
+async def update_norm(principal: Principal | None, person_id: str, parsed: dict[str, Parsed],
+                      source: Source) -> WriteResult | None:
     """Record normalised values (from the normaliser agent or a re-run of the parser) on a
-    person's typed properties. Returns the person, or None if not found. Value hooks do not run:
-    the text, and so the embeddings, are unchanged."""
+    person's typed properties. Returns the write result, or None if not found. Value hooks do not
+    run: the text, and so the embeddings, are unchanged."""
     oid = _oid(person_id)
     for _ in range(CAS_RETRIES):
         doc = await db().people.find_one({"_id": oid})
         if doc is None:
             return None
-        to_set = await _write_norm(doc, parsed, source, datetime.now(UTC))
+        to_set, changes = _write_norm(doc, parsed, source, datetime.now(UTC))
         if not to_set or await _cas_write(oid, doc, to_set):
             break
     else:
         raise ConflictError(f"person {person_id} is being modified concurrently; retry")
     await activity.record("person.normalize", principal, person_id,
                           {"set": sorted(to_set), "src": source.kind})
-    return await get(person_id)
+    return WriteResult(await get(person_id), changes)
 
 
 async def normalize_all(page: int = 500, progress: Callable[[int], None] | None = None,
@@ -323,10 +385,10 @@ async def normalize_all(page: int = 500, progress: Callable[[int], None] | None 
             return written
         last = batch[-1]["_id"]
         for doc in batch:
-            parsed = await normalize.document(doc, force=force)
+            parsed = await pending_normalization(doc, force=force)
             if not parsed:
                 continue
-            to_set = await _write_norm(doc, parsed, NORMALIZE_SRC, datetime.now(UTC))
+            to_set, _ = _write_norm(doc, parsed, NORMALIZE_SRC, datetime.now(UTC))
             if to_set and await _cas_write(doc["_id"], doc, to_set):
                 written += 1
         if progress:

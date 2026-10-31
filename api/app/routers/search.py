@@ -1,5 +1,6 @@
-"""Search over HTTP: the engine (POST /api/search) and agentic search (POST /api/search/ask).
-Tuning travels with each call (option models with defaults)."""
+"""Search over HTTP (level 4 surface). Tools: POST /api/search runs a request, POST
+/api/search/plan turns a question into a request. Assistant: POST /api/search/ask answers a
+question in text. Tuning travels with each call (option models with defaults)."""
 
 from typing import Annotated, Literal
 
@@ -8,8 +9,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 
 from app import activity
+from app.assistants.ask import AskResult, ask
 from app.auth import Principal, require
-from app.search import (
+from app.tools.plan import PlanResult, Tuning, plan_search
+from app.tools.search import (
     FieldFilter,
     SearchRequest,
     SearchResponse,
@@ -17,7 +20,6 @@ from app.search import (
     record_search,
     run_search,
 )
-from app.search.ask import AskOptions, AskResult, ask
 
 router = APIRouter(prefix="/api", tags=["search"])
 
@@ -37,12 +39,12 @@ async def search(req: SearchRequest, principal: Reader) -> SearchResponse:
     return resp
 
 
-class AskBody(BaseModel):
+class QuestionBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     tier: Literal["member", "plus_one"] | None = None
     filters: list[FieldFilter] = Field(default_factory=list, max_length=10,
                                        description="Extra literal filters, ANDed with the plan")
-    options: AskOptions = Field(default_factory=AskOptions)
+    options: Tuning = Field(default_factory=Tuning)
 
 
 def agent_error(e: Exception) -> HTTPException:
@@ -52,8 +54,18 @@ def agent_error(e: Exception) -> HTTPException:
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e))
 
 
+@router.post("/search/plan")
+async def plan(body: QuestionBody, principal: Reader) -> PlanResult:
+    """Tool: the executable search for a question (run it with POST /api/search)."""
+    try:
+        return await plan_search(body.question, body.tier, body.filters, body.options)
+    except (ValueError, AgentRunError) as e:
+        raise agent_error(e) from e
+
+
 @router.post("/search/ask")
-async def ask_people(body: AskBody, principal: Reader) -> AskResult:
+async def ask_people(body: QuestionBody, principal: Reader) -> AskResult:
+    """Assistant: plan, search and answer the question in text, with citations."""
     try:
         result = await ask(body.question, body.options, principal, body.tier, body.filters,
                            source="api" if principal.via_api_key else "ui")
@@ -61,6 +73,6 @@ async def ask_people(body: AskBody, principal: Reader) -> AskResult:
         raise agent_error(e) from e
     await activity.record("ask", principal, str(result.search_id),
                           {"question": body.question, "total": result.total,
-                           "plan": result.plan.model_dump(mode="json", exclude_none=True)})
+                           **describe(result.request)})
     return result
 
