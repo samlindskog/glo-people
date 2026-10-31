@@ -95,13 +95,13 @@ export const api = {
   plan: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
     request<PlanResult>('POST', '/api/search/plan', body),
   store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
-    request<StoreResult>('POST', `/api/people/${id}/store`, { passage, options }),
+    request<StoreResult>('POST', `/api/people/${id}/store?wait=true`, { passage, options }),
   storeFile: (id: string, file: File) => {
     const fd = new FormData()
     fd.append('file', file)
-    return request<StoreResult>('POST', `/api/people/${id}/store/file`, fd)
+    return request<StoreResult>('POST', `/api/people/${id}/store/file?wait=true`, fd)
   },
-  normalizePerson: (id: string) => request<NormalizeResult>('POST', `/api/people/${id}/normalize`),
+  normalizePerson: (id: string) => request<NormalizeResult>('POST', `/api/people/${id}/normalize?wait=true`),
   // assistants (text for a human plus the changes)
   ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
     request<AskResult>('POST', '/api/search/ask', body),

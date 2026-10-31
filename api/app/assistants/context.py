@@ -3,14 +3,15 @@ budget, and a `write` helper that appends to the person's properties with an age
 collects the resulting changes. Extends the agents' dependency object so the same instance can
 be handed to the tools' agents."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import people
 from app.agents.common import AgentDeps
 from app.assistants.base import Budget
 from app.auth import Principal
 from app.history import Change, Source
+from app.tools import ToolEvent, ToolResult, invoke, record
 
 
 @dataclass(kw_only=True)
@@ -49,15 +50,29 @@ class AssistantDeps(AgentDeps):
     def skip(self, step: str, reason: str) -> None:
         self.skipped.append({"step": step, "reason": reason})
 
+    def on_tool_event(self, event: ToolEvent) -> None:
+        """Where the events of this item's tools go; the runner replaces it per item."""
+
+    async def tool(self, fn: Callable[..., Awaitable[ToolResult | None]], agent: str,
+                   **kwargs: Any) -> ToolResult | None:
+        """Run a tool on this item's person: the entries it writes are attributed to
+        `assistant/agent` with the run and item as reference, it spends from this item's budget,
+        its events reach `on_tool_event`, and its changes join the item's. None when the person
+        no longer exists."""
+        ctx = await invoke.make_context(self.person_id, self.source(agent), self.principal,
+                                        firecrawl=self.firecrawl, sink=self.on_tool_event)
+        if ctx is None:
+            return None
+        inv = invoke.invoke(fn, ctx, **kwargs)
+        result = await inv.wait()
+        if inv.person is not None:
+            self.person = inv.person
+        self.changes.extend(result.changes)
+        return result
+
     async def write(self, agent: str, values: dict[str, Any]) -> None:
-        """Append `values` to the person's properties; the writer reports what actually changed
-        (values equal to the current one append nothing)."""
+        """Append `values` to the person's properties through the record tool; the writer
+        reports what actually changed (values equal to the current one append nothing)."""
         values = {k: v for k, v in values.items() if v not in (None, "", [])}
-        if not values:
-            return
-        res = await people.update(self.principal, self.person_id, values,
-                                  source=self.source(agent))
-        if res is None:
-            return
-        self.person = res.person
-        self.changes.extend(res.changes)
+        if values:
+            await self.tool(record.write, agent, values=values)

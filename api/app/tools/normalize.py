@@ -18,11 +18,9 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 from app import fields, history, people, properties
 from app import normalize as parser
 from app.agents.common import run_agent
-from app.auth import Principal
-from app.history import Change, Source
-from app.integrations.firecrawl import AsyncFirecrawl
+from app.history import Change
 from app.normalize import NON_NORMALIZABLE, Parsed
-from app.tools import ToolResult
+from app.tools import Emit, ToolContext, ToolResult, silent
 from app.tools import repair as repair_tool
 from app.tools.repair import RepairOptions, RepairResult
 
@@ -185,48 +183,43 @@ def person_context(doc: dict) -> str:
     return "\n".join(lines) or "(nothing else known)"
 
 
-async def _decide(items: list[Item], lookups: dict[str, dict[str, str]], context: str) -> Normalised:
+async def _decide(items: list[Item], lookups: dict[str, dict[str, str]], context: str,
+                  emit: Emit = silent) -> Normalised:
     lines = []
     for it in items:
         values = f" values: {', '.join(it.values)}" if it.values else ""
         lines.append(f"- {it.field} ({it.type}{values}): {it.text!r}")
     prompt = f"Person:\n{context}\n\nItems:\n" + "\n".join(lines)
     deps = NormalizerDeps({it.field: it for it in items}, lookups)
-    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
+    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
 # --- the tool -----------------------------------------------------------------------------------------
 
-async def normalize(person_id: str, principal: Principal | None, source: Source,
-                    opts: NormalizeOptions | None = None,
-                    firecrawl: AsyncFirecrawl | None = None) -> NormalizeResult | None:
-    """Parser first, then the agent for what stayed unmapped, then the repair of the record.
-    None if the person does not exist."""
+async def normalize(ctx: ToolContext, opts: NormalizeOptions | None = None) -> NormalizeResult:
+    """Parser first, then the agent for what stayed unmapped, then the repair of the record; all
+    staged on the context's transaction."""
     opts = opts or NormalizeOptions()
-    docs = await people.fetch([person_id])
-    if not docs:
-        return None
-    doc = docs[0]
-    result = NormalizeResult(person_id=person_id)
-    values = await _values(doc, person_id, principal, source, opts, result)
-    if opts.repair and (opts.force or history.current(values.get(repair_tool.KIND)) is None):
+    result = NormalizeResult(person_id=ctx.person_id)
+    await _values(ctx, opts, result)
+    doc = ctx.tx.view
+    if opts.repair and (opts.force or history.current(doc.get(repair_tool.KIND)) is None):
         result.repair = await repair_tool.repair(
-            person_id, principal, Source("agent", repair_tool.AGENT_NAME, source.ref),
-            RepairOptions(provider=opts.provider, allocate=opts.allocate), firecrawl)
-        if result.repair is not None:
-            result.changes += result.repair.changes
+            ctx.child(repair_tool.AGENT_NAME),
+            RepairOptions(provider=opts.provider, allocate=opts.allocate))
+    result.changes = ctx.tx.changes("normalize", "repair")
     return result
 
 
-async def _values(doc: dict, person_id: str, principal: Principal | None, source: Source,
-                  opts: NormalizeOptions, result: NormalizeResult) -> dict:
-    """The typed-value stages; returns the document as it stands afterwards."""
+async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeResult) -> None:
+    """The typed-value stages: the parser, then the agent."""
+    doc = ctx.tx.view
     parsed = await people.pending_normalization(doc)
     if parsed:
-        write = await people.update_norm(principal, person_id, parsed, people.NORMALIZE_SRC)
-        if write is not None:
-            result.changes += write.changes
-        doc = (await people.fetch([person_id]))[0]
+        changes = await ctx.tx.set_norm(parsed, people.NORMALIZE_SRC, tag="normalize")
+        ctx.emit("step", f"parser: {len(parsed)} typed value{'s' if len(parsed) != 1 else ''} "
+                         f"re-read, {len(changes)} changed", keys=sorted(parsed))
+        doc = ctx.tx.view
 
     items: list[Item] = []
     lookups: dict[str, dict[str, str]] = {}
@@ -244,10 +237,12 @@ async def _values(doc: dict, person_id: str, principal: Principal | None, source
             lookups[key] = await properties.enum_lookup(key)
         items.append(Item(field=key, text=fields.text_of(value), type=sp.type, values=values))
     if not items:
-        return doc
+        return
 
     result.agent_called = True
-    decided_by_agent = await _decide(items, lookups, person_context(doc))
+    ctx.emit("step", "asking the normaliser about " + ", ".join(i.field for i in items),
+             keys=[i.field for i in items])
+    decided_by_agent = await _decide(items, lookups, person_context(doc), ctx.emit)
     decided: dict[str, Parsed] = {}
     allocated_total = 0
     for m in decided_by_agent.items:
@@ -266,23 +261,28 @@ async def _values(doc: dict, person_id: str, principal: Principal | None, source
             may_allocate = opts.allocate and allocated_total < opts.max_new_values \
                 and m.field not in result.allocated
             canon, allocated = await properties.resolve_enum_value(
-                m.field, value, may_allocate, src=f"agent:{AGENT_NAME} {source.ref or ''}".strip())
+                m.field, value, may_allocate,
+                src=f"agent:{AGENT_NAME} {ctx.source.ref or ''}".strip())
             if canon is None:
                 result.rejected.setdefault(m.field, []).append(value)
+                ctx.emit("note", f"{m.field}: {value!r} not added (cap)", key=m.field)
                 continue
             accepted.append(canon)
             if allocated:
                 allocated_total += 1
                 result.allocated.setdefault(m.field, []).append(canon)
-                result.changes.append(Change(key=m.field, action="enum_value_added", value=canon))
+                ctx.tx.record_catalog(Change(key=m.field, action="enum_value_added", value=canon),
+                                      tag="normalize")
+                ctx.emit("note", f"{m.field}: new value {canon!r}", key=m.field, value=canon)
             if item.type == "enum" and await properties.add_alias(m.field, canon, item.text):
                 result.merged[m.field] = canon
         if accepted:
             decided[m.field] = Parsed(accepted if item.type == "enum_list" else accepted[0])
     result.unmapped = sorted(i.field for i in items if i.field not in decided)
     if decided:
-        write = await people.update_norm(principal, person_id, decided, source)
-        if write is not None:
-            result.changes += write.changes
-        doc = (await people.fetch([person_id]))[0]
-    return doc
+        changes = await ctx.tx.set_norm(decided, ctx.source, tag="normalize")
+        for c in changes:
+            if c.action == "normalized":
+                ctx.emit("write", f"{c.key} → {c.value}", key=c.key, value=c.value)
+            elif c.action == "flagged":
+                ctx.emit("write", f"{c.key}: {c.flag}", key=c.key, flag=c.flag)

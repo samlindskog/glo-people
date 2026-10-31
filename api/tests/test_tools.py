@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.history import Source
 from app.integrations.firecrawl import Budget
 from app.mongo import db
+from app.tools import invoke
 from app.tools import plan as plan_tool
 from app.tools import repair as repair_tool
 from tests.test_assistants import FakeFirecrawl
@@ -116,7 +117,7 @@ def by_change(result: dict) -> dict:
 
 async def test_store_files_facts_under_properties(people_by_name, writer, reader):
     ada = people_by_name["Ada"]
-    r = await writer.post(f"/api/people/{ada}/store", json={
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={
         "passage": "notes: follows up next week. mrr: 20k. sectors: payments; lending. "
                    "stage: seed round closed. bio: payments infrastructure for merchants. "
                    "Hi there. new favourite tool: lathe"})
@@ -150,34 +151,34 @@ async def test_store_files_facts_under_properties(people_by_name, writer, reader
     assert acts[0]["meta"]["created"] == ["favourite_tool"]
 
     # appending to a list keeps what is there and skips folded duplicates
-    r = await writer.post(f"/api/people/{ada}/store", json={"passage": "sectors: Lending; ai"})
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={"passage": "sectors: Lending; ai"})
     assert by_change(r.json())[("sectors", "append")]["value"] == ["payments", "lending", "ai"]
     # a near-duplicate new property is redirected to the existing one
-    r = await writer.post(f"/api/people/{ada}/store", json={"passage": "new favourite tools: hammer",
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={"passage": "new favourite tools: hammer",
                                                            "options": {"near_duplicate": 0.3}})
     assert r.json()["redirected"] == {"favourite_tools": "favourite_tool"}
     assert by_change(r.json())[("favourite_tool", "set")] == {
         "key": "favourite_tool", "action": "set", "value": "hammer", "previous": "lathe", "flag": None}
     # beyond max_new the facts go to notes instead of a new property
-    r = await writer.post(f"/api/people/{ada}/store", json={
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={
         "passage": "new eye colour: green. new shoe size: 42", "options": {"max_new": 1}})
     assert r.json()["created_properties"] == ["eye_colour"] and r.json()["to_notes"] == ["Shoe size"]
     assert by_change(r.json())[("notes", "set")]["value"] == "Shoe size: 42"
 
-    assert (await writer.post("/api/people/000000000000000000000000/store",
+    assert (await writer.post("/api/people/000000000000000000000000/store?wait=true",
                               json={"passage": "x: y"})).status_code == 404
-    assert (await reader.post(f"/api/people/{ada}/store", json={"passage": "x: y"})
+    assert (await reader.post(f"/api/people/{ada}/store?wait=true", json={"passage": "x: y"})
             ).status_code == 403
     assert (await writer.post(f"/api/people/{ada}/store/apply", json={})).status_code in (404, 405)
 
 
 async def test_store_from_file(people_by_name, writer, reader):
     bo = people_by_name["Bo"]
-    r = await writer.post(f"/api/people/{bo}/store/file",
+    r = await writer.post(f"/api/people/{bo}/store/file?wait=true",
                           files={"file": ("call.md", b"notes: wants intros to LPs\n", "text/markdown")})
     assert r.status_code == 200, r.text
     assert by_change(r.json())[("notes", "set")]["value"] == "wants intros to LPs"
-    r = await writer.post(f"/api/people/{bo}/store/file",
+    r = await writer.post(f"/api/people/{bo}/store/file?wait=true",
                           files={"file": ("e.txt", b"   ", "text/plain")})
     assert r.status_code == 422
 
@@ -190,7 +191,7 @@ async def test_normalize_parses_then_asks_the_agent(people_by_name, writer, read
     assert before["norm_flags"] == {"stage": "unmapped"}
     await db().people.update_one({"_id": (await db().people.find_one({"name.v": "Cy"}))["_id"]},
                                  {"$set": {"mrr": {"v": "lots", "h": [{"v": "lots"}]}}})
-    r = await writer.post(f"/api/people/{cy}/normalize")
+    r = await writer.post(f"/api/people/{cy}/normalize?wait=true")
     assert r.status_code == 200, r.text
     res = r.json()
     by = by_change(res)
@@ -203,12 +204,12 @@ async def test_normalize_parses_then_asks_the_agent(people_by_name, writer, read
     entry = after["history_norm"]["stage"][-1]
     assert entry["src"] == {"kind": "agent", "by": "normalizer", "ref": "user:wendy"}
     # nothing left for the agent: a second call is free and changes nothing
-    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert not res["agent_called"] and res["changes"] == []
     # and the parser does not undo the agent on a later unrelated write
     await writer.patch(f"/api/people/{cy}", json={"fields": {"bio": "lending for SMBs"}})
     assert (await reader.get(f"/api/people/{cy}")).json()["norm"]["stage"] == "Pre-seed"
-    assert (await reader.post(f"/api/people/{cy}/normalize")).status_code == 403
+    assert (await reader.post(f"/api/people/{cy}/normalize?wait=true")).status_code == 403
 
 
 async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, writer, reader):
@@ -217,7 +218,7 @@ async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, 
     ada, bo, cy = (people_by_name[n] for n in ("Ada", "Bo", "Cy"))
     await writer.patch(f"/api/people/{ada}", json={"fields": {"region": "Lisbon",
                                                               "stage": "seed round closed"}})
-    r = await writer.post(f"/api/people/{ada}/normalize")
+    r = await writer.post(f"/api/people/{ada}/normalize?wait=true")
     assert r.status_code == 200, r.text
     res = r.json()
     by = by_change(res)
@@ -237,25 +238,25 @@ async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, 
                                                              "region": "lisbon"}})
     bo_doc = (await reader.get(f"/api/people/{bo}")).json()
     assert bo_doc["norm"]["stage"] == "Seed" and bo_doc["norm"]["region"] == "Lisbon"
-    res = (await writer.post(f"/api/people/{bo}/normalize")).json()
+    res = (await writer.post(f"/api/people/{bo}/normalize?wait=true")).json()
     assert not res["agent_called"]
     # an industry list in the stage field is dropped, not allocated
     await writer.patch(f"/api/people/{cy}", json={
         "fields": {"stage": "Human Resources & Workforce, Artificial Intelligence"}})
-    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert by_change(res)[("stage", "flagged")]["flag"] == "non_normalizable"
     assert res["allocated"] == {} and "Human Resources & Workforce, Artificial Intelligence" not in \
         await properties.enum_values("stage")
     # with allocation off a new category stays unmapped and is reported as rejected
     await writer.patch(f"/api/people/{cy}", json={"fields": {"region": "Porto"}})
-    r = await writer.post(f"/api/people/{cy}/normalize", json={"options": {"allocate": False}})
+    r = await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"allocate": False}})
     res = r.json()
     assert res["rejected"] == {"region": ["Porto"]} and res["unmapped"] == ["region"]
     assert "Porto" not in await properties.enum_values("region")
     assert (await reader.get(f"/api/people/{cy}")).json()["norm_flags"]["region"] == "unmapped"
     # the cap counts new values per call
     await writer.patch(f"/api/people/{cy}", json={"fields": {"warmth": "Glowing"}})
-    r = await writer.post(f"/api/people/{cy}/normalize", json={"options": {"max_new_values": 1}})
+    r = await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"max_new_values": 1}})
     res = r.json()
     assert sorted(res["allocated"]) == ["region"] and res["rejected"] == {"warmth": ["Glowing"]}
 
@@ -264,6 +265,16 @@ async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, 
 
 def fake_firecrawl() -> FakeFirecrawl:
     return FakeFirecrawl(api_key="fake", budget=Budget(max_scrapes=1, max_searches=0, max_credits=5))
+
+
+async def repair(pid: str, src: Source, opts: repair_tool.RepairOptions | None = None,
+                 firecrawl: FakeFirecrawl | None = None) -> repair_tool.RepairResult:
+    """The repair tool on one record, as any caller runs a tool: through an invocation."""
+    ctx = await invoke.make_context(pid, src, None, firecrawl=firecrawl)
+    assert ctx is not None
+    result = await invoke.run(repair_tool.repair, ctx, opts=opts)
+    assert isinstance(result, repair_tool.RepairResult)
+    return result
 
 
 async def make(writer, fields_: dict, tier: str = "member") -> str:
@@ -297,7 +308,7 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     src = Source("agent", "repair", "test")
     # mojibake and casing are fixed mechanically; a two-token name is complete: Person
     pid = await make(writer, {"name": "andrÃ© niÃ±o", "bio": "Founder of a fintech."})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     assert res.mechanical == ["name"] and res.kind == "Person" and res.name_source == "unchanged"
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "André Niño" and person["record_kind"] == "Person"
@@ -306,11 +317,11 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     assert not res.provider_called and res.credits == 0
     # a company recorded as a person
     pid = await make(writer, {"name": "Light Node Ventures", "website": "https://lightnode.vc"})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     assert res.kind == "Company" and (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Company"
     # an email as the name: the local part gives the full name (evidence), nothing invented
     pid = await make(writer, {"name": "polly.israni@gmail.com", "email": "polly.israni@gmail.com"})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     assert res.name_source == "evidence" and res.kind == "Person"
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "Polly Israni" and person["history"]["name"][0]["v"] == "polly.israni@gmail.com"
@@ -318,7 +329,7 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     # a misfiled value moves to notes and is tombstoned where it was
     pid = await make(writer, {"name": "Dana Whitfield", "website": "previously marketing manager at Gap Inc.",
                               "notes": "met in June"})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     by = {(c.key, c.action): c for c in res.changes}
     assert by[("website", "removed")].previous == "previously marketing manager at Gap Inc."
     assert by[("notes", "set")].value == "met in June\npreviously marketing manager at Gap Inc."
@@ -331,7 +342,7 @@ async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentif
     # a first name with a LinkedIn profile the provider knows: the name comes from the profile
     pid = await make(writer, {"name": "Ada", "linkedin": "https://www.linkedin.com/in/adaokafor"})
     fc = fake_firecrawl()
-    res = await repair_tool.repair(pid, None, src, firecrawl=fc)
+    res = await repair(pid, src, firecrawl=fc)
     assert res.provider_called and res.credits == 5 and res.name_source == "provider"
     assert res.kind == "Person"
     person = (await reader.get(f"/api/people/{pid}")).json()
@@ -341,17 +352,16 @@ async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentif
                           "history", "history_norm", "name", "linkedin", "record_kind"} == set()  # nothing else written
     # a profile the provider does not know: Unidentifiable, no credits spent
     pid = await make(writer, {"name": "Bo", "linkedin": "https://www.linkedin.com/in/nobody-here"})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     assert res.provider_called and res.credits == 0 and res.kind == "Unidentifiable"
     # no LinkedIn: no provider call, Unidentifiable
     pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
-    res = await repair_tool.repair(pid, None, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, firecrawl=fake_firecrawl())
     assert not res.provider_called and res.kind == "Unidentifiable"
     assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
     # provider switched off: no call either
     pid = await make(writer, {"name": "Cy", "linkedin": "https://www.linkedin.com/in/adaokafor"})
-    res = await repair_tool.repair(pid, None, src, repair_tool.RepairOptions(provider=False),
-                                   firecrawl=fake_firecrawl())
+    res = await repair(pid, src, repair_tool.RepairOptions(provider=False), firecrawl=fake_firecrawl())
     assert not res.provider_called and res.kind == "Unidentifiable"
 
 
@@ -364,7 +374,7 @@ async def test_repair_validator_refuses_invented_names_and_allocates_kinds(write
             "kind": "Person", "name": "Sam Baker", "name_complete": True, "confidence": "high"})])
 
     with repair_tool.agent.override(model=FunctionModel(inventor)), pytest.raises(AgentRunError):
-        await repair_tool.repair(pid, None, src)
+        await repair(pid, src)
     assert (await reader.get(f"/api/people/{pid}")).json()["name"] == "Sam"
 
     def fund(messages, info):
@@ -373,24 +383,24 @@ async def test_repair_validator_refuses_invented_names_and_allocates_kinds(write
 
     pid = await make(writer, {"name": "Sequoia Scout Fund III", "website": "https://sequoia.com"})
     with repair_tool.agent.override(model=FunctionModel(fund)):
-        res = await repair_tool.repair(pid, None, src, repair_tool.RepairOptions(allocate=False))
+        res = await repair(pid, src, repair_tool.RepairOptions(allocate=False))
         assert res.kind == "Person" and res.rejected == ["kind 'Fund' (allocation off)"]
-        res = await repair_tool.repair(pid, None, src)
+        res = await repair(pid, src)
     assert res.kind == "Fund" and ("record_kind", "enum_value_added") in {(c.key, c.action) for c in res.changes}
     assert "Fund" in await properties.enum_values("record_kind")
 
 
 async def test_normalize_repairs_once_unless_forced(people_by_name, writer, reader):
     cy = people_by_name["Cy"]
-    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert res["repair"]["kind"] == "Unidentifiable"           # "Cy": one token, no LinkedIn
     assert res["repair"]["provider_called"] is False           # no FIRECRAWL_API_KEY in tests
     assert (await reader.get(f"/api/people/{cy}")).json()["record_kind"] == "Unidentifiable"
-    res = (await writer.post(f"/api/people/{cy}/normalize")).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert res["repair"] is None                               # already classified
-    res = (await writer.post(f"/api/people/{cy}/normalize", json={"options": {"force": True}})).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"force": True}})).json()
     assert res["repair"]["kind"] == "Unidentifiable" and res["repair"]["agent_called"]
-    res = (await writer.post(f"/api/people/{cy}/normalize", json={"options": {"repair": False, "force": True}})).json()
+    res = (await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"repair": False, "force": True}})).json()
     assert res["repair"] is None
 
 

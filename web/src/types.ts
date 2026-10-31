@@ -183,7 +183,7 @@ export interface SearchRecord {
 
 // --- levels: what a writer, tool or assistant did to a document ------------------------------
 
-export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created' | 'enum_value_added'
+export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created' | 'enum_value_added' | 'note'
 
 /** One thing that happened to a person's document (api/ARCHITECTURE.md). */
 export interface Change {

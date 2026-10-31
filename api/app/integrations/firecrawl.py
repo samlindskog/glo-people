@@ -9,6 +9,7 @@ tool at its listed price per record found (an empty result costs nothing).
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,6 +92,9 @@ class Budget:
     searches: int = 0
     credits: int = 0
     calls: list[dict] = field(default_factory=list)
+    # Called with each paid call as it is charged ({kind, target, credits}); an invocation hooks
+    # it to report provider activity live.
+    on_charge: Callable[[dict], None] | None = field(default=None, repr=False, compare=False)
 
     def check_scrape(self, expected: int) -> None:
         if self.scrapes + 1 > self.max_scrapes:
@@ -111,6 +115,8 @@ class Budget:
             self.searches += 1
         self.credits += credits
         self.calls.append({"kind": kind, "target": target, "credits": credits})
+        if self.on_charge is not None:
+            self.on_charge(self.calls[-1])
 
 
 class AsyncFirecrawl:

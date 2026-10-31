@@ -11,7 +11,6 @@ from pydantic import Field
 from app.assistants.base import AssistantSpec, register
 from app.assistants.context import AssistantDeps
 from app.auth import Principal
-from app.history import Source
 from app.integrations.firecrawl import AsyncFirecrawl, Budget
 from app.integrations.fullenrich import MATCH_CREDITS
 from app.tools import normalize as normalize_tool
@@ -67,14 +66,11 @@ def describe(result: normalize_tool.NormalizeResult) -> str:
 
 
 async def run_item(deps: AssistantDeps) -> dict[str, Any]:
-    result = await normalize_tool.normalize(
-        deps.person_id, deps.principal,
-        Source("agent", f"{ASSISTANT}/normalizer", f"run:{deps.run_id}/item:{deps.item_id}"),
-        deps.options, deps.firecrawl)
+    result = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME, opts=deps.options)
     if result is None:
         return {"status": "failed", "error": "person not found", "text": "Person not found.",
                 "changes": []}
-    deps.changes.extend(result.changes)
+    assert isinstance(result, normalize_tool.NormalizeResult)
     return {"text": describe(result), "changes": [c.model_dump() for c in result.changes],
             "agent_called": result.agent_called, "unmapped": result.unmapped,
             "merged": result.merged, "allocated": result.allocated, "rejected": result.rejected,

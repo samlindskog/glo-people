@@ -269,6 +269,187 @@ async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any]) -> bool:
     return res.matched_count == 1
 
 
+# --- staged writes: one commit per document -----------------------------------------------------------
+
+@dataclass
+class _Op:
+    """One staged operation. The op log is the only state a transaction keeps between attempts:
+    everything else is derived from it against the document of the current attempt."""
+
+    kind: str                                     # values | norm
+    data: dict[str, Any]                          # cleaned values, or parsed normalised values
+    src: Source
+    tag: str = ""
+    tier: str | None = None
+    appended: frozenset[str] = frozenset()        # values whose `set` is reported as `append`
+    of_expected: dict[str, str] = field(default_factory=dict)   # norm: key → hash of the text judged
+
+
+class Transaction:
+    """Staged changes to ONE person document, committed in a single compare-and-set write.
+
+    Tools stage values and normalised values against `view` (the document as it will be) and
+    never write; `commit` writes once, so a tool that is stopped before its commit has changed
+    nothing. A commit that loses the compare-and-set race re-reads the document and replays the
+    op log on it, so concurrent writers never lose each other's entries; a normalised value whose
+    text changed underneath is dropped on replay (with a `note` change) instead of being attached
+    to text its decider never saw. Catalog changes (a property created, an enum value added)
+    happen in the registry right away and are only *reported* here, with `record_catalog`.
+    """
+
+    def __init__(self, doc: dict) -> None:
+        self.doc = doc
+        self.ops: list[_Op] = []
+        self.catalog: list[tuple[str, Change]] = []
+        self.committed = False
+        self._reset()
+
+    def _reset(self) -> None:
+        self._to_set: dict[str, Any] = {}
+        self._changes: list[tuple[str, Change]] = []
+        self._set: set[str] = set()
+        self._unset: set[str] = set()
+        self._unchanged: set[str] = set()
+        self._value_changed = False
+
+    @classmethod
+    async def open(cls, person_id: str) -> "Transaction | None":
+        """Read the document; None when the person does not exist."""
+        doc = await db().people.find_one({"_id": _oid(person_id)})
+        return cls(doc) if doc else None
+
+    @property
+    def person_id(self) -> str:
+        return str(self.doc["_id"])
+
+    @property
+    def view(self) -> dict:
+        """The document as it will be after the commit: what later stages read."""
+        return {**self.doc, **self._to_set}
+
+    def public(self, include_history: bool = True) -> dict:
+        return public(self.view, include_history)
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self._to_set) or self.doc.get("schema_version") != history.SCHEMA_VERSION
+
+    def changes(self, *tags: str) -> list[Change]:
+        """The changes staged so far: catalog changes first, then the document's, in order;
+        with `tags`, only the ones staged under those tags."""
+        wanted = set(tags)
+        out = [c for t, c in self.catalog if not wanted or t in wanted]
+        return out + [c for t, c in self._changes if not wanted or t in wanted]
+
+    def record_catalog(self, change: Change, tag: str = "") -> None:
+        """Report a registry change made on this document's behalf (property_created,
+        enum_value_added); a stopped invocation uses the list to clean up."""
+        self.catalog.append((tag, change))
+
+    async def set_values(self, values: dict[str, Any], src: Source, *, tier: str | None = None,
+                         appended: frozenset[str] | set[str] = frozenset(),
+                         tag: str = "") -> list[Change]:
+        """Stage new values (None removes); returns the changes this op adds."""
+        cleaned = await _clean(values)
+        if "name" in cleaned and cleaned["name"] is None:
+            raise PersonError("name cannot be removed")
+        if tier is not None:
+            _check_tier(tier)
+        op = _Op("values", cleaned, src, tag, tier, frozenset(appended))
+        return await self._stage(op)
+
+    async def set_norm(self, parsed: dict[str, Parsed], src: Source, *, tag: str = "") -> list[Change]:
+        """Stage normalised values for typed properties; returns the changes this op adds."""
+        view = self.view
+        for key in parsed:
+            sp = properties.spec(key)
+            if sp is None or sp.type not in NORMALISABLE or not history.is_prop(view.get(key)):
+                raise PersonError(f"{key!r} is not a typed property of this person")
+        of = {k: normalize.text_hash(history.current(view[k])) for k in parsed}
+        op = _Op("norm", dict(parsed), src, tag, of_expected=of)
+        return await self._stage(op)
+
+    async def _stage(self, op: _Op) -> list[Change]:
+        n = len(self._changes)
+        await self._apply(op)
+        self.ops.append(op)
+        return [c for _, c in self._changes[n:]]
+
+    async def _apply(self, op: _Op) -> None:
+        base = self.view
+        now = datetime.now(UTC)
+        if op.kind == "values":
+            before = {k: history.jsonable(history.current(base.get(k))) for k in op.data}
+            to_set, changed, removed, unchanged = history.apply(base, op.data, op.src, now,
+                                                                fields.SYSTEM_FIELDS)
+            changes = [Change(key=k, action="append" if k in op.appended else "set",
+                              value=op.data[k], previous=before[k]) for k in changed]
+            changes += [Change(key=k, action="removed", previous=before[k]) for k in removed]
+            if op.tier is not None and op.tier != base.get("tier"):
+                to_set["tier"] = op.tier
+                changed.append("tier")
+                changes.append(Change(key="tier", action="set", value=op.tier,
+                                      previous=base.get("tier")))
+            if changed or removed:
+                to_set["updated_at"] = now
+                self._value_changed = True
+            changes += await _normalize_into(base, to_set, now)
+            self._set |= set(changed)
+            self._unset |= set(removed)
+            self._unchanged |= set(unchanged)
+        else:
+            kept: dict[str, Parsed] = {}
+            changes = []
+            for key, p in op.data.items():
+                if normalize.text_hash(history.current(base.get(key))) != op.of_expected.get(key):
+                    changes.append(Change(key=key, action="note",
+                                          value="text changed concurrently; the normalised value "
+                                                "decided for the old text was dropped"))
+                    continue
+                kept[key] = p
+            to_set, more = _write_norm(base, kept, op.src, now)
+            changes += more
+            self._set |= set(to_set)
+        self._to_set.update(to_set)
+        self._changes += [(op.tag, c) for c in changes]
+
+    async def _replay(self, doc: dict) -> None:
+        self.doc = doc
+        self._reset()
+        for op in self.ops:
+            await self._apply(op)
+
+    async def commit(self, principal: Principal | None) -> WriteResult | None:
+        """Write once (rebasing on a concurrent write), run the write hooks when a value changed,
+        record one activity row. None when the person vanished meanwhile."""
+        if self.committed:
+            raise PersonError("transaction already committed")
+        oid = self.doc["_id"]
+        for _ in range(CAS_RETRIES):
+            if not self.dirty:
+                break
+            if await _cas_write(oid, self.doc, {**self._to_set,
+                                                "schema_version": history.SCHEMA_VERSION}):
+                break
+            fresh = await db().people.find_one({"_id": oid})
+            if fresh is None:
+                return None
+            await self._replay(fresh)
+        else:
+            raise ConflictError(f"person {self.person_id} is being modified concurrently; retry")
+        self.committed = True
+        pid = self.person_id
+        if self._value_changed:
+            await _after_write(pid)
+        if self.ops:
+            action = "person.update" if any(op.kind == "values" for op in self.ops) \
+                else "person.normalize"
+            await activity.record(action, principal, pid, {
+                "set": sorted(self._set), "unset": sorted(self._unset),
+                "unchanged": sorted(self._unchanged), "src": self.ops[0].src.kind})
+        return WriteResult(await get(pid), self.changes())
+
+
 async def create(principal: Principal, tier: str, values: dict[str, Any],
                  source: Source | None = None) -> WriteResult:
     _check_tier(tier)
@@ -295,48 +476,13 @@ async def create(principal: Principal, tier: str, values: dict[str, Any],
 
 async def update(principal: Principal, person_id: str, values: dict[str, Any],
                  tier: str | None = None, source: Source | None = None) -> WriteResult | None:
-    """Append new values to the person's fields. Returns the write result (person and
-    changes), or None if the person does not exist."""
-    oid = _oid(person_id)
-    cleaned = await _clean(values)
-    if "name" in cleaned and cleaned["name"] is None:
-        raise PersonError("name cannot be removed")
-    if tier is not None:
-        _check_tier(tier)
-    src = source or Source.for_rest(principal)
-
-    for _ in range(CAS_RETRIES):
-        doc = await db().people.find_one({"_id": oid})
-        if doc is None:
-            return None
-        now = datetime.now(UTC)
-        before = {k: history.jsonable(history.current(doc.get(k))) for k in cleaned}
-        to_set, changed, removed, unchanged = history.apply(doc, cleaned, src, now,
-                                                            fields.SYSTEM_FIELDS)
-        changes = [Change(key=k, action="set", value=cleaned[k], previous=before[k])
-                   for k in changed]
-        changes += [Change(key=k, action="removed", previous=before[k]) for k in removed]
-        if tier is not None and tier != doc.get("tier"):
-            to_set["tier"] = tier
-            changed.append("tier")
-            changes.append(Change(key="tier", action="set", value=tier, previous=doc.get("tier")))
-        if changed or removed:
-            to_set["updated_at"] = now
-        changes += await _normalize_into(doc, to_set, now)
-        if not to_set and doc.get("schema_version") == history.SCHEMA_VERSION:
-            break
-        to_set["schema_version"] = history.SCHEMA_VERSION
-        if await _cas_write(oid, doc, to_set):
-            break
-    else:
-        raise ConflictError(f"person {person_id} is being modified concurrently; retry")
-
-    if changed or removed:
-        await _after_write(person_id)
-    await activity.record("person.update", principal, person_id,
-                          {"set": sorted(changed), "unset": sorted(removed),
-                           "unchanged": sorted(unchanged), "src": src.kind})
-    return WriteResult(await get(person_id), changes)
+    """Append new values to the person's fields: a one-op transaction. Returns the write result
+    (person and changes), or None if the person does not exist."""
+    tx = await Transaction.open(person_id)
+    if tx is None:
+        return None
+    await tx.set_values(values, source or Source.for_rest(principal), tier=tier)
+    return await tx.commit(principal)
 
 
 def _write_norm(doc: dict, parsed: dict[str, Parsed], src: Source,
@@ -355,42 +501,42 @@ def _write_norm(doc: dict, parsed: dict[str, Parsed], src: Source,
 async def update_norm(principal: Principal | None, person_id: str, parsed: dict[str, Parsed],
                       source: Source) -> WriteResult | None:
     """Record normalised values (from the normaliser agent or a re-run of the parser) on a
-    person's typed properties. Returns the write result, or None if not found. Value hooks do not
-    run: the text, and so the embeddings, are unchanged."""
-    oid = _oid(person_id)
-    for _ in range(CAS_RETRIES):
-        doc = await db().people.find_one({"_id": oid})
-        if doc is None:
-            return None
-        to_set, changes = _write_norm(doc, parsed, source, datetime.now(UTC))
-        if not to_set or await _cas_write(oid, doc, to_set):
-            break
-    else:
-        raise ConflictError(f"person {person_id} is being modified concurrently; retry")
-    await activity.record("person.normalize", principal, person_id,
-                          {"set": sorted(to_set), "src": source.kind})
-    return WriteResult(await get(person_id), changes)
+    person's typed properties: a one-op transaction. Returns the write result, or None if not
+    found. Value hooks do not run: the text, and so the embeddings, are unchanged."""
+    tx = await Transaction.open(person_id)
+    if tx is None:
+        return None
+    await tx.set_norm(parsed, source)
+    return await tx.commit(principal)
+
+
+async def reparse(ids: list[str], force: bool = True) -> int:
+    """Run the parser over these documents (free). With `force` (the default; a parser upgrade)
+    the parser's earlier results are redone and only writes that change something land; agent
+    decisions stay. Returns the number of documents written. The level-1 batch API the reparse
+    assistant drives."""
+    written = 0
+    for doc in await fetch(ids):
+        parsed = await pending_normalization(doc, force=force)
+        if not parsed:
+            continue
+        to_set, _ = _write_norm(doc, parsed, NORMALIZE_SRC, datetime.now(UTC))
+        if to_set and await _cas_write(doc["_id"], doc, to_set):
+            written += 1
+    return written
 
 
 async def normalize_all(page: int = 500, progress: Callable[[int], None] | None = None,
                         force: bool = True) -> int:
-    """Run the parser over every document (free). With `force` (the default; a parser upgrade)
-    the parser's earlier results are redone and only writes that change something land; agent
-    decisions stay. Returns the number of documents written."""
+    """`reparse` over every document, a page at a time."""
     written = 0
     last = None
     while True:
-        batch = await find({"_id": {"$gt": last}} if last else {}, sort=[("_id", 1)], limit=page)
-        if not batch:
+        ids = await find_ids({"_id": {"$gt": last}} if last else {}, limit=page)
+        if not ids:
             return written
-        last = batch[-1]["_id"]
-        for doc in batch:
-            parsed = await pending_normalization(doc, force=force)
-            if not parsed:
-                continue
-            to_set, _ = _write_norm(doc, parsed, NORMALIZE_SRC, datetime.now(UTC))
-            if to_set and await _cas_write(doc["_id"], doc, to_set):
-                written += 1
+        last = ObjectId(ids[-1])
+        written += await reparse(ids, force=force)
         if progress:
             progress(written)
 

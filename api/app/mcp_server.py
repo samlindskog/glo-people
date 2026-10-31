@@ -1,6 +1,7 @@
 """Public MCP server (streamable HTTP at /mcp), authenticated with per-account API keys."""
 
 import json
+import logging
 from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -16,6 +17,7 @@ from app.assistants.ask import ask
 from app.auth import Principal
 from app.history import Source
 from app.routers.people import provider_client
+from app.tools import invoke
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
 from app.tools.normalize import NormalizeOptions
@@ -32,6 +34,8 @@ from app.tools.search import (
     run_search,
 )
 from app.tools.store import StoreOptions
+
+log = logging.getLogger(__name__)
 
 WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
                          "normalize_person"})
@@ -272,12 +276,9 @@ async def store_about_person(
     confirmed, ignored and in conflict."""
     principal = await _principal(ctx, "people:write")
     src = Source.for_mcp(principal, f"store{'/' + agent.strip() if agent and agent.strip() else ''}")
-    try:
-        result = await store_tool.store(id, passage, options or StoreOptions(), principal, src)
-    except (ValueError, AgentRunError) as e:
-        raise ToolError(str(e)) from e
-    if result is None:
-        raise ToolError("person not found")
+    result = await _run_tool(ctx, store_tool.store, id, src, principal,
+                             passage=passage, opts=options or StoreOptions())
+    assert isinstance(result, store_tool.StoreResult)
     await activity.record("mcp.store", principal, id, {
         "changes": [{"key": c.key, "action": c.action} for c in result.changes],
         "created": result.created_properties})
@@ -301,19 +302,36 @@ async def normalize_person(
     allocations and rejections, what is still unmapped, and the repair result."""
     principal = await _principal(ctx, "people:write")
     options = options or NormalizeOptions()
-    client = provider_client(options)
-    try:
-        result = await normalize_tool.normalize(
-            id, principal, Source("agent", "normalizer", f"key:{principal.api_key_id}"),
-            options, client)
-    except (ValueError, AgentRunError) as e:
-        raise ToolError(str(e)) from e
-    finally:
-        if client is not None:
-            await client.aclose()
-    if result is None:
-        raise ToolError("person not found")
+    result = await _run_tool(ctx, normalize_tool.normalize, id,
+                             Source("agent", "normalizer", f"key:{principal.api_key_id}"),
+                             principal, firecrawl=provider_client(options), opts=options)
     return json.loads(result.model_dump_json())
+
+
+async def _run_tool(ctx: Context, tool, person_id: str, source: Source, principal: Principal, *,
+                    firecrawl=None, **kwargs):
+    """Run a tool on one record for an MCP call: its activity is forwarded to the client as log
+    messages while it runs, and the result is returned when it has committed."""
+    try:
+        tctx = await invoke.make_context(person_id, source, principal, firecrawl=firecrawl,
+                                         owns_firecrawl=firecrawl is not None)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    if tctx is None:
+        if firecrawl is not None:
+            await firecrawl.aclose()
+        raise ToolError("person not found")
+    inv = invoke.invoke(tool, tctx, **kwargs)
+    async for ev in inv.subscribe():
+        if ev.kind != "result":
+            try:                 # a progress notification per event; nothing when the client sent no token
+                await ctx.report_progress(ev.seq, None, f"{ev.kind}: {ev.message}")
+            except Exception:                         # the client must never fail the tool
+                log.debug("could not forward a tool event to the MCP client", exc_info=True)
+    try:
+        return await inv.wait()
+    except (ValueError, AgentRunError, invoke.Stopped) as e:
+        raise ToolError(str(e)) from e
 
 
 @mcp.tool()

@@ -3,8 +3,9 @@ reads the passage, the person's current values and the catalog with its descript
 proposes one write per property: typed values in the type's form, list items appended, restated
 values confirmed, contradictions marked, new properties only for recurring kinds of fact. The
 tool resolves new properties (redirect near-duplicates, create up to `max_new`, send the rest to
-notes), writes everything in one `people.update`, then runs `tools.normalize` so flagged values
-get their typed form. One shot; the result carries every change."""
+notes), stages everything on the context's transaction, then runs `tools.normalize` on the same
+transaction so flagged values get their typed form: one commit for all of it. The result carries
+every change."""
 
 import re
 from dataclasses import dataclass
@@ -15,10 +16,9 @@ from pydantic_ai import Agent, ModelRetry, RunContext
 
 from app import embedder, fields, people, properties
 from app.agents.common import catalog_prompt, run_agent
-from app.auth import Principal
-from app.history import Change, Source
+from app.history import Change
 from app.properties import Property
-from app.tools import ToolResult
+from app.tools import Emit, ToolContext, ToolResult, silent
 from app.tools import normalize as normalize_tool
 from app.tools.normalize import NormalizeResult
 
@@ -178,14 +178,15 @@ def render_person(person: dict) -> str:
     return "\n".join(lines) or "(no values yet)"
 
 
-async def _propose(passage: str, person: dict, catalog: list[Property]) -> Proposal:
+async def _propose(passage: str, person: dict, catalog: list[Property],
+                   emit: Emit = silent) -> Proposal:
     passage = passage.strip()[:MAX_PASSAGE_CHARS]
     prompt = (f"Person: {person.get('name') or 'unnamed'}\n\n"
               f"Current values:\n{render_person(person)}\n\n"
               f"Passage:\n{passage}\n\n"
               f"Properties:\n{catalog_prompt(catalog)}")
     deps = StorageDeps({p.key: p for p in catalog}, passage)
-    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
+    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
 # --- the tool -----------------------------------------------------------------------------------------
@@ -232,17 +233,17 @@ def _as_text(value: Value) -> str:
     return "; ".join(value) if isinstance(value, list) else value
 
 
-async def store(person_id: str, passage: str, opts: StoreOptions, principal: Principal,
-                source: Source) -> StoreResult | None:
-    """File a passage into the person's properties. None if the person does not exist."""
-    person = await people.get(person_id)
-    if person is None:
-        return None
+async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None) -> StoreResult:
+    """File a passage into the person's properties: staged on the context's transaction, then
+    the normalize tool (without repair: storage is not the moment to re-judge identity)."""
+    opts = opts or StoreOptions()
+    person = ctx.tx.public()
+    ctx.emit("step", f"reading {len(passage)} characters about {person.get('name') or 'the record'}")
     catalog = await properties.catalog(await people.coverage())
     cat = {p.key: p for p in catalog}
-    proposal = await _propose(passage, person, catalog)
+    proposal = await _propose(passage, person, catalog, ctx.emit)
 
-    result = StoreResult(person_id=person_id, confirmed=list(proposal.confirmed),
+    result = StoreResult(person_id=ctx.person_id, confirmed=list(proposal.confirmed),
                          ignored=list(proposal.ignored),
                          conflicts=[w.key for w in proposal.writes if w.conflict])
     values: dict[str, Any] = {}
@@ -277,21 +278,21 @@ async def store(person_id: str, passage: str, opts: StoreOptions, principal: Pri
                 await properties.ensure([n.key], "agent", descriptions={n.key: n.description})
                 cat[n.key] = await properties.get(n.key)  # type: ignore[assignment]
                 result.created_properties.append(n.key)
-                result.changes.append(Change(key=n.key, action="property_created",
-                                             value=n.description))
+                ctx.tx.record_catalog(Change(key=n.key, action="property_created",
+                                             value=n.description), tag="store")
+                ctx.emit("note", f"new property {n.key}: {n.description}", key=n.key)
                 put(n.key, n.value, append=False)
             else:
                 result.to_notes.append(n.label)
                 put(NOTES, f"{n.label}: {_as_text(n.value)}", append=False)
 
     if values:
-        write = await people.update(principal, person_id, values, source=source)
-        if write is not None:
-            for c in write.changes:
-                if c.action == "set" and c.key in appended:
-                    c = c.model_copy(update={"action": "append"})
-                result.changes.append(c)
+        for c in await ctx.tx.set_values(values, ctx.source, appended=appended, tag="store"):
+            if c.action in ("set", "append", "removed"):
+                ctx.emit("write", f"{c.key}: {c.action}", key=c.key, action=c.action)
+    ctx.emit("step", f"{len(values)} propert{'y' if len(values) == 1 else 'ies'} staged, "
+                     f"{len(result.confirmed)} confirmed, {len(result.ignored)} ignored")
     result.normalization = await normalize_tool.normalize(
-        person_id, principal, Source("agent", "normalizer", source.ref or "store"),
-        normalize_tool.NormalizeOptions(repair=False))   # storage is not the moment to re-judge identity
+        ctx.child(normalize_tool.AGENT_NAME), normalize_tool.NormalizeOptions(repair=False))
+    result.changes = ctx.tx.changes("store", "normalize", "repair")
     return result

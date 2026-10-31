@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
@@ -14,10 +15,11 @@ from app.history import Source
 from app.integrations.firecrawl import AsyncFirecrawl, Budget
 from app.integrations.fullenrich import MATCH_CREDITS
 from app.routers.search import agent_error
+from app.tools import invoke
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
-from app.tools.normalize import NormalizeOptions, NormalizeResult
-from app.tools.store import StoreOptions, StoreResult
+from app.tools.normalize import NormalizeOptions
+from app.tools.store import StoreOptions
 
 router = APIRouter(prefix="/api", tags=["people"])
 
@@ -128,7 +130,11 @@ async def import_people(file: Annotated[UploadFile, File()],
     return {**summary, "job_id": job["id"]}
 
 
-# --- agentic storage and normalisation of one person ------------------------------------------
+# --- tools on one person: invocations ------------------------------------------------------------------
+
+Wait = Annotated[bool, Query(description="Block until the tool is done and return its result "
+                                         "(200) instead of the invocation handle (202)")]
+
 
 class StoreBody(BaseModel):
     passage: str = Field(min_length=1, max_length=MAX_PASSAGE)
@@ -142,41 +148,67 @@ def _source(principal: Principal, agent: str) -> Source:
     return Source(base.kind, base.by, ref)
 
 
-async def _store(person_id: str, passage: str, options: StoreOptions,
-                 principal: Principal) -> StoreResult:
+async def _invoke(tool, person_id: str, principal: Principal, source: Source, wait: bool, *,
+                  firecrawl: AsyncFirecrawl | None = None, action: str, meta: dict[str, Any],
+                  **kwargs: Any):
+    """Start a tool on one record. 202 with the invocation handle (follow its events, stop it,
+    fetch its result), or with `wait` the tool's result once it has committed."""
     try:
-        result = await store_tool.store(person_id, passage, options, principal,
-                                        _source(principal, "store"))
+        ctx = await invoke.make_context(person_id, source, principal, firecrawl=firecrawl,
+                                        owns_firecrawl=firecrawl is not None)
+    except people_svc.PersonError as e:
+        raise _bad_request(e) from e
+    if ctx is None:
+        if firecrawl is not None:
+            await firecrawl.aclose()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
+    inv = invoke.invoke(tool, ctx, **kwargs)
+
+    async def record(done: invoke.Invocation) -> None:
+        result = done.result
+        await activity.record(action, principal, person_id, {
+            **meta, "invocation": done.id, "status": done.status, "credits": done.credits,
+            "changes": [{"key": c.key, "action": c.action} for c in result.changes] if result else [],
+            "created": getattr(result, "created_properties", [])})
+
+    inv.on_done(record)
+    if not wait:
+        return JSONResponse(inv.public(), status_code=status.HTTP_202_ACCEPTED)
+    try:
+        result = await inv.wait()
+    except invoke.Stopped as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
     except (ValueError, AgentRunError) as e:
         raise _bad_request(e) from e
-    if result is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    await activity.record("person.store", principal, person_id, {
-        "changes": [{"key": c.key, "action": c.action} for c in result.changes],
-        "created": result.created_properties, "chars": len(passage)})
-    return result
+    return JSONResponse(result.model_dump(mode="json"))
 
 
-@router.post("/people/{person_id}/store")
-async def store_passage(person_id: str, body: StoreBody, principal: Writer) -> StoreResult:
-    """Tool: store what a passage says about the person; returns every change."""
-    return await _store(person_id, body.passage, body.options, principal)
+@router.post("/people/{person_id}/store", status_code=202, response_model=None)
+async def store_passage(person_id: str, body: StoreBody, principal: Writer, wait: Wait = False):
+    """Tool: store what a passage says about the person. Returns the invocation (202); with
+    `wait=true`, the StoreResult with every change."""
+    return await _invoke(store_tool.store, person_id, principal, _source(principal, "store"), wait,
+                         action="person.store", meta={"chars": len(body.passage)},
+                         passage=body.passage, opts=body.options)
 
 
-@router.post("/people/{person_id}/store/file")
-async def store_file(person_id: str, file: Annotated[UploadFile, File()],
-                     principal: Writer) -> StoreResult:
+@router.post("/people/{person_id}/store/file", status_code=202, response_model=None)
+async def store_file(person_id: str, file: Annotated[UploadFile, File()], principal: Writer,
+                     wait: Wait = False):
     """Tool: a .txt or .md file as the passage, stored with the default options."""
     data = await file.read(MAX_PASSAGE + 1)
     if len(data) > MAX_PASSAGE:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, f"file larger than {MAX_PASSAGE // 1000} kB")
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"file larger than {MAX_PASSAGE // 1000} kB")
     try:
         passage = data.decode("utf-8-sig")
     except UnicodeDecodeError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "file is not UTF-8 text") from e
     if not passage.strip():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "file is empty")
-    return await _store(person_id, passage, StoreOptions(), principal)
+    return await _invoke(store_tool.store, person_id, principal, _source(principal, "store"), wait,
+                         action="person.store", meta={"chars": len(passage), "file": file.filename},
+                         passage=passage, opts=StoreOptions())
 
 
 class NormalizeBody(BaseModel):
@@ -185,32 +217,23 @@ class NormalizeBody(BaseModel):
 
 def provider_client(options: NormalizeOptions) -> AsyncFirecrawl | None:
     """A Firecrawl client with room for one FullEnrich name lookup, when the options ask for the
-    provider and a key is configured; the caller closes it."""
+    provider and a key is configured; the invocation closes it."""
     if not (options.repair and options.provider and get_settings().firecrawl_api_key):
         return None
     return AsyncFirecrawl(budget=Budget(max_scrapes=1, max_searches=0, max_credits=MATCH_CREDITS))
 
 
-@router.post("/people/{person_id}/normalize")
-async def normalize_one(person_id: str, principal: Writer,
-                        body: NormalizeBody | None = None) -> NormalizeResult:
+@router.post("/people/{person_id}/normalize", status_code=202, response_model=None)
+async def normalize_one(person_id: str, principal: Writer, body: NormalizeBody | None = None,
+                        wait: Wait = False):
     """Tool: re-parse the person's typed values (an agent decides what the parser cannot, merging
     into or extending the enum sets) and, for a record without a record kind, repair its identity
-    data and classify it."""
+    data and classify it. Returns the invocation (202); with `wait=true`, the NormalizeResult."""
     options = (body or NormalizeBody()).options
-    client = provider_client(options)
-    try:
-        result = await normalize_tool.normalize(
-            person_id, principal, Source("agent", "normalizer", f"user:{principal.username}"),
-            options, client)
-    except (ValueError, AgentRunError) as e:
-        raise _bad_request(e) from e
-    finally:
-        if client is not None:
-            await client.aclose()
-    if result is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "person not found")
-    return result
+    return await _invoke(normalize_tool.normalize, person_id, principal,
+                         Source("agent", "normalizer", f"user:{principal.username}"), wait,
+                         firecrawl=provider_client(options), action="person.normalize.tool",
+                         meta={"options": options.model_dump()}, opts=options)
 
 
 @router.get("/jobs")

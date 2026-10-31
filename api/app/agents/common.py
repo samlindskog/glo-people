@@ -2,11 +2,12 @@
 usage limits, the dependencies web-reading tools receive, a budgeted page-fetch helper, and the
 property catalog rendered for prompts."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.messages import RetryPromptPart, ToolCallPart
 from pydantic_ai.usage import UsageLimits
 
 from app.config import get_settings
@@ -37,18 +38,44 @@ def model_settings() -> dict[str, Any]:
     return {}
 
 
+Emit = Callable[..., None]            # emit(kind, message, **data)
+
+
 async def run_agent(agent: Agent, prompt: str, deps: Any = None,
-                    request_limit: int = REQUEST_LIMIT) -> Any:
+                    request_limit: int = REQUEST_LIMIT, on_event: Emit | None = None) -> Any:
     """Run an agent with the configured model (or its deterministic fake under FAKE_AGENTS) and
-    this app's usage limits; returns `.output`."""
+    this app's usage limits; returns `.output`. With `on_event`, the run is iterated node by
+    node and its tool calls, rejected answers and completion are reported as `agent` events
+    (the non-streaming path, so FunctionModel fakes work unchanged)."""
     if get_settings().fake_agents:
         from app.agents import fakes
         model: Any = fakes.model_for(agent)
     else:
         model = get_settings().agent_model
-    result = await agent.run(prompt, deps=deps, model=model,
-                             usage_limits=UsageLimits(request_limit=request_limit),
-                             model_settings=model_settings())
+    kwargs: dict[str, Any] = {"deps": deps, "model": model,
+                              "usage_limits": UsageLimits(request_limit=request_limit),
+                              "model_settings": model_settings()}
+    if on_event is None:
+        return (await agent.run(prompt, **kwargs)).output
+    short = (agent.name or "agent").rsplit(".", 1)[-1]
+    on_event("agent", f"{short}: thinking", agent=short)
+    async with agent.iter(prompt, **kwargs) as run:
+        async for node in run:
+            if Agent.is_call_tools_node(node):
+                for part in node.model_response.parts:
+                    if isinstance(part, ToolCallPart) and not part.tool_name.startswith("final_result"):
+                        on_event("agent", f"{short}: calling {part.tool_name}", agent=short,
+                                 tool=part.tool_name, args=str(part.args)[:200])
+            elif Agent.is_model_request_node(node):
+                for part in node.request.parts:
+                    if isinstance(part, RetryPromptPart):
+                        on_event("agent", f"{short}: answer rejected, retrying", agent=short,
+                                 reason=str(part.content)[:300])
+    result = run.result
+    assert result is not None
+    usage = run.usage() if callable(run.usage) else run.usage
+    on_event("agent", f"{short}: done after {usage.requests} request(s)", agent=short,
+             requests=usage.requests)
     return result.output
 
 

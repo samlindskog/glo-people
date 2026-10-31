@@ -242,6 +242,35 @@ async def add_alias(key: str, value: str, alias: str) -> bool:
     return bool(res.modified_count)
 
 
+async def remove_unused(key: str) -> bool:
+    """Delete a registry entry no document uses and no spec defines: the clean-up after a stopped
+    or failed tool created a property it never filled. False when it is in use or spec-defined."""
+    if key in SPECS or not fields.valid_key(key):
+        return False
+    if await mongo.db().people.count_documents({key: {"$exists": True}}, limit=1):
+        return False
+    res = await mongo.db().fields.delete_one({"_id": key, "source": {"$ne": "spec"}})
+    if res.deleted_count:
+        reset()
+        try:
+            await sync_names()
+        except Exception:
+            log.exception("could not drop the name vector of %s", key)
+    return bool(res.deleted_count)
+
+
+async def remove_enum_value_if_unused(key: str, value: str) -> bool:
+    """Pull a canonical value no document normalises to (the clean-up after a stopped or failed
+    tool allocated it). Spec-seeded values stay."""
+    if await mongo.db().people.count_documents({f"{key}.norm.v": value}, limit=1):
+        return False
+    res = await mongo.db().fields.update_one(
+        {"_id": key}, {"$pull": {"enum.values": {"v": value, "src": {"$ne": "spec"}}}})
+    if res.modified_count:
+        reset()
+    return bool(res.modified_count)
+
+
 async def sync_specs() -> None:
     """Bring the registry in line with the source-code specs (startup, CLI). Idempotent: creates
     the typed properties, seeds their enum values, never removes anything, and re-embeds the

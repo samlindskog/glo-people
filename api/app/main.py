@@ -14,9 +14,11 @@ from app.permissions import load_contract
 from app.routers import accounts
 from app.routers import assistants as assistants_router
 from app.routers import auth as auth_router
+from app.routers import invocations as invocations_router
 from app.routers import people as people_router
 from app.routers import properties as properties_router
 from app.routers import search as search_router
+from app.tools import invoke
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 observability.setup()
@@ -56,6 +58,7 @@ async def lifespan(_: FastAPI):
     async with mcp.session_manager.run():
         yield
     await runner.drain()
+    await invoke.drain()
     await jobs.drain()
     await mongo.close()
     await db.dispose()
@@ -65,6 +68,7 @@ api = FastAPI(title="glo-people", lifespan=lifespan, docs_url="/api/docs",
               openapi_url="/api/openapi.json", redoc_url=None)
 api.include_router(auth_router.router)
 api.include_router(people_router.router)
+api.include_router(invocations_router.router)
 api.include_router(properties_router.router)
 api.include_router(search_router.router)
 api.include_router(accounts.router)

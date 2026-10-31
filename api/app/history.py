@@ -33,7 +33,7 @@ SCHEMA_VERSION = 2
 SourceKind = Literal["ui", "api", "mcp", "agent", "import", "legacy", "system"]
 NormFlag = Literal["unmapped", "non_normalizable"]
 ChangeAction = Literal["set", "append", "removed", "normalized", "flagged", "property_created",
-                       "enum_value_added"]
+                       "enum_value_added", "note"]
 
 
 class Change(BaseModel):

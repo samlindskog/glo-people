@@ -8,7 +8,6 @@ wrong property. When the evidence yields no full name and the record has a Linke
 FullEnrich profile behind it is asked for the name only. A Person whose name stays partial or
 broken is Unidentifiable. Every fix is an appended history entry; nothing is deleted."""
 
-import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -16,16 +15,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import fields, history, people, properties
+from app import fields, history, properties
 from app.agents.common import run_agent
-from app.auth import Principal
 from app.history import Change, Source
 from app.integrations import fullenrich
 from app.integrations.firecrawl import AsyncFirecrawl, FirecrawlError, NotConfigured, NotFound
-from app.tools import ToolResult
+from app.tools import Emit, ToolContext, ToolResult, silent
 from app.urls import linkedin_profile
-
-log = logging.getLogger(__name__)
 
 AGENT_NAME = "repair"
 REQUEST_LIMIT = 4
@@ -288,7 +284,7 @@ def _evidence(doc: dict) -> tuple[str, str]:
     return "\n".join(lines) or "(nothing else on the record)", " ".join(folded)
 
 
-async def _judge(doc: dict, sigs: list[str], opts: RepairOptions) -> Verdict:
+async def _judge(doc: dict, sigs: list[str], opts: RepairOptions, emit: Emit = silent) -> Verdict:
     block, folded = _evidence(doc)
     cat = {p.key: p.type for p in await properties.catalog()}
     present = {k: cat[k] for k in doc if k in cat and _cur(doc, k) not in (None, "", [])}
@@ -300,7 +296,7 @@ async def _judge(doc: dict, sigs: list[str], opts: RepairOptions) -> Verdict:
               f"Evidence:\n{block}")
     deps = RepairDeps(current_name=str(_cur(doc, "name") or ""), evidence=folded, present=present,
                       catalog=cat, max_edits=opts.max_edits, kinds=kinds)
-    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT)
+    return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
 async def _provider_name(doc: dict, firecrawl: AsyncFirecrawl,
@@ -331,28 +327,25 @@ async def _provider_name(doc: dict, firecrawl: AsyncFirecrawl,
 
 # --- the tool -----------------------------------------------------------------------------------------
 
-async def repair(person_id: str, principal: Principal | None, source: Source,
-                 opts: RepairOptions | None = None,
-                 firecrawl: AsyncFirecrawl | None = None) -> RepairResult | None:
-    """Repair one record's identity data. None if the person does not exist."""
+async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairResult:
+    """Repair one record's identity data, staged on the context's transaction."""
     opts = opts or RepairOptions()
-    docs = await people.fetch([person_id])
-    if not docs:
-        return None
-    doc = docs[0]
-    result = RepairResult(person_id=person_id, signals=signals(doc))
+    doc = ctx.tx.view
+    result = RepairResult(person_id=ctx.person_id, signals=signals(doc))
+    if result.signals:
+        ctx.emit("step", "looks wrong: " + "; ".join(result.signals), signals=result.signals)
 
     if opts.mechanical and (fixes := mechanical_fixes(doc)):
-        write = await people.update(principal, person_id, fixes, source=Source("system", "repair"))
-        if write is not None:
-            result.changes += write.changes
-            result.mechanical = sorted(fixes)
-            doc = (await people.fetch([person_id]))[0]
+        await ctx.tx.set_values(fixes, Source("system", "repair"), tag="repair")
+        result.mechanical = sorted(fixes)
+        ctx.emit("write", "mechanical fixes: " + ", ".join(result.mechanical), keys=result.mechanical)
+        doc = ctx.tx.view
     if not opts.agent:
+        result.changes = ctx.tx.changes("repair")
         return result
 
     result.agent_called = True
-    verdict = await _judge(doc, result.signals, opts)
+    verdict = await _judge(doc, result.signals, opts, ctx.emit)
     result.confidence, result.note = verdict.confidence, verdict.note
     current_name = str(_cur(doc, "name") or "")
     name: str | None = None
@@ -364,8 +357,9 @@ async def repair(person_id: str, principal: Principal | None, source: Source,
     complete = verdict.name_complete or name is not None
     kind_proposed = verdict.kind
     if fields.fold(kind_proposed) == fields.fold(PERSON) and not complete:
-        if opts.provider and firecrawl is not None:
-            provider_name = await _provider_name(doc, firecrawl, result)
+        if opts.provider and ctx.firecrawl is not None:
+            ctx.emit("step", "no full name on the record; asking the LinkedIn profile")
+            provider_name = await _provider_name(doc, ctx.firecrawl, result)
             if provider_name and fields.fold(provider_name) != fields.fold(current_name):
                 name, name_source, complete = provider_name, "provider", True
             elif provider_name:
@@ -375,12 +369,13 @@ async def repair(person_id: str, principal: Principal | None, source: Source,
     result.name_source = name_source
 
     kind, allocated = await properties.resolve_enum_value(
-        KIND, kind_proposed, opts.allocate, src=f"agent:{AGENT_NAME} {source.ref or ''}".strip())
+        KIND, kind_proposed, opts.allocate, src=f"agent:{AGENT_NAME} {ctx.source.ref or ''}".strip())
     if kind is None:
         result.rejected.append(f"kind {kind_proposed!r} (allocation off)")
         kind = PERSON if complete else UNIDENTIFIABLE
     if allocated:
-        result.changes.append(Change(key=KIND, action="enum_value_added", value=kind))
+        ctx.tx.record_catalog(Change(key=KIND, action="enum_value_added", value=kind), tag="repair")
+        ctx.emit("note", f"new record kind {kind!r}", value=kind)
     result.kind = kind
 
     values: dict[str, Any] = {}
@@ -394,15 +389,17 @@ async def repair(person_id: str, principal: Principal | None, source: Source,
             target = _cur(doc, m.move_to)
             values[m.move_to] = f"{fields.text_of(target)}\n{text}" if target else text
         values[m.key] = None
+        ctx.emit("write", f"{m.key} misfiled: " + (f"moved to {m.move_to}" if m.move_to else "removed"),
+                 key=m.key, move_to=m.move_to)
     if name and name_source == "provider":
-        write = await people.update(principal, person_id, {"name": name},
-                                    source=Source("agent", f"{AGENT_NAME}/fullenrich", source.ref))
-        if write is not None:
-            result.changes += write.changes
+        await ctx.tx.set_values({"name": name},
+                                Source("agent", f"{AGENT_NAME}/fullenrich", ctx.source.ref),
+                                tag="repair")
     elif name:
         values["name"] = name
     if values:
-        write = await people.update(principal, person_id, values, source=source)
-        if write is not None:
-            result.changes += write.changes
+        await ctx.tx.set_values(values, ctx.source, tag="repair")
+    result.changes = ctx.tx.changes("repair")
+    ctx.emit("step", f"record kind: {kind}" + (f"; name → {name} ({name_source})" if name else ""),
+             record_kind=kind, name=name, name_source=name_source)
     return result
