@@ -3,12 +3,12 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
-import { ErrorNote, PageHeader } from '../components/Layout'
+import { ErrorNote } from '../components/Layout'
 import { describeSearch, encodeSearch, formatDate } from '../lib'
 
 const PAGE = 50
 
-export default function SearchesPage() {
+export default function SearchesPanel() {
   const { can } = useAuth()
   const [everyone, setEveryone] = useState(false)
   const [offset, setOffset] = useState(0)
@@ -19,21 +19,19 @@ export default function SearchesPage() {
 
   return (
     <div>
-      <PageHeader title={everyone ? 'All searches' : 'My searches'}>
-        {can('searches:read_all') && (
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={everyone}
-              onChange={(e) => {
-                setEveryone(e.target.checked)
-                setOffset(0)
-              }}
-            />
-            Everyone’s searches
-          </label>
-        )}
-      </PageHeader>
+      {can('searches:read_all') && (
+        <label className="mb-3 flex items-center justify-end gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={everyone}
+            onChange={(e) => {
+              setEveryone(e.target.checked)
+              setOffset(0)
+            }}
+          />
+          Everyone’s searches
+        </label>
+      )}
       <ErrorNote error={q.error} />
       <div className="card overflow-x-auto">
         <table className="data-table" data-testid="searches-table">

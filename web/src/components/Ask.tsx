@@ -1,28 +1,42 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api } from '../api'
+import { useRunEvents } from '../hooks/useEvents'
 import { describeSearch, encodeSearch } from '../lib'
 import type { AskResult, Citation, Tier } from '../types'
+import ActivityFeed from './ActivityFeed'
 import { ErrorNote } from './Layout'
 
 const DEFAULTS = { k: 12, mode: 'avg' as const, threshold: 0.4 }
 
-/** Ask a question about people: an agent plans the search, the engine runs it, an agent answers
- * with citations. The executed search can be opened as an ordinary search. */
+/** Ask a question about people: an ask run plans the search, runs it and answers with
+ * citations; its steps stream in while it works. The executed search can be opened as an
+ * ordinary search, and the run is on the Assistants page like any other. */
 export default function Ask({ tier }: { tier: Tier | null }) {
   const navigate = useNavigate()
   const [question, setQuestion] = useState('')
   const [k, setK] = useState(DEFAULTS.k)
   const [mode, setMode] = useState<'avg' | 'max'>(DEFAULTS.mode)
   const [threshold, setThreshold] = useState(DEFAULTS.threshold)
-  const ask = useMutation({
-    mutationFn: () => api.ask({ question: question.trim(), tier, options: { k, mode, threshold } }),
+  const [runId, setRunId] = useState<number | null>(null)
+  const start = useMutation({
+    mutationFn: () => api.startRun('ask', { options: { question: question.trim(), tier, k, mode, threshold } }),
+    onSuccess: (run) => setRunId(run.id),
   })
+  const { events, done } = useRunEvents(runId)
+  const detail = useQuery({ queryKey: ['assistant-run', runId], queryFn: () => api.run(runId!), enabled: runId !== null && done })
+  const item = detail.data?.items[0]
+  const result = item?.status === 'done' ? (item.result as unknown as AskResult) : null
+  const pending = runId !== null && !done
+  const failed = item && item.status !== 'done' ? item.error ?? 'The question could not be answered.' : null
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    if (question.trim()) ask.mutate()
+    if (question.trim()) {
+      setRunId(null)
+      start.mutate()
+    }
   }
 
   return (
@@ -38,8 +52,8 @@ export default function Ask({ tier }: { tier: Tier | null }) {
             onChange={(e) => setQuestion(e.target.value)}
           />
         </label>
-        <button className="btn-primary" disabled={ask.isPending || !question.trim()}>
-          {ask.isPending ? 'Thinking…' : 'Ask'}
+        <button className="btn-primary" disabled={start.isPending || pending || !question.trim()}>
+          {start.isPending || pending ? 'Thinking…' : 'Ask'}
         </button>
       </form>
       <details className="text-sm">
@@ -62,8 +76,11 @@ export default function Ask({ tier }: { tier: Tier | null }) {
           </label>
         </div>
       </details>
-      <ErrorNote error={ask.error} />
-      {ask.data && <AskAnswer result={ask.data} onRunAsSearch={() => navigate(`/people?s=${encodeSearch({ ...ask.data.request, page: 1 })}`)} />}
+      <ErrorNote error={start.error ?? detail.error ?? failed} />
+      {pending && <ActivityFeed events={events} compact empty="Starting…" />}
+      {result && runId !== null && (
+        <AskAnswer result={result} runId={runId} onRunAsSearch={() => navigate(`/people?s=${encodeSearch({ ...result.request, page: 1 })}`)} />
+      )}
     </section>
   )
 }
@@ -74,7 +91,7 @@ function groupCitations(citations: Citation[]): Map<string, Citation[]> {
   return out
 }
 
-export function AskAnswer({ result, onRunAsSearch }: { result: AskResult; onRunAsSearch: () => void }) {
+export function AskAnswer({ result, runId, onRunAsSearch }: { result: AskResult; runId?: number; onRunAsSearch: () => void }) {
   const names = new Map(result.results.map((h) => [h.id, h.person.name]))
   const grouped = groupCitations(result.citations)
   return (
@@ -103,6 +120,11 @@ export function AskAnswer({ result, onRunAsSearch }: { result: AskResult; onRunA
           Searched: {describeSearch(result.request)} · {result.total.toLocaleString()} {result.total === 1 ? 'person' : 'people'}
         </span>
         {result.rationale && <span title="Planner's rationale">— {result.rationale}</span>}
+        {runId !== undefined && (
+          <Link to={`/assistants/${runId}`} className="text-brand-700 hover:underline">
+            run #{runId}
+          </Link>
+        )}
         <button type="button" className="btn-secondary ml-auto" onClick={onRunAsSearch}>
           Run as search
         </button>

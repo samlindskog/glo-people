@@ -24,9 +24,17 @@ const RESULT: AskResult = {
   search_id: 7,
 }
 
-vi.mock('../api', () => ({ api: { ask: vi.fn(async () => RESULT) } }))
+const RUN = { id: 5, workflow: 'ask', status: 'done', total: 1, done: 1, failed: 0, credits_used: 0, params: {}, summary: {} }
 
-test('asks, shows the answer with citations and the executed search', async () => {
+vi.mock('../api', () => ({
+  api: {
+    startRun: vi.fn(async () => RUN),
+    run: vi.fn(async () => ({ ...RUN, items: [{ id: 1, status: 'done', result: RESULT, error: null }] })),
+  },
+}))
+vi.mock('../hooks/useEvents', () => ({ useRunEvents: () => ({ events: [], run: null, done: true }) }))
+
+test('asks as a run, shows the answer with citations and the executed search', async () => {
   const { api } = await import('../api')
   const user = userEvent.setup()
   render(
@@ -39,10 +47,11 @@ test('asks, shows the answer with citations and the executed search', async () =
   await user.type(screen.getByLabelText('Question'), 'payments founders with mrr over 10k')
   await user.click(screen.getByRole('button', { name: 'Ask' }))
   expect(await screen.findByTestId('ask-answer')).toHaveTextContent('Ada Okafor matches')
-  expect(api.ask).toHaveBeenCalledWith({ question: 'payments founders with mrr over 10k', tier: 'member', options: { k: 12, mode: 'avg', threshold: 0.4 } })
+  expect(api.startRun).toHaveBeenCalledWith('ask', { options: { question: 'payments founders with mrr over 10k', tier: 'member', k: 12, mode: 'avg', threshold: 0.4 } })
   const citations = screen.getByRole('list', { name: 'Citations' })
   expect(citations).toHaveTextContent('Ada Okafor')
   expect(citations).toHaveTextContent('bio: “payments infrastructure”')
   expect(screen.getByTestId('ask-plan')).toHaveTextContent('mrr ≥ 10000 · bio: “payments founder” (avg ≥ 0.4) · 1 person')
+  expect(screen.getByRole('link', { name: 'run #5' })).toHaveAttribute('href', '/assistants/5')
   expect(screen.getByRole('button', { name: 'Run as search' })).toBeEnabled()
 })

@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import Ask from '../components/Ask'
+import ImportDialog from '../components/ImportDialog'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import SearchForm from '../components/SearchForm'
 import { decodeSearch, describeSearch, encodeSearch, formatValue } from '../lib'
@@ -26,6 +27,7 @@ export default function PeoplePage() {
   const encoded = params.get('s')
   const req = decodeSearch(encoded)
   const [columns, setColumns] = useState<string[]>(loadColumns)
+  const [importing, setImporting] = useState(false)
 
   useEffect(() => {
     try {
@@ -54,15 +56,20 @@ export default function PeoplePage() {
       <PageHeader title="People">
         {can('people:write') && (
           <>
-            <Link to="/people/import" className="btn-secondary">
+            <button className="btn-secondary" onClick={() => setImporting((v) => !v)} aria-expanded={importing}>
               Import CSV
-            </Link>
+            </button>
             <Link to="/people/new" className="btn-primary">
               Add person
             </Link>
           </>
         )}
       </PageHeader>
+      {importing && (
+        <div className="card mb-4 p-4">
+          <ImportDialog />
+        </div>
+      )}
 
       <div className="mb-4">
         <Ask tier={req.tier ?? null} />

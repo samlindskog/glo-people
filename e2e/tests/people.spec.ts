@@ -24,13 +24,16 @@ test('writer imports a CSV with a new column, filters and searches semantically'
   ].join('\n')
 
   await login(page, WRITER)
-  await page.getByRole('link', { name: 'Import CSV' }).click()
+  await page.getByRole('button', { name: 'Import CSV' }).click()
   await page.getByLabel('CSV file').setInputFiles({ name: `e2e-${tag}.csv`, mimeType: 'text/csv', buffer: Buffer.from(csv) })
   await expect(page.getByRole('row', { name: new RegExp(col) })).toContainText('new property')
   await page.getByRole('button', { name: /Import 3 rows/ }).click()
-  await expect(page.getByTestId('import-result')).toContainText('3 new')
+  // the import is an assistant run of row batches: follow it on Assistants
+  await expect(page.getByTestId('import-result')).toContainText('3 rows in 1 batch')
   await expect(page.getByTestId('import-result')).toContainText(col)
-  await expect(page.getByTestId('import-result')).toContainText(/done \(\d+ vectors\)/, { timeout: 30_000 })
+  await page.getByRole('link', { name: /follow run #\d+/ }).click()
+  await expect(page.getByTestId('run-detail').getByTestId('run-items')).toContainText(/3 inserted, 0 updated, \d+ vectors/, { timeout: 30_000 })
+  await expect(page.getByTestId('runs-table')).toContainText('import')
 
   // the new column is now a (free text, embeddable) property
   await page.getByRole('link', { name: 'Properties' }).click()
@@ -69,7 +72,7 @@ test('writer imports a CSV with a new column, filters and searches semantically'
     .toBeLessThan(before)
 
   // search is in history and re-runs
-  await page.getByRole('link', { name: 'My searches' }).click()
+  await page.getByRole('link', { name: 'History' }).click()
   await expect(page.getByTestId('searches-table')).toContainText('fintech payments founder')
   await page.getByRole('link', { name: 'Re-run' }).first().click()
   await expect(page.getByLabel('Semantic query')).toHaveValue('fintech payments founder')

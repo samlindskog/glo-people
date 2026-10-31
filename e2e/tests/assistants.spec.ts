@@ -33,7 +33,8 @@ test('writer starts an enrichment run for one person; reader can only watch', as
   await login(rp, READER)
   await rp.getByRole('link', { name: 'Assistants' }).click()
   await expect(rp.getByTestId('assistant-enrich')).toBeVisible()
-  await expect(rp.getByRole('button', { name: 'Run' })).toHaveCount(0)
+  await expect(rp.getByTestId('assistant-enrich').getByRole('button', { name: 'Run' })).toHaveCount(0) // enrich writes
+  await expect(rp.getByTestId('assistant-ask').getByRole('button', { name: 'Run' })).toBeVisible() // ask does not
   await expect(rp.getByTestId('runs-table')).toContainText('enrich')
   await readerCtx.close()
 })

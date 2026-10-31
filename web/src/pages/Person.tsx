@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
+import { InvocationPanel, useInvocation } from '../components/Invocation'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import PersonEditor from '../components/PersonEditor'
 import StoreBox from '../components/StoreBox'
@@ -29,13 +30,14 @@ export default function PersonPage() {
       navigate('/people')
     },
   })
-  const normalise = useMutation({
-    mutationFn: () => api.normalizePerson(id),
-    onSuccess: () => {
+  const normalise = useInvocation<NormalizeResult>()
+  useEffect(() => {
+    if (normalise.status === 'done') {
       qc.invalidateQueries({ queryKey: ['person', id] })
       qc.invalidateQueries({ queryKey: ['properties'] })
-    },
-  })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [normalise.status])
   const hasTyped = properties.data?.some((pr) => pr.normalisable && person.data && pr.key in person.data) ?? false
 
   if (person.error) return <ErrorNote error={person.error} />
@@ -56,8 +58,13 @@ export default function PersonPage() {
         {can('people:write') && !editing && (
           <>
             {hasTyped && (
-              <button className="btn-secondary" disabled={normalise.isPending} onClick={() => normalise.mutate()} title="Re-parse typed values; an agent decides the ones the parser cannot read">
-                {normalise.isPending ? 'Normalising…' : 'Normalise'}
+              <button
+                className="btn-secondary"
+                disabled={normalise.status === 'running'}
+                onClick={() => void normalise.start(() => api.normalizePerson(id))}
+                title="Re-parse typed values; an agent decides the ones the parser cannot read; the record's identity is repaired"
+              >
+                {normalise.status === 'running' ? 'Normalising…' : 'Normalise'}
               </button>
             )}
             <button className="btn-secondary" onClick={() => setEditing(true)}>
@@ -75,7 +82,12 @@ export default function PersonPage() {
         )}
       </PageHeader>
       <ErrorNote error={remove.error ?? normalise.error} />
-      {normalise.data && <NormaliseNote result={normalise.data} />}
+      {normalise.status === 'running' && (
+        <div className="mb-3">
+          <InvocationPanel events={normalise.events} status={normalise.status} onStop={() => void normalise.stop()} label="Normalising" />
+        </div>
+      )}
+      {normalise.result && <NormaliseNote result={normalise.result} />}
 
       {editing ? (
         <PersonEditor

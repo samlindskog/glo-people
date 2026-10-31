@@ -1,25 +1,25 @@
 import type {
   ActivityItem,
   ApiKey,
-  AskResult,
   AssistantRun,
   AssistantRunDetail,
+  AssistantRunItem,
   AssistantSpec,
+  Credits,
   FieldFilter,
   ImportPreview,
-  ImportResult,
-  Job,
+  ImportStarted,
+  Invocation,
   Me,
-  NormalizeResult,
   Page,
   Person,
   PlanResult,
   Property,
+  RunStatus,
   SearchRecord,
   SearchRequest,
   SearchResponse,
   StoreOptions,
-  StoreResult,
   Tier,
   Tuning,
   User,
@@ -85,26 +85,25 @@ export const api = {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('tier', tier)
-    return request<ImportResult>('POST', '/api/people/import', fd)
+    return request<ImportStarted>('POST', '/api/people/import', fd)
   },
-  jobs: () => request<Job[]>('GET', '/api/jobs'),
 
   properties: () => request<Property[]>('GET', '/api/properties'),
 
-  // tools (structured, one shot)
+  // tools on one record: non-blocking; the invocation handle streams events and can be stopped
   plan: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
     request<PlanResult>('POST', '/api/search/plan', body),
   store: (id: string, passage: string, options?: Partial<StoreOptions>) =>
-    request<StoreResult>('POST', `/api/people/${id}/store?wait=true`, { passage, options }),
+    request<Invocation>('POST', `/api/people/${id}/store`, { passage, options }),
   storeFile: (id: string, file: File) => {
     const fd = new FormData()
     fd.append('file', file)
-    return request<StoreResult>('POST', `/api/people/${id}/store/file?wait=true`, fd)
+    return request<Invocation>('POST', `/api/people/${id}/store/file`, fd)
   },
-  normalizePerson: (id: string) => request<NormalizeResult>('POST', `/api/people/${id}/normalize?wait=true`),
-  // assistants (text for a human plus the changes)
-  ask: (body: { question: string; tier?: Tier | null; filters?: FieldFilter[]; options?: Partial<Tuning> }) =>
-    request<AskResult>('POST', '/api/search/ask', body),
+  normalizePerson: (id: string) => request<Invocation>('POST', `/api/people/${id}/normalize`),
+  invocation: (id: string) => request<Invocation>('GET', `/api/invocations/${id}`),
+  stopInvocation: (id: string) => request<Invocation>('POST', `/api/invocations/${id}/stop`),
+  credits: () => request<Credits | null>('GET', '/api/credits'),
 
   searches: (params: { all?: boolean; user_id?: number; limit?: number; offset?: number }) =>
     request<Page<SearchRecord>>('GET', `/api/searches${qs(params)}`),
@@ -134,13 +133,19 @@ export const api = {
   revokeUserKey: (userId: number, id: number) =>
     request<void>('DELETE', `/api/users/${userId}/api-keys/${id}`),
 
+  // assistants: runs that persist, pause, resume and stop
   assistants: () => request<AssistantSpec[]>('GET', '/api/assistants'),
   startRun: (
     key: string,
-    body: { person_ids?: string[]; all_with_field?: string; tier?: Tier | null; options?: Record<string, unknown> },
+    body: { person_ids?: string[]; all_with_field?: string; tier?: Tier | null; options?: Record<string, unknown>; label?: string },
   ) => request<AssistantRun>('POST', `/api/assistants/${key}/runs`, body),
-  runs: (params: { limit?: number; offset?: number } = {}) =>
+  runs: (params: { limit?: number; offset?: number; status?: 'active' | RunStatus } = {}) =>
     request<Page<AssistantRun>>('GET', `/api/assistants/runs${qs(params)}`),
   run: (id: number) => request<AssistantRunDetail>('GET', `/api/assistants/runs/${id}`),
-  cancelRun: (id: number) => request<AssistantRun>('POST', `/api/assistants/runs/${id}/cancel`),
+  runItems: (id: number, params: { status?: string; after?: number; limit?: number } = {}) =>
+    request<AssistantRunItem[]>('GET', `/api/assistants/runs/${id}/items${qs(params)}`),
+  pauseRun: (id: number) => request<AssistantRun>('POST', `/api/assistants/runs/${id}/pause`),
+  resumeRun: (id: number, options: Record<string, unknown> = {}) =>
+    request<AssistantRun>('POST', `/api/assistants/runs/${id}/resume`, { options }),
+  stopRun: (id: number) => request<AssistantRun>('POST', `/api/assistants/runs/${id}/stop`),
 }

@@ -4,7 +4,7 @@ import { login, uid } from './helpers'
 
 test('API key works against /mcp and stops working once revoked', async ({ page, request }) => {
   await login(page, WRITER)
-  await page.getByRole('link', { name: 'API keys' }).click()
+  await page.getByRole('link', { name: 'Accounts' }).click()
   const name = `e2e ${uid()}`
   await page.getByLabel('Key name').fill(name)
   await page.getByRole('button', { name: 'Issue key' }).click()
@@ -44,7 +44,8 @@ test('reader can manage readers but not grant writer; activity shows it', async 
   const writerRow = page.getByTestId('users-table').getByRole('row', { name: new RegExp(WRITER.username) })
   await expect(writerRow.getByRole('button', { name: 'Deactivate' })).toHaveCount(0)
 
-  await page.getByRole('link', { name: 'Activity' }).click()
+  await page.getByRole('link', { name: 'History' }).click()
+  await page.getByRole('tab', { name: 'Activity' }).click()
   await expect(page.getByTestId('activity-table')).toContainText('user.create')
   await expect(page.getByTestId('activity-table')).toContainText(username)
 })

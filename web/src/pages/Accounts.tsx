@@ -3,7 +3,7 @@ import { useState, type FormEvent } from 'react'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { roleCanGrant, roleLabel, roleNames } from '../roles'
-import KeyManager from '../components/KeyManager'
+import KeyManager, { McpSnippet } from '../components/KeyManager'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import { formatDate } from '../lib'
 import type { User } from '../types'
@@ -97,6 +97,21 @@ export default function AccountsPage() {
             issue={(name) => api.issueUserKey(selected.id, name)}
             revoke={(id) => api.revokeUserKey(selected.id, id)}
           />
+        </section>
+      )}
+
+      {can('api_keys:manage_own') && !selected && (
+        <section className="space-y-3" data-testid="my-keys">
+          <h2 className="text-base font-semibold">My API keys</h2>
+          <p className="text-sm text-slate-600">
+            API keys let MCP clients and scripts use the database as you, with your role’s permissions. Keys can’t manage
+            accounts or issue other keys.
+          </p>
+          <KeyManager queryKey={['my-keys']} list={api.myKeys} issue={api.issueMyKey} revoke={api.revokeMyKey} />
+          <div className="card p-4">
+            <h3 className="text-sm font-semibold">Connecting an MCP client</h3>
+            <McpSnippet />
+          </div>
         </section>
       )}
     </div>

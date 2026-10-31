@@ -1,9 +1,10 @@
-import { useMutation } from '@tanstack/react-query'
-import { useRef, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api } from '../api'
 import { formatValue } from '../lib'
 import { describeNormalization } from '../pages/Person'
+import { CHANGE_LABEL } from '../pages/Assistants'
 import type { Change, StoreResult } from '../types'
+import { InvocationPanel, useInvocation } from './Invocation'
 import { ErrorNote } from './Layout'
 
 const DEFAULTS = { near_duplicate: 0.8, max_new: 2 }
@@ -15,29 +16,33 @@ const CHANGE_CLASS: Record<Change['action'], string> = {
   flagged: 'bg-amber-50 text-amber-700',
   property_created: 'bg-brand-50 text-brand-700',
   enum_value_added: 'bg-brand-50 text-brand-700',
+  note: 'bg-slate-100 text-slate-600',
 }
-const CHANGE_LABEL: Record<Change['action'], string> = { set: 'set', append: 'added to', removed: 'removed', normalized: 'normalised', flagged: 'flagged', property_created: 'new property', enum_value_added: 'new value' }
 
-/** Add free text about a person: an agent splits it into statements and files each under the
- * best-matching property (or a new free-text one, within the caps). */
+/** Add free text about a person: the store tool splits it into statements and files each under
+ * the best-matching property (or a new free-text one, within the caps). It runs as an invocation:
+ * its activity streams in and it can be stopped before anything is written. */
 export default function StoreBox({ personId, onStored }: { personId: string; onStored: () => void }) {
   const [passage, setPassage] = useState('')
   const [nearDuplicate, setNearDuplicate] = useState(DEFAULTS.near_duplicate)
   const [maxNew, setMaxNew] = useState(DEFAULTS.max_new)
   const fileRef = useRef<HTMLInputElement>(null)
-  const store = useMutation({
-    mutationFn: (file?: File) => (file ? api.storeFile(personId, file) : api.store(personId, passage.trim(), { near_duplicate: nearDuplicate, max_new: maxNew })),
-    onSuccess: () => {
+  const inv = useInvocation<StoreResult>()
+
+  useEffect(() => {
+    if (inv.status === 'done') {
       onStored()
       setPassage('')
       if (fileRef.current) fileRef.current.value = ''
-    },
-  })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inv.status])
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    if (passage.trim()) store.mutate(undefined)
+    if (passage.trim()) void inv.start(() => api.store(personId, passage.trim(), { near_duplicate: nearDuplicate, max_new: maxNew }))
   }
+  const busy = inv.status === 'running'
 
   return (
     <section className="card space-y-3 p-4" aria-label="Add information">
@@ -53,8 +58,8 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
           />
         </label>
         <div className="flex flex-wrap items-center gap-3">
-          <button className="btn-primary" disabled={store.isPending || !passage.trim()}>
-            {store.isPending ? 'Storing…' : 'Store'}
+          <button className="btn-primary" disabled={busy || !passage.trim()}>
+            {busy ? 'Storing…' : 'Store'}
           </button>
           <label className="text-sm text-slate-600">
             or a file:{' '}
@@ -64,10 +69,10 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
               accept=".txt,.md,text/plain,text/markdown"
               aria-label="Passage file"
               className="text-sm"
-              disabled={store.isPending}
+              disabled={busy}
               onChange={(e) => {
                 const f = e.target.files?.[0]
-                if (f) store.mutate(f)
+                if (f) void inv.start(() => api.storeFile(personId, f))
               }}
             />
           </label>
@@ -86,8 +91,9 @@ export default function StoreBox({ personId, onStored }: { personId: string; onS
           </details>
         </div>
       </form>
-      <ErrorNote error={store.error} />
-      {store.data && <Report result={store.data} />}
+      <ErrorNote error={inv.error} />
+      {inv.status === 'running' && <InvocationPanel events={inv.events} status={inv.status} onStop={() => void inv.stop()} label="Storing" />}
+      {inv.result && <Report result={inv.result} />}
     </section>
   )
 }
@@ -99,6 +105,7 @@ function Report({ result }: { result: StoreResult }) {
   if (Object.keys(result.redirected).length) lines.push(`Redirected to existing properties: ${Object.entries(result.redirected).map(([a, b]) => `${a} → ${b}`).join(', ')}`)
   if (result.to_notes.length) lines.push(`Filed under notes (new-property cap): ${result.to_notes.join(', ')}`)
   if (result.ignored.length) lines.push(`Ignored: ${result.ignored.join(' · ')}`)
+  if (result.credits) lines.push(`${result.credits} Firecrawl credits`)
   if (result.changes.length === 0 && lines.length === 0) return <p className="text-sm text-slate-500">Nothing about the person was found in the passage.</p>
   return (
     <div className="space-y-2">

@@ -2,7 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import type { AssistantRun, AssistantRunItem } from '../types'
-import { RunDetail, RunsTable } from './Assistants'
+import { RunCard, RunItemsTable, RunsTable } from './Assistants'
 
 const RUN: AssistantRun = {
   id: 7,
@@ -20,6 +20,10 @@ const RUN: AssistantRun = {
   credits_used: 12,
   summary: {},
   error: null,
+  worker: 'api:1',
+  heartbeat_at: '2026-10-29T12:00:05+00:00',
+  label: null,
+  pause_reason: null,
 }
 
 const ITEMS: AssistantRunItem[] = [
@@ -28,6 +32,9 @@ const ITEMS: AssistantRunItem[] = [
     run_id: 7,
     workflow: 'enrich',
     person_id: 'aaaaaaaaaaaaaaaaaaaaaaaa',
+    payload: {},
+    label: 'Ada Okafor',
+    attempts: 1,
     status: 'done',
     result: {
       text: 'LinkedIn profile matched; wrote github, company_description.',
@@ -49,6 +56,9 @@ const ITEMS: AssistantRunItem[] = [
     run_id: 7,
     workflow: 'enrich',
     person_id: 'bbbbbbbbbbbbbbbbbbbbbbbb',
+    payload: {},
+    label: null,
+    attempts: 1,
     status: 'failed',
     result: {},
     error: 'FIRECRAWL_API_KEY is not set',
@@ -60,26 +70,51 @@ const ITEMS: AssistantRunItem[] = [
   },
 ]
 
-test('runs table shows progress, credits and a cancel action for active runs', async () => {
+test('runs table shows progress, credits, labels and who started a run', async () => {
   const user = userEvent.setup()
   const selected: number[] = []
-  const cancelled: number[] = []
-  render(<RunsTable runs={[RUN, { ...RUN, id: 8, status: 'done', finished_at: '2026-10-29T12:01:00+00:00' }]} selected={null} onSelect={(id) => selected.push(id)} onCancel={(id) => cancelled.push(id)} />)
+  render(<RunsTable runs={[RUN, { ...RUN, id: 8, status: 'paused', pause_reason: 'credit cap', label: 'everyone' }]} selected={null} onSelect={(id) => selected.push(id)} />)
   const table = screen.getByTestId('runs-table')
   expect(table).toHaveTextContent('1/3')
   expect(table).toHaveTextContent('12')
   expect(table).toHaveTextContent('wendy')
-  expect(screen.getAllByRole('button', { name: 'Cancel' })).toHaveLength(1)
+  expect(table).toHaveTextContent('(credit cap)')
+  expect(table).toHaveTextContent('everyone')
   await user.click(screen.getByRole('button', { name: '7' }))
-  await user.click(screen.getByRole('button', { name: 'Cancel' }))
   expect(selected).toEqual([7])
-  expect(cancelled).toEqual([7])
 })
 
-test('run detail lists written fields, skipped reasons, errors and trace links', () => {
+test('run card offers the controls its status allows', async () => {
+  const user = userEvent.setup()
+  const calls: string[] = []
+  const { rerender } = render(
+    <RunCard run={RUN} expanded={false} onToggle={() => calls.push('toggle')} onPause={() => calls.push('pause')} onResume={(cap) => calls.push(`resume:${cap}`)} onStop={() => calls.push('stop')} />,
+  )
+  expect(screen.getByTestId('run-credits')).toHaveTextContent('12 credits of 1500')
+  expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '33')
+  await user.click(screen.getByRole('button', { name: 'Pause' }))
+  await user.click(screen.getByRole('button', { name: 'Stop' }))
+  expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
+  rerender(
+    <RunCard run={{ ...RUN, status: 'paused', pause_reason: 'credit cap' }} expanded onToggle={() => calls.push('toggle')} onPause={() => calls.push('pause')} onResume={(cap) => calls.push(`resume:${cap}`)} onStop={() => calls.push('stop')}>
+      <p>detail here</p>
+    </RunCard>,
+  )
+  expect(screen.getByText('(credit cap)')).toBeInTheDocument()
+  expect(screen.getByText('detail here')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull()
+  await user.clear(screen.getByLabelText('New credit cap'))
+  await user.type(screen.getByLabelText('New credit cap'), '2000')
+  await user.click(screen.getByRole('button', { name: 'Resume' }))
+  expect(calls).toEqual(['pause', 'stop', 'resume:2000'])
+  rerender(<RunCard run={{ ...RUN, status: 'done', finished_at: '2026-10-29T12:01:00+00:00' }} expanded={false} onToggle={() => calls.push('toggle')} onStop={() => calls.push('stop')} />)
+  expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+})
+
+test('run items list written fields, skipped reasons, errors and trace links', () => {
   render(
     <MemoryRouter>
-      <RunDetail run={RUN} items={ITEMS} />
+      <RunItemsTable items={ITEMS} />
     </MemoryRouter>,
   )
   const items = screen.getByTestId('run-items')
@@ -88,6 +123,6 @@ test('run detail lists written fields, skipped reasons, errors and trace links',
   expect(items).toHaveTextContent('no personal website known')
   expect(items).toHaveTextContent('FIRECRAWL_API_KEY is not set')
   expect(screen.getByRole('link', { name: 'Logfire' })).toHaveAttribute('href', ITEMS[0].logfire_url!)
-  expect(screen.getByRole('link', { name: ITEMS[1].person_id })).toHaveAttribute('href', `/people/${ITEMS[1].person_id}`)
-  expect(screen.getByText(/mode=frugal/)).toBeInTheDocument()
+  expect(screen.getByRole('link', { name: 'Ada Okafor' })).toHaveAttribute('href', `/people/${ITEMS[0].person_id}`)
+  expect(screen.getByRole('link', { name: ITEMS[1].person_id! })).toBeInTheDocument()
 })

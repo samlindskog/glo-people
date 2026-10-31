@@ -142,26 +142,55 @@ export interface ImportPreview {
   columns: ImportColumn[]
 }
 
-export interface ImportResult {
+/** What POST /api/people/import answers: the import runs as an assistant run of row batches. */
+export interface ImportStarted {
   file: string
   tier: Tier
   rows: number
-  inserted: number
-  updated: number
   skipped: number
   new_properties: string[]
-  job_id: number
+  run_id: number
+  items: number
 }
 
-export interface Job {
-  id: number
-  name: string
-  status: 'running' | 'done' | 'failed'
-  progress: number
-  result: unknown
-  error: string | null
+// --- tool invocations (level 2): one tool on one record, non-blocking -------------------------------
+
+export type EventKind = 'step' | 'agent' | 'provider' | 'write' | 'note' | 'error' | 'result' | 'item' | 'run'
+
+/** One line of a tool's or a run's activity. */
+export interface ToolEvent {
+  seq: number
+  ts: string
+  kind: EventKind
+  message: string
+  data: Record<string, unknown>
+}
+
+export type InvocationStatus = 'running' | 'done' | 'failed' | 'stopped'
+
+/** The handle a surface gets back from starting a tool: follow its events, stop it, fetch its result. */
+export interface Invocation {
+  id: string
+  tool: string
+  person_id: string
+  status: InvocationStatus
   started_at: string
   finished_at: string | null
+  credits: number
+  events: number
+  error: string | null
+  events_url: string
+  result?: unknown
+}
+
+/** The Firecrawl balance for the top bar. */
+export interface Credits {
+  remaining: number | null
+  plan: number | null
+  period_start: string | null
+  period_end: string | null
+  reserved: number
+  error: string | null
 }
 
 export interface Page<T> {
@@ -306,11 +335,15 @@ export interface ApiKey {
   key?: string
 }
 
+export type AssistantScope = 'people' | 'batches' | 'single'
+
 export interface AssistantSpec {
   key: string
   label: string
   description: string
-  selector_field: string
+  scope: AssistantScope
+  permission: string
+  selector_field: string | null
   options_schema: { properties?: Record<string, { default?: unknown; description?: string; enum?: string[]; type?: string }> }
 }
 
@@ -331,17 +364,36 @@ export interface AssistantRun {
   done: number
   failed: number
   credits_used: number
-  summary: { stopped_reason?: string; by_status?: Record<string, number> }
+  summary: { by_status?: Record<string, number> }
   error: string | null
+  worker: string | null
+  heartbeat_at: string | null
+  label: string | null
+  pause_reason: string | null
+}
+
+/** One persisted line of a run's activity (a tool event during an item, or a run-level note). */
+export interface RunEvent {
+  id: number
+  run_id: number
+  item_id: number | null
+  ts: string
+  kind: EventKind
+  message: string
+  data: Record<string, unknown>
 }
 
 export interface AssistantRunItem {
   id: number
   run_id: number
   workflow: string
-  person_id: string
+  /** A person, or null for a row batch or a one-shot item. */
+  person_id: string | null
+  payload: Record<string, unknown>
+  label: string | null
+  attempts: number
   status: RunItemStatus
-  /** The assistant's result for this person: text for a human, the changes, and its own details. */
+  /** The assistant's result for this item: text for a human, the changes, and its own details. */
   result: {
     text?: string
     changes?: Change[]
@@ -350,6 +402,7 @@ export interface AssistantRunItem {
     linkedin?: string
     company?: string
     credits?: number
+    [key: string]: unknown
   }
   error: string | null
   credits: number

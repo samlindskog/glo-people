@@ -2,15 +2,14 @@ import { NavLink, Outlet, useNavigate } from 'react-router'
 import { useAuth } from '../auth'
 import { roleLabel } from '../roles'
 import type { Permission } from '../types'
+import CreditsChip from './CreditsChip'
 
 const NAV: { to: string; label: string; permission: Permission }[] = [
   { to: '/people', label: 'People', permission: 'people:read' },
   { to: '/properties', label: 'Properties', permission: 'people:read' },
   { to: '/assistants', label: 'Assistants', permission: 'people:read' },
-  { to: '/searches', label: 'My searches', permission: 'searches:read_own' },
-  { to: '/activity', label: 'Activity', permission: 'activity:read' },
+  { to: '/history', label: 'History', permission: 'searches:read_own' },
   { to: '/accounts', label: 'Accounts', permission: 'accounts:manage' },
-  { to: '/api-keys', label: 'API keys', permission: 'api_keys:manage_own' },
 ]
 
 export default function Layout() {
@@ -38,6 +37,7 @@ export default function Layout() {
             ))}
           </nav>
           <div className="flex items-center gap-3 text-sm">
+            <CreditsChip />
             <span className="text-slate-600" data-testid="whoami">
               {me?.username} <span className="badge bg-slate-100 text-slate-600">{roleLabel(me?.role ?? '')}</span>
             </span>

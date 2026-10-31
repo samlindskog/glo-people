@@ -2,15 +2,15 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api } from '../api'
 import { useAuth } from '../auth'
-import { ErrorNote, PageHeader } from '../components/Layout'
+import { ErrorNote } from '../components/Layout'
 import { formatDate } from '../lib'
 import type { ActivityItem } from '../types'
 import { Pager } from './Searches'
 
 const PAGE = 100
-const ACTIONS = ['', 'auth', 'search', 'mcp', 'person', 'people.import', 'field', 'user', 'apikey']
+const ACTIONS = ['', 'auth', 'search', 'ask', 'mcp', 'person', 'people.import', 'assistant', 'field', 'user', 'apikey']
 
-export default function ActivityPage() {
+export default function ActivityPanel() {
   const { can } = useAuth()
   const [userId, setUserId] = useState('')
   const [action, setAction] = useState('')
@@ -38,7 +38,6 @@ export default function ActivityPage() {
 
   return (
     <div>
-      <PageHeader title="Activity" />
       <div className="card mb-4 flex flex-wrap items-end gap-3 p-3">
         {users.data && (
           <label className="space-y-1">

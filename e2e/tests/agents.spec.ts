@@ -37,7 +37,7 @@ test('ask plans a search, answers with citations, and the plan runs as a search'
   await expect(page.getByTestId('result-summary')).toContainText('mrr ≥ 20000')
   await expect(page.getByTestId('results')).toContainText(`Ask ${tag}`)
   // the planned search is in the history, marked as an ask
-  await page.getByRole('link', { name: 'My searches' }).click()
+  await page.getByRole('link', { name: 'History' }).click()
   await expect(page.getByTestId('searches-table').getByRole('row', { name: /ask/ }).first()).toContainText('mrr ≥ 20000')
 })
 

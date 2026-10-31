@@ -34,7 +34,7 @@ export default function PropertiesPage() {
       {started && (
         <p className="mb-3 rounded-md bg-brand-50 px-3 py-2 text-sm text-brand-800" data-testid="normalise-started">
           Normalise run #{started.id} started for {started.total} {started.total === 1 ? 'person' : 'people'} ·{' '}
-          <Link to="/assistants" className="underline">
+          <Link to={`/assistants/${started.id}`} className="underline">
             follow it on Assistants
           </Link>
         </p>
