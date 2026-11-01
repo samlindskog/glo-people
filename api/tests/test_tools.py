@@ -482,6 +482,18 @@ async def test_repair_validator_refuses_invented_names_and_allocates_kinds(write
         await repair(pid, src)
     assert (await reader.get(f"/api/people/{pid}")).json()["name"] == "Sam"
 
+    def stubborn(messages, info):
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {
+            "kind": "Unidentifiable", "name": None, "name_complete": False, "confidence": "high"})])
+
+    # a full name behind a LinkedIn profile URL is a person, whatever an earlier mark said
+    pid = await make(writer, {"name": "Eleanor Qin", "linkedin": "https://www.linkedin.com/in/eqin",
+                              "record_kind": "Unidentifiable"})
+    with repair_tool.agent.override(model=FunctionModel(stubborn)):
+        res = await repair(pid, src)
+    assert res.kind == "Person" and "identify a person" in res.note
+    assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Person"
+
     def fund(messages, info):
         return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {
             "kind": "Fund", "name": None, "name_complete": True, "confidence": "high"})])

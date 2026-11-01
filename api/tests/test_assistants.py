@@ -109,7 +109,8 @@ class FakeFirecrawl(AsyncFirecrawl):
             if "exchange-fail" in url:
                 raise FirecrawlError("fullenrich/people/match: upstream_error provider timeout")
             if url_key(url) in (url_key("https://www.linkedin.com/in/adaokafor"),
-                                url_key("https://www.linkedin.com/in/nosummary")):
+                                url_key("https://www.linkedin.com/in/nosummary"),
+                                url_key("https://www.linkedin.com/in/nolastname")):
                 self.budget.charge("scrape", target, LINKEDIN_CREDITS)
                 return AlexandriaResult(provider, capability,
                                         json.loads((FIX / "fullenrich_ada.json").read_text()),
@@ -131,6 +132,11 @@ class FakeFirecrawl(AsyncFirecrawl):
                 self.budget.charge("scrape", target, PDL_CREDITS)   # a record without an about text
                 data = json.loads((FIX / "pdl_ada.json").read_text())
                 data["data"]["summary"] = None
+                return AlexandriaResult(provider, capability, data, PDL_CREDITS)
+            if url_key(options["profile"]) == url_key("https://www.linkedin.com/in/nolastname"):
+                self.budget.charge("scrape", target, PDL_CREDITS)   # PDL knows only the first name
+                data = json.loads((FIX / "pdl_ada.json").read_text())
+                data["data"].update(full_name="ada", last_name=None)
                 return AlexandriaResult(provider, capability, data, PDL_CREDITS)
             raise NotFound("not_found")
         if target == "github-com/repositories/user":
@@ -446,6 +452,16 @@ async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer
     assert res["stored"]["about"]["provider"] == "fullenrich/people/match"
     assert written(res)["about"] == "Founder of PayRail. Previously Paystack and Stripe."
     assert run["credits_used"] >= PDL_CREDITS + LINKEDIN_CREDITS
+    # a record without a full name whose PDL profile has none either: the name is a gap too, and
+    # the second provider supplies it
+    await import_people(writer, "Name,LinkedIn\nAda,https://www.linkedin.com/in/nolastname\n",
+                        "a.csv", "plus_one")
+    bare = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
+    run = await run_for(writer, [bare], **defaults)
+    res = run["items"][0]["result"]
+    assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "matched"}
+    assert res["linkedin_provider"] == "people-data-labs" and written(res)["name"] == "Ada Okafor"
+    assert (await reader.get(f"/api/people/{bare}")).json()["name"] == "Ada Okafor"
 
 
 async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, people):

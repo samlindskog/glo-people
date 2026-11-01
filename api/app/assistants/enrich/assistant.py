@@ -41,7 +41,14 @@ from app.integrations.firecrawl import (
     NotFound,
     TermsRequired,
 )
-from app.integrations.profile import LinkedInProfile, name_fill, profile_lines, profile_values
+from app.integrations.profile import (
+    LinkedInProfile,
+    full_name,
+    is_full_name,
+    name_fill,
+    profile_lines,
+    profile_values,
+)
 from app.tools import company as company_tool
 from app.tools import site as site_tool
 from app.tools import store as store_tool
@@ -217,7 +224,8 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     URL; People Data Labs 1 credit, FullEnrich 5; a miss is free). The first match is the profile
     the direct writes and the later steps rest on; every match adds its facts to the passage.
     Under the default `gaps` policy the next provider is asked only when the one before had no
-    record or no about text, since the records overlap almost entirely."""
+    record, no about text, or no full name while the record lacks one, since the records overlap
+    almost entirely."""
     li = linkedin_profile(deps.current("linkedin"))
     if not li:
         deps.skip("linkedin", "no linkedin.com/in URL on the record")
@@ -236,9 +244,14 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
         st.result["linkedin"] = "not_found"
         return
     statuses: dict[str, str] = st.result["providers"]
+    name_done = is_full_name(str(deps.current("name") or ""))
+
+    def complete() -> bool:
+        """The matched profile leaves no gap: an about text, and a full name when needed."""
+        return st.profile is not None and bool((st.profile.summary or "").strip()) and name_done
+
     for spec in (PROVIDERS[k] for k in dict.fromkeys(st.options.providers)):
-        if st.options.provider_policy == "gaps" and st.profile is not None \
-                and (st.profile.summary or "").strip():
+        if st.options.provider_policy == "gaps" and complete():
             deps.skip("linkedin", f"{spec.label} not asked: the record is complete without it")
             statuses[spec.key] = "skipped"
             continue
@@ -253,6 +266,10 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
             continue
         statuses[spec.key] = "matched"
         st.passage.add(spec.source, "LinkedIn profile", profile_lines(profile))
+        values: dict[str, Any] = {}
+        if not name_done and (name := name_fill(profile, deps.current("name"))):
+            values["name"] = name               # "Alina" → the profile's "Alina Kharina"
+            st.name, name_done = name, True
         if st.profile is None:
             st.profile = profile
             st.result["linkedin"] = "matched"
@@ -260,10 +277,10 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
             if github_url := github_profile(profile.github_url):
                 st.github_urls.append(github_url)
             st.related.extend(profile.other_links)
-            values = profile_values(profile, deps.person or {})
-            if name := name_fill(profile, deps.current("name")):
-                values["name"] = name           # "Alina" → the profile's "Alina Kharina"
-                st.name = name
+            values.update(profile_values(profile, deps.person or {}))
+        elif not full_name(st.profile) and full_name(profile):
+            deps.emit("note", f"{spec.label} supplies the full name the first profile lacked")
+        if values:
             await deps.write("linkedin_reader", values)
     if st.profile is None:
         # the step's status is the worst of the providers': an error beats a miss

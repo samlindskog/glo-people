@@ -286,8 +286,12 @@ async def _judge(doc: dict, sigs: list[str], opts: RepairOptions, emit: Emit = s
     cat = {p.key: p.type for p in await properties.catalog()}
     present = {k: cat[k] for k in doc if k in cat and _cur(doc, k) not in (None, "", [])}
     kinds = await properties.enum_values(KIND)
+    current_kind = _cur(doc, KIND)
+    kind_note = (" (set earlier, while the name was incomplete; judge afresh)"
+                 if current_kind == UNIDENTIFIABLE and is_full_name(str(_cur(doc, "name") or ""))
+                 else "")
     prompt = (f"Name: {_cur(doc, 'name') or '(none)'}\n"
-              f"Current record kind: {_cur(doc, KIND) or '(not set)'}\n"
+              f"Current record kind: {current_kind or '(not set)'}{kind_note}\n"
               f"Kinds: {', '.join(kinds)}\n"
               f"Hints: {'; '.join(sigs) or 'nothing flagged'}\n\n"
               f"Evidence:\n{block}")
@@ -353,8 +357,15 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         name, name_source = verdict.name, "evidence"
     elif verdict.name:
         result.rejected.append(f"name {verdict.name!r} (low confidence)")
-    complete = verdict.name_complete or name is not None
+    complete = verdict.name_complete or name is not None or is_full_name(current_name)
     kind_proposed = verdict.kind
+    li = _cur(doc, "linkedin")
+    if fields.fold(kind_proposed) == fields.fold(UNIDENTIFIABLE) and is_full_name(current_name) \
+            and isinstance(li, str) and linkedin_profile(li):
+        # a first-and-last name behind a LinkedIn profile URL identifies a person, whatever the
+        # agent made of an earlier Unidentifiable mark
+        kind_proposed = PERSON
+        result.note = f"{result.note} A full name and a LinkedIn profile identify a person.".strip()
     profile = None
     if fields.fold(kind_proposed) == fields.fold(PERSON) and not complete:
         if opts.provider and ctx.firecrawl is not None:
