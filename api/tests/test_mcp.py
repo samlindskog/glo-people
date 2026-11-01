@@ -67,6 +67,7 @@ async def test_tool_visibility_by_role(client_factory, keys):
         tools = {t["name"] for t in resp.json()["result"]["tools"]}
         assert {"search_people", "get_person", "list_properties"} <= tools
         assert ("create_person" in tools) is expect_write
+        assert ("merge_person" in tools) is expect_write
 
 
 async def test_search_parity_with_rest(client_factory, keys, reader):

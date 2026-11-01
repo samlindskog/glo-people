@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from app import activity, fields, history, mongo, normalize, properties
 from app.auth import Principal
@@ -344,16 +345,17 @@ class Transaction:
         return cls(doc) if doc else None
 
     @classmethod
-    def new(cls, tier: str, origin: dict[str, Any] | None = None) -> "Transaction":
+    def new(cls, tier: str, source_doc: dict[str, Any] | None = None) -> "Transaction":
         """A person that does not exist yet: staged like any other, inserted by `commit` (which
-        refuses a document without a name). Its id is known from the start. `origin` is the
-        document's `source` (`{file, source_id, row}`) when a file's row creates the person."""
+        refuses a document without a name). Its id is known from the start. `source_doc` is the
+        document's `source` field (`{file, source_id, row}`) when a file's row creates the
+        person."""
         _check_tier(tier)
         now = datetime.now(UTC)
         doc: dict[str, Any] = {"_id": ObjectId(), "tier": tier, "created_at": now,
                                "updated_at": now, "schema_version": history.SCHEMA_VERSION}
-        if origin:
-            doc["source"] = {k: v for k, v in origin.items() if v is not None}
+        if source_doc:
+            doc["source"] = {k: v for k, v in source_doc.items() if v is not None}
         return cls(doc, new=True)
 
     @property
@@ -473,8 +475,14 @@ class Transaction:
             if self.is_new:
                 to_set.update({k: self.doc[k] for k in ("tier", "created_at", "updated_at",
                                                         "source") if k in self.doc})
-            if await _cas_write(oid, self.doc, to_set, upsert=self.is_new):
-                break
+            try:
+                if await _cas_write(oid, self.doc, to_set, upsert=self.is_new):
+                    break
+            except DuplicateKeyError as e:               # the unique (file, source_id) of `source`
+                src = self.doc.get("source") or {}
+                raise ConflictError(f"a person for row {src.get('source_id')!r} of "
+                                    f"{src.get('file')!r} was created concurrently; merge the "
+                                    "file again") from e
             fresh = await db().people.find_one({"_id": oid})
             if fresh is None:
                 return None

@@ -20,7 +20,6 @@ from app import (
     db,
     embeddings,
     fields,
-    importer,
     mongo,
     observability,
     people,
@@ -89,12 +88,10 @@ async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, revie
     await mongo.ensure_indexes()
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
     options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
-    parsed = importer.parse_csv(text, Path(path).name)
+    parsed, created, items = await merge.prepare_csv(text, Path(path).name, dry_run=dry_run)
     print(f"{path}: {parsed.total} rows, {len(parsed.rows)} with a name, {parsed.skipped} skipped")
-    created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
     if created:
         print(f"new properties: {', '.join(created)}")
-    items = merge.items_for_csv(parsed)
     if not items:
         sys.exit("nothing to merge")
     run = await _run("merge", items, {"options": options.model_dump(), "file": parsed.file},

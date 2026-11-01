@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
-from app import activity, db, fields, importer, properties
+from app import activity, db, fields, importer
 from app import people as people_svc
 from app.assistants import merge, runner
 from app.assistants.merge import MergeOptions
@@ -124,11 +124,9 @@ async def import_people(file: Annotated[UploadFile, File()],
     name = file.filename or "upload.csv"
     options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
     try:
-        parsed = importer.parse_csv(text, name)
-        created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
-    except (ValueError, properties.PropertyError) as e:
+        parsed, created, items = await merge.prepare_csv(text, name, dry_run=dry_run)
+    except ValueError as e:                     # PropertyError is one
         raise _bad_request(e) from e
-    items = merge.items_for_csv(parsed)
     if not items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no rows with a name")
     run = await runner.create_run(merge.SPEC, principal, items, {

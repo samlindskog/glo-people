@@ -12,7 +12,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app import fields, importer, normalize, people, properties
+from app import fields, importer, people, properties
 from app.assistants import runner
 from app.assistants.base import AssistantSpec, ItemSpec, register
 from app.assistants.context import AssistantDeps
@@ -20,7 +20,6 @@ from app.assistants.review import review
 from app.auth import Principal
 from app.history import Source
 from app.integrations.firecrawl import Budget
-from app.property_specs import CANONICAL
 from app.tools import record
 from app.tools import store as store_tool
 
@@ -60,26 +59,13 @@ def clean_values(values: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def restated(values: dict[str, Any], person: dict[str, Any],
-             catalog: dict[str, properties.Property]) -> set[str]:
-    """Keys whose value is the person's current one in canonical form (an email in another case,
-    a URL spelt differently, a keyword with other punctuation): a restatement, not news, so it
-    adds no history entry. Other types compare as text (the write path appends nothing for an
-    equal text)."""
-    out: set[str] = set()
-    for key, value in values.items():
-        ptype = importer.property_type(key, catalog)
-        current = person.get(key)
-        if ptype not in CANONICAL or current in (None, "", []):
-            continue
-        mine, theirs = normalize.parse(value, ptype).value, normalize.parse(current, ptype).value
-        if mine is None or theirs is None:
-            continue
-        mine_set = set(mine) if isinstance(mine, list) else {mine}
-        theirs_set = set(theirs) if isinstance(theirs, list) else {theirs}
-        if mine_set <= theirs_set:
-            out.add(key)
-    return out
+async def prepare_csv(text: str, filename: str, *,
+                      dry_run: bool = False) -> tuple[importer.ParsedCsv, list[str], list[ItemSpec]]:
+    """Parse a CSV, create the properties its columns need (not on a dry run) and cut it into
+    items: the step the upload surfaces (REST, CLI) share. Returns (parsed, created keys, items)."""
+    parsed = importer.parse_csv(text, filename)
+    created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
+    return parsed, created, items_for_csv(parsed)
 
 
 def items_for_csv(parsed: importer.ParsedCsv) -> list[ItemSpec]:
@@ -102,16 +88,25 @@ async def prepare(body: dict[str, Any], options: BaseModel) -> list[ItemSpec]:
     records = body.get("records") or []
     if not records:
         raise ValueError("records is required: a list of {property: value} dicts")
-    items: list[ItemSpec] = []
     for n, rec in enumerate(records, start=1):
         if not isinstance(rec, dict):
             raise TypeError(f"record {n} is not an object")
-        label = str(rec.get("name") or f"record {n}")
-        items.append({"person_id": rec.get("person_id") if isinstance(rec.get("person_id"), str)
-                      else None, "label": label,
+    items: list[ItemSpec] = []
+    named = [(n, rec) for n, rec in enumerate(records, start=1)
+             if isinstance(rec.get("person_id"), str)]
+    for n, rec in named:                                  # a record naming its person: its own item
+        items.append({"person_id": rec["person_id"], "label": str(rec.get("name") or f"record {n}"),
                       "payload": {"file": None, "source_id": None,
                                   "rows": [{"row": None, "values": {k: v for k, v in rec.items()
                                                                     if k != "person_id"}}]}})
+    rows = [importer.Row(n, rec) for n, rec in enumerate(records, start=1)
+            if not isinstance(rec.get("person_id"), str)]
+    for group in importer.group_rows(rows):              # records of one person: one item, in order
+        first = group[0]
+        items.append({"person_id": None,
+                      "label": str(first.values.get("name") or f"record {first.row_no}"),
+                      "payload": {"file": None, "source_id": None,
+                                  "rows": [{"row": None, "values": r.values} for r in group]}})
     return items
 
 
@@ -179,7 +174,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     elif match.decision == "new":
         deps.new_tier = options.tier
         if file:
-            deps.new_origin = {"file": file, "source_id": source_id, "row": rows[0]["row"]}
+            deps.new_source_doc = {"file": file, "source_id": source_id, "row": rows[0]["row"]}
         deps.emit("step", f"creating {name} ({options.tier})")
     else:
         deps.emit("step", f"matched {name} by {match.tier}: {', '.join(match.keys)}")
@@ -188,7 +183,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     filed: set[str] = set()
     for row, values, plan in zip(rows, cleaned, plans, strict=True):
         src = _source(deps, file, row.get("row"))
-        skip = restated(plan.direct, deps.person, catalog) if deps.person else set()
+        skip = importer.restated(plan.direct, deps.person, catalog) if deps.person else set()
         direct = {k: v for k, v in plan.direct.items() if k not in skip}
         if direct:
             res = await deps.tool(record.write, "record", source=src, values=direct,
@@ -246,7 +241,7 @@ DETAILS = """\
 
 **Starting it.** Upload a CSV on the People page or in this card (preview first: each column's plan and the match decisions of the first rows; a dry run writes nothing), or start a run over `records` through the API or MCP (`merge_person` merges one record synchronously). Options: `tier` (member: for the people the run creates; a matched person keeps theirs), `max_new_properties` (3: properties the storage agent may create per record), `agent` (true: long prose and unknown keys go to the storage agent; off, every known value is written as entered), `review` (true), `dry_run` (false). Free apart from the model calls of the storage agent and the review.
 
-**Parsing a CSV.** Every header becomes a property key (lowercase, underscores; a header that collides with a system key is prefixed `col_`); columns the catalog lacks are created as free text before the run. Cells keep their text as entered and list columns are split into items. A row without a name (or first and last name) is skipped. Rows that describe the same person (the same `ID`, or the same name and first email) fold into one item in file order.
+**Parsing a CSV.** Every header becomes a property key (lowercase, underscores; a header that collides with a system key is prefixed `col_`); columns the catalog lacks are created as free text before the run. Cells keep their text as entered and list columns are split into items. A row without a name (or first and last name) is skipped. Rows that describe the same person (the same `ID`, the same name, or a shared email, phone, LinkedIn or GitHub URL, transitively) fold into one item in file order, so two items never create the same person at once.
 
 **Matching.** A record names its person when it carries an identifier the database already holds: an email or phone, the LinkedIn or GitHub URL, or the file's `ID`, compared on canonical forms (so a LinkedIn URL matches whatever its spelling). Without one, a name that exactly one person has decides; a name several people share is decided by company, location or email domain when exactly one of them agrees. Otherwise the record is ambiguous: the item is skipped with the candidates listed, nothing is written, a human decides and the run is redone. A record no one matches creates a person in the run's tier.
 

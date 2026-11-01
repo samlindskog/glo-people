@@ -158,15 +158,15 @@ class Invocation:
 # --- starting and finding invocations ----------------------------------------------------------------------
 
 async def make_context(person_id: str | None, source: Source, principal: Principal | None = None,
-                       *, tier: str | None = None, origin: dict[str, Any] | None = None,
+                       *, tier: str | None = None, source_doc: dict[str, Any] | None = None,
                        firecrawl: AsyncFirecrawl | None = None, owns_firecrawl: bool = False,
                        sink: Sink | None = None) -> ToolContext | None:
     """Open the record's transaction and build the tool's context; None when the person does not
     exist (so a surface answers 404 before anything starts). With `person_id` None the context is
-    for a person that does not exist yet (`tier` required; `origin` its `source` document when a
+    for a person that does not exist yet (`tier` required; `source_doc` its `source` field when a
     file's row creates it): the first commit creates it. `sink` receives every event."""
     if person_id is None:
-        tx: people.Transaction | None = people.Transaction.new(tier or "member", origin)
+        tx: people.Transaction | None = people.Transaction.new(tier or "member", source_doc)
     else:
         tx = await people.Transaction.open(person_id)
     if tx is None:

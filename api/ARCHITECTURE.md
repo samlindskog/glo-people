@@ -29,7 +29,7 @@ value dropped on replay because its text changed concurrently); `assistants/revi
 ### The invocation contract
 
 ```
-ctx = await invoke.make_context(person_id | None, source, principal, tier=…, origin=…, firecrawl=…, sink=…)   # None → 404; person_id None = a person the first commit creates
+ctx = await invoke.make_context(person_id | None, source, principal, tier=…, source_doc=…, firecrawl=…, sink=…)   # None → 404; person_id None = a person the first commit creates
 inv = invoke.invoke(tool, ctx, **kwargs)        # Invocation{id, status, events, result, credits, stop(), wait(), subscribe()}
 result = await inv.wait()                        # or invoke.run(tool, ctx, **kwargs)
 ```

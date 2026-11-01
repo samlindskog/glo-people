@@ -31,7 +31,7 @@ class AssistantDeps(AgentDeps):
     options: Any
     new_tier: str | None = None            # an item whose person does not exist yet: the first
                                            # tool commit creates it in this tier ...
-    new_origin: dict[str, Any] | None = None   # ... with this `source` ({file, source_id, row})
+    new_source_doc: dict[str, Any] | None = None   # ... with this `source` field ({file, source_id, row})
     changes: list[Change] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     event_sink: Callable[[ToolEvent], None] | None = None   # the runner's; None when run alone
@@ -96,7 +96,7 @@ class AssistantDeps(AgentDeps):
         if pid is None and self.new_tier is None:
             raise AssertionError("this item has no person and no tier to create one in")
         ctx = await invoke.make_context(pid, source or self.source(agent), self.principal,
-                                        tier=self.new_tier, origin=self.new_origin,
+                                        tier=self.new_tier, source_doc=self.new_source_doc,
                                         firecrawl=self.firecrawl, sink=self.event_sink)
         if ctx is None:
             return None

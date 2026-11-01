@@ -39,9 +39,9 @@ from app.tools.store import StoreOptions
 
 log = logging.getLogger(__name__)
 
-WRITE_TOOLS = frozenset({"create_person", "update_person", "delete_person", "store_about_person",
-                         "normalize_person", "start_assistant", "pause_run", "resume_run",
-                         "stop_run"})
+WRITE_TOOLS = frozenset({"create_person", "merge_person", "update_person", "delete_person",
+                         "store_about_person", "normalize_person", "start_assistant", "pause_run",
+                         "resume_run", "stop_run"})
 
 INSTRUCTIONS = """\
 Search and read the GLO people database. People are documents in two tiers ('member' and
@@ -193,15 +193,9 @@ async def merge_person(
                                                         "record; 'name' required for a person "
                                                         "that may not exist yet; a 'person_id' "
                                                         "names the person outright")],
-    tier: Annotated[Literal["member", "plus_one"],
-                    Field(description="Tier if the record creates a person; a matched person "
-                                      "keeps theirs")] = "member",
-    dry_run: Annotated[bool, Field(description="Match and plan only, write nothing")] = False,
-    agent: Annotated[bool, Field(description="Hand long prose and unknown keys to the storage "
-                                             "agent (it may create up to max_new_properties); "
-                                             "off, unknown keys are left out")] = True,
-    max_new_properties: Annotated[int, Field(ge=0, le=5)] = 3,
-    review: Annotated[bool, Field(description="Close with the review (normaliser, repair)")] = True,
+    options: Annotated[MergeOptions | None,
+                       Field(description="tier (for a created person), max_new_properties, "
+                                         "agent, review, dry_run")] = None,
 ) -> dict:
     """Assistant: merge one incoming record into the people database (requires people:write).
     The record is matched to a person by a shared identifier (email, phone, LinkedIn or GitHub
@@ -212,10 +206,9 @@ async def merge_person(
     (status 'skipped'). Returns the match, what was written and filed, the review and every
     change; a dry run returns the match and the plan."""
     principal = await _principal(ctx, "people:write")
-    options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent,
-                           max_new_properties=max_new_properties, review=review)
     try:
-        return await merge.merge_one(record, options, principal, Source.for_mcp(principal))
+        return await merge.merge_one(record, options or MergeOptions(), principal,
+                                     Source.for_mcp(principal))
     except (ValueError, TypeError) as e:
         raise ToolError(str(e)) from e
 

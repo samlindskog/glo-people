@@ -7,6 +7,7 @@ import pytest
 from app import embedder, importer, properties
 from app.assistants import runner
 from app.config import get_settings
+from app.history import Source
 from app.mongo import db
 from tests.conftest import import_people
 from tests.test_mcp import call, init
@@ -63,10 +64,15 @@ def test_rows_of_one_person_are_grouped_in_file_order():
                                 ",Bo,bo@x.io,b1\n"
                                 "1,Ada,,second\n"
                                 ",Bo,bo@x.io,b2\n"
-                                ",Bo,other@x.io,b3\n", "g.csv")
+                                ",Bo,other@x.io,b3\n"
+                                ",Robert Chen,BO@x.io,b4\n"          # another name, Bo's email
+                                "2,Ada,,a third Ada with her own id\n", "g.csv")
     groups = importer.group_rows(parsed.rows)
-    assert [[r.row_no for r in g] for g in groups] == [[2, 4], [3, 5], [6]]
+    assert [[r.row_no for r in g] for g in groups] == [[2, 4], [3, 5, 6, 7], [8]]
     assert groups[0][0].source_id == "1" and groups[1][0].source_id is None
+
+    rows = importer.parse_csv("Name,Phone\nA One,+1 555 000 1111\nB Two,(555) 000-1111\n", "p.csv").rows
+    assert len(importer.group_rows(rows)) == 2            # a phone without a country code is no key
 
 
 async def test_match_record_by_identifier_name_and_context(writer):
@@ -93,6 +99,37 @@ async def test_match_record_by_identifier_name_and_context(writer):
     await import_people(writer, "ID,Name\nm7,Someone\n", "m.csv", "member")
     m = await importer.match_record({"name": "Renamed"}, {"file": "m.csv", "source_id": "m7"})
     assert (m.decision, m.tier, m.keys) == ("matched", "identifier", ["source_id"])
+
+
+async def test_identifier_ranking_ignores_a_shared_name(writer):
+    ann = await _create(writer, name="Ann Lee", email="ann@x.io")
+    john = await _create(writer, name="John Smith", phone_number="+1 555 000 1111")
+    # the record shares an email with Ann and a phone with John: contradictory, not John's
+    m = await importer.match_record({"name": "John Smith", "email": "ann@x.io",
+                                     "phone_number": "+1 (555) 000-1111"})
+    assert m.decision == "ambiguous" and {c["person_id"] for c in m.candidates} == {ann, john}
+    # John's name alone is no identifier: the email decides
+    m = await importer.match_record({"name": "John Smith", "email": "ann@x.io"})
+    assert (m.decision, m.person_id, m.tier, m.keys) == ("matched", ann, "identifier", ["email"])
+    # two identifiers beat one
+    m = await importer.match_record({"name": "Ann Lee", "email": "ann@x.io",
+                                     "phone_number": "+1 555 000 1111"})
+    assert m.decision == "ambiguous"
+    m = await importer.match_record({"email": "ann@x.io", "phone_number": "+1 555 000 1111",
+                                     "linkedin": "https://linkedin.com/in/annlee"})
+    assert m.decision == "ambiguous"                       # still one identifier each
+
+
+async def test_a_file_id_created_twice_is_a_conflict(writer):
+    from app import people
+    first = people.Transaction.new("member", {"file": "f.csv", "source_id": "7", "row": 2})
+    await first.set_values({"name": "First"}, Source("import", "f.csv", "row 2"))
+    assert await first.commit(None) is not None
+    second = people.Transaction.new("member", {"file": "f.csv", "source_id": "7", "row": 2})
+    await second.set_values({"name": "Second"}, Source("import", "f.csv", "row 2"))
+    with pytest.raises(people.ConflictError, match="created concurrently"):
+        await second.commit(None)
+    assert await db().people.count_documents({}) == 1
 
 
 # --- the assistant ------------------------------------------------------------------------------------------
@@ -160,6 +197,19 @@ async def test_remerging_the_same_record_writes_nothing(writer):
     assert after["rev"] == before["rev"] and after["updated_at"] == before["updated_at"]
 
 
+async def test_records_of_one_person_fold_into_one_item(writer):
+    items = await _merge_run(writer, [{"name": "Bo Chen", "email": "bo@x.io", "bio": "first"},
+                                      {"name": "Robert Chen", "email": "BO@x.io", "bio": "second"},
+                                      {"name": "Someone Else"}], review=False)
+    assert [it["label"] for it in items] == ["Bo Chen", "Someone Else"]
+    bo = items[0]["result"]
+    assert bo["created"] and sorted(bo["written"]) == ["bio", "email", "name"]
+    assert await db().people.count_documents({}) == 2
+    doc = await db().people.find_one({"email.v": "bo@x.io"})
+    assert [e["v"] for e in doc["name"]["h"]] == ["Bo Chen", "Robert Chen"]
+    assert [e["v"] for e in doc["bio"]["h"]] == ["first", "second"]
+
+
 async def test_record_naming_its_person_and_records_without_a_name(writer):
     bo = await _create(writer, name="Bo Chen")
     items = await _merge_run(writer, [{"person_id": bo, "notes": "met at demo day"},
@@ -221,7 +271,7 @@ async def test_mcp_merge_person(client_factory, writer):
     await init(c, key)
     err, res = await call(c, key, "merge_person", {
         "record": {"name": "Ada Okafor", "email": "ada@x.io", "sectors": ["fintech"]},
-        "review": False})
+        "options": {"review": False}})
     assert not err, res
     assert res["person_id"] == ada and res["match"]["tier"] == "identifier"
     assert res["written"] == ["sectors"] and res["status"] == "done"
@@ -229,7 +279,7 @@ async def test_mcp_merge_person(client_factory, writer):
     assert doc["sectors"]["h"][0]["src"]["kind"] == "mcp"
 
     err, res = await call(c, key, "merge_person", {
-        "record": {"name": "Ada Okafor"}, "dry_run": True})
+        "record": {"name": "Ada Okafor"}, "options": {"dry_run": True}})
     assert not err and res["dry_run"] and res["match"]["decision"] == "matched"
 
     err, res = await call(c, key, "merge_person", {"record": {"email": "lonely@x.io"}})

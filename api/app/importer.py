@@ -16,8 +16,8 @@ import statistics
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-from app import fields, history, people, properties
-from app.property_specs import IDENTITY_KEYS
+from app import fields, history, normalize, people, properties
+from app.property_specs import CANONICAL, IDENTITY_KEYS
 
 _LIST_SEPARATORS = re.compile(r"\s*(?:\n|;|\s\|\s)\s*")
 # Free text that often contains commas/newlines but is never a list.
@@ -154,23 +154,53 @@ def parse_csv(text: str, filename: str) -> ParsedCsv:
     return parsed
 
 
-def _first_email(values: dict[str, Any]) -> str:
-    email = values.get("email") or values.get("emails")
-    if isinstance(email, list):
-        email = email[0] if email else None
-    return str(email or "").strip().lower()
+def _identity_tokens(values: dict[str, Any], *, with_name: bool) -> list[str]:
+    """The tokens two rows share when they describe one person: the folded name (unless the
+    file identifies rows by ID) and each canonical identity value (an email, a phone, a LinkedIn
+    or GitHub URL)."""
+    out: list[str] = []
+    name = fields.fold(str(values.get("name") or ""))
+    if with_name and name:
+        out.append(f"nm:{name}")
+    for key in IDENTITY_KEYS:
+        value = values.get(key)
+        sp = properties.spec(key)
+        if value in (None, "", []) or sp is None or sp.type not in CANONICAL:
+            continue
+        parsed = normalize.parse(value, sp.type).value
+        for v in parsed if isinstance(parsed, list) else [parsed]:
+            if v:
+                out.append(f"{key}:{v}")
+    return out
 
 
 def group_rows(rows: list[Row]) -> list[list[Row]]:
-    """The rows of one file that describe the same person, in file order: the same `ID`, else the
-    same folded name and first email. One merge item each, so a person's rows land in order and
-    never race each other."""
-    groups: dict[str, list[Row]] = {}
-    for r in rows:
-        key = f"id:{r.source_id}" if r.source_id else \
-            f"nm:{fields.fold(str(r.values.get('name') or ''))}|{_first_email(r.values)}"
-        groups.setdefault(key, []).append(r)
-    return list(groups.values())
+    """The rows of one file that describe the same person, in file order: rows sharing the file's
+    `ID`, a folded name (when they have no ID) or any identity value (an email, a phone, a
+    LinkedIn or GitHub URL) are one group, transitively. One merge item each, so a person's rows
+    land in order and two items never create the same person at once (the matcher would fold
+    them sequentially; grouping makes the outcome the same whatever the concurrency)."""
+    parent = list(range(len(rows)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    first_with: dict[str, int] = {}
+    for i, r in enumerate(rows):
+        tokens = ([f"id:{r.source_id}"] if r.source_id else []) + \
+            _identity_tokens(r.values, with_name=r.source_id is None)
+        for token in tokens:
+            if token in first_with:
+                parent[find(i)] = find(first_with[token])
+            else:
+                first_with[token] = i
+    groups: dict[int, list[Row]] = {}
+    for i, r in enumerate(rows):
+        groups.setdefault(find(i), []).append(r)
+    return sorted(groups.values(), key=lambda g: g[0].row_no)
 
 
 # --- the plan for one record ----------------------------------------------------------------------
@@ -225,6 +255,28 @@ def plan_row(values: dict[str, Any], catalog: dict[str, properties.Property], *,
             lines.append((key, fields.clean(fields.text_of(value))))
     appends = [k for k in direct if property_type(k, catalog) in LIST_TYPES]
     return RowPlan(direct, appends, lines, unknown)
+
+
+def restated(values: dict[str, Any], person: dict[str, Any],
+             catalog: dict[str, properties.Property]) -> set[str]:
+    """Keys whose value is the person's current one in canonical form (an email in another case,
+    a URL spelt differently, a keyword with other punctuation): a restatement, not news, so it
+    adds no history entry. Other types compare as text (the write path appends nothing for an
+    equal text)."""
+    out: set[str] = set()
+    for key, value in values.items():
+        ptype = property_type(key, catalog)
+        current = person.get(key)
+        if ptype not in CANONICAL or current in (None, "", []):
+            continue
+        mine, theirs = normalize.parse(value, ptype).value, normalize.parse(current, ptype).value
+        if mine is None or theirs is None:
+            continue
+        mine_set = set(mine) if isinstance(mine, list) else {mine}
+        theirs_set = set(theirs) if isinstance(theirs, list) else {theirs}
+        if mine_set <= theirs_set:
+            out.add(key)
+    return out
 
 
 def render_lines(lines: list[tuple[str, str]]) -> str:
@@ -283,8 +335,11 @@ async def match_record(values: dict[str, Any], source: dict | None = None) -> Ma
         return Match("new")
     by_identifier = [(d, h) for d, h in cands if set(h) & _IDENTIFIERS]
     if by_identifier:
-        best = max(len(h) for _, h in by_identifier)
-        tops = [(d, h) for d, h in by_identifier if len(h) == best]
+        # ranked by identifier hits alone: a shared name is no identifier, so a person sharing
+        # one identifier never outranks the one sharing another just by also having the name
+        strength = {str(d["_id"]): len(set(h) & _IDENTIFIERS) for d, h in by_identifier}
+        best = max(strength.values())
+        tops = [(d, h) for d, h in by_identifier if strength[str(d["_id"])] == best]
         if len({str(d["_id"]) for d, _ in tops}) == 1:
             doc, hits = tops[0]
             return Match("matched", str(doc["_id"]), "identifier", hits,
