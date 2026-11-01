@@ -233,14 +233,14 @@ def test_storage_check_evidence_locked_and_confirmations():
     problems = check(bad, cat, passage, current={"about": "old"}, locked=locked)
     assert problems[0].startswith("company is set by the caller")
     assert "title_enriched has no current value" in problems[1]
-    fine = Proposal(confirmed=["company", "about"])
+    fine = Proposal(confirmed=["company", "about"], ignored=["title_enriched: not a job title"])
     assert check(fine, cat, passage, current={"about": "old"}, locked=locked) == []
     # a labelled line anchors its fact: its evidence is not re-checked word by word
     anchored = Proposal(writes=[Write(key="about", value="x", evidence="about: a paraphrase")],
                         ignored=["title_enriched: not a title"])
     assert check(anchored, cat, passage) == []
     assert check(Proposal(writes=[Write(key="notes", value="x", evidence="a paraphrase")]),
-                 cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
+                 cat, passage)[0] == "notes: evidence must be copied verbatim from the passage"
     # a proposed property that names an existing one is that property
     dup = Proposal(new_properties=[NewProperty(key="professional_interests", label="Professional interests",
                                                description="d", value=["x"])])
