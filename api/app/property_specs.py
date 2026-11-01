@@ -83,7 +83,8 @@ SPECS: dict[str, Spec] = {
     "linkedin": Spec("url", label="LinkedIn"),
     "github": Spec("url", label="GitHub"),
     "instagram": Spec("url"),
-    "website": Spec("url"),
+    "website": Spec("url", description="The person's own site (portfolio, blog, personal page)"),
+    "company_website": Spec("url", description="The current employer's website"),
     "related_links": Spec("url"),
     # who they are
     "role": Spec("keyword"),

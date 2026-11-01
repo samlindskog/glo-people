@@ -29,6 +29,7 @@ from app.assistants.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
 from app.assistants.enrich.models import EnrichOptions
 from app.assistants.enrich.passage import Passage
 from app.assistants.enrich.providers import PROVIDERS
+from app.assistants.review import review
 from app.auth import Principal
 from app.config import get_settings
 from app.integrations import github
@@ -50,7 +51,6 @@ from app.integrations.profile import (
     profile_values,
 )
 from app.tools import company as company_tool
-from app.tools import repair as repair_tool
 from app.tools import site as site_tool
 from app.tools import store as store_tool
 from app.urls import (
@@ -69,7 +69,8 @@ ASSISTANT = "enrich"
 # Decided deterministically from the same provider record by the direct writes (or by the
 # repair tool): the storage agent may confirm them but never derives them from the passage.
 LOCKED = frozenset({"name", "company", "linkedin", "linkedin_headline", "location", "record_kind",
-                    "company_description", "github_summary", "related_links"})
+                    "company_description", "company_website", "github", "github_summary",
+                    "website", "related_links"})
 MAX_RELATED_LINKS = 50        # a person record is not a link directory
 
 
@@ -175,13 +176,7 @@ def _text(st: State, deps: AssistantDeps) -> str:
 def _recent(deps: AssistantDeps, key: str, agent: str) -> bool:
     """An entry of `key` written by this assistant's `agent` within the TTL: a step that already
     ran for this person (an earlier attempt was interrupted), not worth paying for again."""
-    ttl = datetime.now(UTC) - timedelta(days=get_settings().enrich_ttl_days)
-    for entry in ((deps.person or {}).get("history") or {}).get(key, []):
-        src = entry.get("src") or {}
-        if src.get("by") == f"{ASSISTANT}/{agent}" and entry.get("ts") \
-                and datetime.fromisoformat(entry["ts"]) >= ttl:
-            return True
-    return False
+    return deps.recent_write(f"{ASSISTANT}/{agent}", key) is not None
 
 
 async def _recently_enriched(deps: AssistantDeps, options: EnrichOptions) -> dict | None:
@@ -298,13 +293,12 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
-    """The profile's personal sites plus every website on the record, except the employer's: the
-    ones the company step or the provider record wrote, and the profile's current company site (a
-    company site is not the person's own; reading it again would cost a page and a model call)."""
-    employer_writers = {f"{ASSISTANT}/{company_tool.AGENT_NAME}", f"{ASSISTANT}/linkedin_reader"}
-    company_sites = {url_key(e["v"]) for e in ((deps.person or {}).get("history") or {})
-                     .get("website", []) if isinstance(e.get("v"), str)
-                     and (e.get("src") or {}).get("by") in employer_writers}
+    """The profile's personal sites plus every `website` on the record, minus the employer's
+    (`company_website`, on the record or in the profile): a company site is not the person's own
+    and reading it would cost a page and a model call."""
+    company_sites = {url_key(u) for v in [deps.current("company_website"),
+                                          *deps.history_values("company_website")]
+                     for u in split_urls(v)}
     if st.profile and st.profile.current_company and st.profile.current_company.website:
         company_sites.add(url_key(st.profile.current_company.website))
     raws = [*(st.profile.personal_sites if st.profile else []),
@@ -416,7 +410,8 @@ def _company_candidate(deps: AssistantDeps, st: State, company: str) -> str | No
     host names the company."""
     if st.profile and st.profile.current_company and st.profile.current_company.website:
         return normalize_url(st.profile.current_company.website)
-    for site in [deps.current("website"), *deps.history_values("website")]:
+    for site in [deps.current("company_website"), deps.current("website"),
+                 *deps.history_values("website")]:
         if isinstance(site, str) and host_mentions(host_of(site), company):
             return normalize_url(site)
     return None
@@ -442,9 +437,9 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
         # and a model call. Research is for companies the providers do not describe.
         values: dict[str, Any] = {}
         website = normalize_url(provider_co.website)
-        if website and not _has_url(deps, "website", website):
-            values["website"] = website
-        if "website" in values or not deps.current("company_description"):
+        if website and not _has_url(deps, "company_website", website):
+            values["company_website"] = website
+        if "company_website" in values or not deps.current("company_description"):
             values["company_description"] = fields.clean(provider_co.description) or None
         if not deps.current("company"):
             values["company"] = company
@@ -481,15 +476,13 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
     st.result["company_evidence"] = {"confidence": summary.confidence,
                                      "evidence_url": summary.evidence_url}
     website = normalize_url(summary.website)
-    # One `website` property holds the person's and the company's sites as history entries; the
-    # company site becomes current only when it is not already in the history.
     values: dict[str, Any] = {}
-    if website and not _has_url(deps, "website", website):
-        values["website"] = website
+    if website and not _has_url(deps, "company_website", website):
+        values["company_website"] = website
     # The summary goes on `company_description`, whose earlier values (e.g. the imported one)
     # stay in its history. A reworded summary of the same website is not new information: only
     # write one when the record has no description yet or the company website is new.
-    if "website" in values or not deps.current("company_description"):
+    if "company_website" in values or not deps.current("company_description"):
         values["company_description"] = fields.clean(summary.summary) or None
     else:
         deps.skip("company", "summary kept: same website as before")
@@ -523,7 +516,7 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
     sources = dict.fromkeys(s for ss in st.passage.sources.values() for s in ss)
     deps.emit("step", f"storage: filing {len(st.passage.keys)} facts from {', '.join(sources)}")
     opts = store_tool.StoreOptions(max_new=st.options.max_new_properties, overflow="ignore",
-                                   locked=sorted(LOCKED))
+                                   locked=sorted(LOCKED), audit_key="enrichment_passage")
     try:
         with logfire.span("storage"):
             res = await deps.tool(store_tool.store, "storage", passage=text, opts=opts)
@@ -536,7 +529,8 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
         return
     assert isinstance(res, store_tool.StoreResult)
     if not (res.evidence or res.confirmed or res.changes):
-        # nothing filed and nothing confirmed: do not record the passage, so a refresh tries again
+        # nothing filed and nothing confirmed; the store wrote no audit passage either, so a
+        # refresh tries again
         st.result["storage"] = "nothing"
         deps.skip("storage", "the storage agent filed nothing from the passage")
         return
@@ -552,27 +546,20 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
         st.result["dropped"] = list(res.dropped)
     if res.created_properties:
         st.result["created_properties"] = list(res.created_properties)
-    await deps.write("storage", {"enrichment_passage": text})
 
 
 async def _step_review(deps: AssistantDeps, st: State) -> None:
-    """Step 6: a sanity review of the record as it now stands, through the repair tool (one model
-    call, no credits): the kind by common sense, a full name the record's own data now states (a
-    headline or about text the ladder just filed), misfiled values. Runs when the ladder wrote
-    anything or the record has no kind yet."""
+    """Step 6: the closing review every assistant shares (`assistants.review`): the parser
+    confirms the typed values the ladder wrote, the normaliser agent reads what it cannot, the
+    repair tool judges the record as it now stands (the kind by common sense, a full name the
+    record's own data now states, misfiled values). Runs when the ladder wrote anything or the
+    record has no kind yet; one model call at most per agent, no credits."""
     if not deps.changes and deps.current("record_kind"):
         return
     try:
         with logfire.span("review"):
-            res = await deps.tool(repair_tool.repair, "review", opts=repair_tool.RepairOptions())
+            st.result["review"] = await review(deps, allocate=True)
     except Exception as e:  # the item stays done; the normalise assistant reviews again anyway
         log.exception("enrich: the review failed for %s", deps.person_id)
         st.result["review"] = {"status": "error"}
         deps.skip("review", f"the review failed: {e}")
-        return
-    if res is None:
-        return
-    assert isinstance(res, repair_tool.RepairResult)
-    name = next((c.value for c in res.changes if c.key == "name" and c.action == "set"), None)
-    st.result["review"] = {"kind": res.kind, "name": name, "name_source": res.name_source,
-                           "mechanical": res.mechanical, "note": res.note, "rejected": res.rejected}

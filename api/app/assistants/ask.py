@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
 from app import fields
+from app.agents import fakes
 from app.agents.common import run_agent
 from app.assistants import AssistantResult
 from app.assistants.base import AssistantSpec, ItemSpec, register
@@ -55,6 +56,24 @@ class Answer(BaseModel):
 @dataclass
 class AnswerDeps:
     ids: set[str]
+
+
+def fake_answer(messages: list, info) -> object:
+    """The deterministic stand-in under FAKE_AGENTS: names everyone in the records given."""
+    import re
+
+    prompt = fakes._prompt(messages)
+    found = [(pid, name) for name, pid in re.findall(r"^### (.+?) \(id ([0-9a-f]{24})", prompt,
+                                                      re.MULTILINE)]
+    if not found:
+        return fakes._out(info, {"text": "No one in the data matches.", "citations": []})
+    names = ", ".join(n for _, n in found)
+    return fakes._out(info, {"text": f"{len(found)} people match: {names}.",
+                             "citations": [{"person_id": pid, "field": "bio", "value": n}
+                                           for pid, n in found[:5]]})
+
+
+fakes.FAKES[f"agents.{AGENT_NAME}"] = fake_answer
 
 
 agent = Agent(

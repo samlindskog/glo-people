@@ -500,9 +500,11 @@ async def test_normalize_assistant_run(people_by_name, writer, reader):
     cy = by_person[people_by_name["Cy"]]["result"]
     assert cy["text"] == "stage → Pre-seed; record kind: Person (agent consulted)."
     assert by_change(cy)[("stage", "normalized")]["value"] == "Pre-seed"
-    assert cy["repair"]["kind"] == "Person"
+    assert cy["review"]["kind"] == "Person"
     ada = by_person[people_by_name["Ada"]]["result"]
-    assert ada["agent_called"] is False and ada["text"] == "record kind: Person (agent consulted)."
+    # nothing unmapped for Ada: only the repair agent was consulted, for the kind
+    assert ada["unmapped"] == [] and ada["text"] == "record kind: Person (agent consulted)."
+    assert ada["review"]["agent_called"] and ada["review"]["repaired"]
     person = (await reader.get(f"/api/people/{people_by_name['Cy']}")).json()
     assert person["history_norm"]["stage"][-1]["src"]["by"] == "normalize/normalizer"
     specs = {w["key"]: w for w in (await reader.get("/api/assistants")).json()}

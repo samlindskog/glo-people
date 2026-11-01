@@ -66,17 +66,6 @@ def planner(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return _out(info, plan)
 
 
-def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    prompt = _prompt(messages)
-    people = [(pid, name) for name, pid in re.findall(r"^### (.+?) \(id ([0-9a-f]{24})", prompt, re.MULTILINE)]
-    if not people:
-        return _out(info, {"text": "No one in the data matches.", "citations": []})
-    names = ", ".join(n for _, n in people)
-    return _out(info, {"text": f"{len(people)} people match: {names}.",
-                       "citations": [{"person_id": pid, "field": "bio", "value": n}
-                                     for pid, n in people[:5]]})
-
-
 def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     """`key: value` lines write to that property (a list type gets the items split on ';',
     appended); `new <words>: value` proposes a property; a value equal to the current one is
@@ -212,7 +201,6 @@ def repair(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
 
 FAKES: dict[str, Callable[[list[ModelMessage], AgentInfo], ModelResponse]] = {
     "agents.planner": planner,
-    "agents.answer": answer,
     "agents.storage": storage,
     "agents.normalizer": normalizer,
     "agents.site_reader": site_reader,

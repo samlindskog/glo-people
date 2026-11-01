@@ -5,14 +5,15 @@ spending from the item's budget, its events joining the item's. Extends the agen
 object so the same instance can be handed to the tools' agents."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.agents.common import AgentDeps
 from app.assistants.base import Budget
 from app.auth import Principal
+from app.config import get_settings
 from app.history import Change, Source
 from app.tools import ToolEvent, ToolResult, invoke, record
 
@@ -28,6 +29,8 @@ class AssistantDeps(AgentDeps):
     principal: Principal | None = None     # who started the run (for the activity log)
     budget: Budget
     options: Any
+    new_tier: str | None = None            # an item whose person does not exist yet: the first
+                                           # tool commit creates it in this tier
     changes: list[Change] = field(default_factory=list)
     skipped: list[dict[str, str]] = field(default_factory=list)
     event_sink: Callable[[ToolEvent], None] | None = None   # the runner's; None when run alone
@@ -63,14 +66,37 @@ class AssistantDeps(AgentDeps):
             self.event_sink(ToolEvent(seq=0, ts=datetime.now(UTC), kind=kind,  # type: ignore[arg-type]
                                       message=message, data=data))
 
-    async def tool(self, fn: Callable[..., Awaitable[ToolResult | None]], agent: str,
-                   **kwargs: Any) -> ToolResult | None:
+    def recent_write(self, by: str, key: str | None = None) -> str | None:
+        """The date of the latest history entry written `by` an agent (exact, or a prefix when
+        `by` ends with "/") inside the enrich TTL, on `key` or on any property; None when there
+        is none. The one answer to "did this assistant already do this recently"."""
+        ttl = datetime.now(UTC) - timedelta(days=get_settings().enrich_ttl_days)
+        history = (self.person or {}).get("history") or {}
+        latest = None
+        for k, entries in history.items():
+            if key is not None and k != key:
+                continue
+            for e in entries:
+                who = (e.get("src") or {}).get("by") or ""
+                hit = who.startswith(by) if by.endswith("/") else who == by
+                if hit and e.get("ts") and datetime.fromisoformat(e["ts"]) >= ttl:
+                    latest = max(latest or e["ts"], e["ts"])
+        return latest[:10] if latest else None
+
+    async def tool(self, fn: Callable[..., Awaitable[ToolResult | None]], agent: str, *,
+                   source: Source | None = None, **kwargs: Any) -> ToolResult | None:
         """Run a tool on this item's person: the entries it writes are attributed to
-        `assistant/agent` with the run and item as reference, it spends from this item's budget,
-        its events join the item's, and its changes join the item's. Cancelling the item stops
-        the tool before it commits. None when the person no longer exists."""
-        ctx = await invoke.make_context(self.person_id, self.source(agent), self.principal,
-                                        firecrawl=self.firecrawl, sink=self.event_sink)
+        `assistant/agent` with the run and item as reference (or to `source`, for data that keeps
+        its own provenance), it spends from this item's budget, its events join the item's, and
+        its changes join the item's. Cancelling the item stops the tool before it commits. None
+        when the person no longer exists. With no person yet (`new_tier`), the first commit
+        creates one."""
+        pid = self.person["id"] if self.person is not None else None
+        if pid is None and self.new_tier is None:
+            raise AssertionError("this item has no person and no tier to create one in")
+        ctx = await invoke.make_context(pid, source or self.source(agent), self.principal,
+                                        tier=self.new_tier, firecrawl=self.firecrawl,
+                                        sink=self.event_sink)
         if ctx is None:
             return None
         inv = invoke.invoke(fn, ctx, **kwargs)
@@ -84,9 +110,12 @@ class AssistantDeps(AgentDeps):
         self.changes.extend(result.changes)
         return result
 
-    async def write(self, agent: str, values: dict[str, Any]) -> None:
-        """Append `values` to the person's properties through the record tool; the writer
-        reports what actually changed (values equal to the current one append nothing)."""
+    async def write(self, agent: str, values: dict[str, Any], *, append: Iterable[str] = (),
+                    source: Source | None = None) -> None:
+        """Write `values` to the person's properties through the record tool (keys in `append`
+        are merged into the current value); the writer reports what actually changed (values
+        equal to the current one append nothing)."""
         values = {k: v for k, v in values.items() if v not in (None, "", [])}
         if values:
-            await self.tool(record.write, agent, values=values)
+            await self.tool(record.write, agent, source=source, values=values,
+                            append=[k for k in append if k in values])

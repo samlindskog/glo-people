@@ -38,6 +38,8 @@ class NormalizeOptions(BaseModel):
                                              "properties when a text names a category the list "
                                              "lacks (one per property per call)")
     max_new_values: int = Field(3, ge=0, le=10, description="New enum values per call, in total")
+    agent: bool = Field(True, description="Ask the normaliser agent about the texts the parser "
+                                          "cannot read (off: the parser alone, free)")
     repair: bool = Field(True, description="Repair identity data and set record_kind for records "
                                            "that have none yet")
     force: bool = Field(False, description="Repair even when record_kind is already set")
@@ -217,6 +219,8 @@ async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeRes
         ctx.emit("step", f"parser: {len(parsed)} typed value{'s' if len(parsed) != 1 else ''} "
                          f"re-read, {len(changes)} changed", keys=sorted(parsed))
         doc = ctx.tx.view
+    if not opts.agent:
+        return
 
     items: list[Item] = []
     lookups: dict[str, dict[str, str]] = {}

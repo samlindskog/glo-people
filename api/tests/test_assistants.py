@@ -293,7 +293,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "github_summary": "Ada Okafor — payments rails. 6 public repos, 120 followers, at PayRail. "
                           "Top repos: rails-sdk (★48), settle (★12). Languages: Python, Go.",
         "related_links": ["https://twitter.com/adaokafor", "https://rails.substack.com"],
-        "website": "https://payrail.io",
+        "company_website": "https://payrail.io",
         # the employer's own description from the paid record: no page fetched, no model call
         "company_description": "Payments infrastructure for merchants across West Africa.",
         # the provider record and the site's one-liner, filed by the storage agent
@@ -332,8 +332,8 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     assert person["history"]["about"][0]["src"]["by"] == "enrich/storage"
     assert person["history"]["enrichment_passage"][0]["src"]["by"] == "enrich/storage"
     assert person["enrichment_passage"] == EXPECTED_PASSAGE
-    assert [e["v"] for e in person["history"]["website"]] == ["www.adaokafor.dev",
-                                                              "https://payrail.io"]
+    assert [e["v"] for e in person["history"]["website"]] == ["www.adaokafor.dev"]
+    assert person["company_website"] == "https://payrail.io"
     assert len(person["history"]["company"]) == 1
     fl = {f["key"]: f for f in (await reader.get("/api/properties")).json()}
     assert fl["company_description"]["embeddable"] and fl["github_summary"]["embeddable"]
@@ -579,7 +579,7 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     assert res["enrich"]["linkedin"] == "matched" and res["enrich"]["storage"] == "stored"
     assert res["enrich"]["linkedin_provider"] == "people-data-labs"
     assert written(res)["name"] == "Ada Okafor" and written(res)["about"]
-    assert res["repair"]["kind"] == "Person"
+    assert res["review"]["kind"] == "Person" and res["review"]["repaired"]
     assert "Enriched: LinkedIn profile matched" in res["text"]
     # PDL, the GitHub tool and one company page (PDL carries no employer description)
     assert ada["credits"] == PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
@@ -594,7 +594,7 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     r = await writer.post("/api/assistants/normalize/runs", json={"person_ids": [ids["Cy Diaz"]]})
     await runner.drain()
     item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
-    assert item["result"]["repair"]["kind"] == "Person" and item["credits"] == 0
+    assert item["result"]["review"]["kind"] == "Person" and item["credits"] == 0
     assert (await reader.get(f"/api/people/{ids['Cy Diaz']}")).json()["record_kind"] == "Person"
     assert "Enriched" not in cy["result"]["text"]
     specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
