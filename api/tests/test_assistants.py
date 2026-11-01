@@ -577,6 +577,14 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     assert person["history"]["name"][-1]["src"]["by"] == "enrich/linkedin_reader"
     # a full name, no LinkedIn: nothing to enrich, nothing paid
     assert cy["result"]["enrich"] is None and cy["credits"] == 0
+    # a record marked Unidentifiable while its name was bare is re-judged once the name is full
+    await people_mod.update(None, ids["Cy Diaz"], {"record_kind": "Unidentifiable"},
+                            source=Source("agent", "repair", "run:0/item:0"))
+    r = await writer.post("/api/assistants/normalize/runs", json={"person_ids": [ids["Cy Diaz"]]})
+    await runner.drain()
+    item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
+    assert item["result"]["repair"]["kind"] == "Person" and item["credits"] == 0
+    assert (await reader.get(f"/api/people/{ids['Cy Diaz']}")).json()["record_kind"] == "Person"
     assert not cy["result"]["text"].startswith("Enriched first")
     specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
     assert specs["normalize"]["options_schema"]["properties"]["enrich"]["default"] is True

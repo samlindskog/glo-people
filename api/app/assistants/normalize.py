@@ -120,9 +120,11 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     options: NormalizeRunOptions = deps.options
     enriched = await _enrich_first(deps) if wants_enrich(deps, options) else None
     opts = options
-    if enriched and deps.current("record_kind") == "Unidentifiable" \
+    if deps.current("record_kind") == "Unidentifiable" \
             and is_full_name(str(deps.current("name") or "")):
-        opts = options.model_copy(update={"force": True})   # the name is complete now: re-judge
+        # marked while the name was incomplete (by an earlier run or before this item's
+        # enrichment); the name is complete now, so the kind is judged afresh
+        opts = options.model_copy(update={"force": True})
     result = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME, opts=opts)
     if result is None:
         return {"status": "failed", "error": "person not found", "text": "Person not found.",
