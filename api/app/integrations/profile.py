@@ -3,6 +3,7 @@ and how one is turned into record values: `profile_values` for the deterministic
 (identifiers), `profile_lines` for the labelled lines the enrich assistant hands to the storage
 agent. Pure data: no provider calls, no app-level decisions."""
 
+import html
 from collections.abc import Iterable
 from typing import Any
 
@@ -90,8 +91,18 @@ def _years(start: str | None, end: str | None, current: bool) -> str:
     return f"{a}–{b}" if a and b else a or b
 
 
+_INVISIBLE = str.maketrans({"\u2800": " ", "\u200b": "", "\u00a0": " ", "\ufeff": ""})
+
+
 def _clean(text: str | None) -> str:
-    return " ".join((text or "").split())
+    """One line: HTML entities decoded ("&amp;"), braille blanks and zero-width characters (used
+    as spacers on profiles) removed, whitespace collapsed."""
+    return " ".join(html.unescape(str(text or "")).translate(_INVISIBLE).split())
+
+
+def _language(name: str) -> str:
+    """Language names as proper nouns: providers return "english" and "English" alike."""
+    return name.capitalize() if name == name.lower() else name
 
 
 def position_text(p: Position) -> str:
@@ -127,5 +138,5 @@ def profile_lines(profile: LinkedInProfile) -> list[Line]:
         lines.append(("education", "; ".join(schools)))
     for key in LIST_KEYS:
         if items := [_clean(v) for v in getattr(profile, key) if _clean(v)]:
-            lines.append((key, items))
+            lines.append((key, [_language(v) for v in items] if key == "languages" else items))
     return lines

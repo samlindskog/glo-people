@@ -67,6 +67,13 @@ class Passage:
     def source_of(self, key: str) -> str:
         return ", ".join(self.sources.get(key, []))
 
+    def dropped_by_source(self) -> dict[str, list[str]]:
+        """Source → the keys whose second text value it stated (first source kept)."""
+        out: dict[str, list[str]] = {}
+        for key, source in self.dropped:
+            out.setdefault(source, []).append(key)
+        return out
+
     def render(self) -> str:
         """The passage text, at most `fields.MAX_TEXT_CHARS` (clipped at a line end)."""
         out = [HEADER]

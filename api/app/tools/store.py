@@ -8,7 +8,7 @@ transaction so flagged values get their typed form: one commit for all of it. Th
 every change."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -70,6 +70,8 @@ class Proposal(BaseModel):
 class StorageDeps:
     catalog: dict[str, Property]
     passage: str
+    current: dict[str, Any] = field(default_factory=dict)   # the person's current values
+    locked: frozenset[str] = frozenset()                   # keys the caller sets itself
 
 
 agent = Agent(
@@ -102,21 +104,37 @@ Rules:
 )
 
 
+_TYPOGRAPHIC = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
+                              "\u2013": "-", "\u2014": "-", "\u00a0": " ", "\u200b": "",
+                              "\u2800": " "})
+LONG_QUOTE = 40     # a quote this long is located by its start or end, not matched whole
+
+
 def _normalise_ws(text: str) -> str:
-    return " ".join(text.split()).lower()
+    """Lower-case, one space between words, typographic quotes and dashes folded to ASCII (models
+    copy "I’ve" as "I've"), invisible spacers removed."""
+    return " ".join(text.translate(_TYPOGRAPHIC).split()).lower()
 
 
 def _evidence_ok(evidence: str, flat_passage: str) -> bool:
     """Every fragment of the evidence (the model joins excerpts with ';', '…' or '...') occurs in
-    the passage; fragments under four characters are ignored."""
+    the passage. A long fragment counts when its first or last `LONG_QUOTE` characters do: the
+    model copies the start of a long about text and then shortens it, which still locates the
+    words the write rests on. Fragments under four characters are ignored."""
     fragments = [f.strip() for f in re.split(r"[;…]|\.\.\.", _normalise_ws(evidence))]
-    return all(f in flat_passage for f in fragments if len(f) >= 4)
+
+    def found(f: str) -> bool:
+        return f in flat_passage or (len(f) >= LONG_QUOTE
+                                     and (f[:LONG_QUOTE] in flat_passage
+                                          or f[-LONG_QUOTE:] in flat_passage))
+    return all(found(f) for f in fragments if len(f) >= 4)
 
 
-def check(proposal: Proposal, catalog: dict[str, Property],
-          passage: str | None = None) -> list[str]:
+def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None = None,
+          current: dict[str, Any] | None = None, locked: frozenset[str] = frozenset()) -> list[str]:
     """Problems with a proposal against the catalog (empty when it is executable). With the
-    passage, evidence must occur in it."""
+    passage, evidence must occur in it; with `current`, a confirmation needs a current value;
+    `locked` keys are the caller's to write (confirm them, or leave them alone)."""
     problems: list[str] = []
     seen: set[str] = set()
     flat = _normalise_ws(passage) if passage is not None else None
@@ -124,6 +142,10 @@ def check(proposal: Proposal, catalog: dict[str, Property],
         prop = catalog.get(w.key)
         if prop is None:
             problems.append(f"{w.key!r} is not a property; use a listed key or a new property")
+            continue
+        if w.key in locked:
+            problems.append(f"{w.key} is set by the caller from the same data: do not write it "
+                            "(confirm it if the passage restates it, otherwise leave it out)")
             continue
         if w.key in seen:
             problems.append(f"{w.key!r} has two writes; merge them into one")
@@ -154,12 +176,15 @@ def check(proposal: Proposal, catalog: dict[str, Property],
     for key in proposal.confirmed:
         if key not in catalog:
             problems.append(f"confirmed {key!r} is not a property")
+        elif current is not None and current.get(key) in (None, "", []) and key not in locked:
+            problems.append(f"{key} has no current value, so the passage cannot confirm it: write "
+                            "the value instead")
     return problems
 
 
 @agent.output_validator
 async def _executable(ctx: RunContext[StorageDeps], out: Proposal) -> Proposal:
-    problems = check(out, ctx.deps.catalog, ctx.deps.passage)
+    problems = check(out, ctx.deps.catalog, ctx.deps.passage, ctx.deps.current, ctx.deps.locked)
     if problems:
         raise ModelRetry("Fix the proposal: " + "; ".join(problems))
     return out
@@ -180,13 +205,16 @@ def render_person(person: dict) -> str:
 
 
 async def _propose(passage: str, person: dict, catalog: list[Property],
-                   emit: Emit = silent) -> Proposal:
+                   emit: Emit = silent, locked: frozenset[str] = frozenset()) -> Proposal:
     passage = passage.strip()[:MAX_PASSAGE_CHARS]
+    note = (f"\n\nNot yours to write (set by the caller from the same data; confirm or ignore): "
+            f"{', '.join(sorted(locked))}" if locked else "")
     prompt = (f"Person: {person.get('name') or 'unnamed'}\n\n"
               f"Current values:\n{render_person(person)}\n\n"
               f"Passage:\n{passage}\n\n"
-              f"Properties:\n{catalog_prompt(catalog)}")
-    deps = StorageDeps({p.key: p for p in catalog}, passage)
+              f"Properties:\n{catalog_prompt(catalog)}{note}")
+    deps = StorageDeps({p.key: p for p in catalog}, passage,
+                       {k: v for k, v in person.items() if k not in fields.SYSTEM_FIELDS}, locked)
     return await run_agent(agent, prompt, deps, request_limit=REQUEST_LIMIT, on_event=emit)
 
 
@@ -206,6 +234,10 @@ class StoreOptions(BaseModel):
     overflow: Literal["notes", "ignore"] = Field(
         "notes", description="Where facts beyond max_new go: filed under notes as 'Label: value', "
                              "or dropped and reported (for provider passages)")
+    locked: list[str] = Field(default_factory=list,
+                              description="Properties the caller writes itself from the same data "
+                                          "(identity, employer); the agent may confirm them but "
+                                          "not write them")
 
 
 class StoreResult(ToolResult):
@@ -249,7 +281,7 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
     ctx.emit("step", f"reading {len(passage)} characters about {person.get('name') or 'the record'}")
     catalog = await properties.catalog(await people.coverage())
     cat = {p.key: p for p in catalog}
-    proposal = await _propose(passage, person, catalog, ctx.emit)
+    proposal = await _propose(passage, person, catalog, ctx.emit, frozenset(opts.locked))
 
     result = StoreResult(person_id=ctx.person_id, confirmed=list(proposal.confirmed),
                          ignored=list(proposal.ignored),

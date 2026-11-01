@@ -1,8 +1,9 @@
 """People Data Labs via Firecrawl Alexandria: `people-data-labs/person/enrich` resolves a LinkedIn
 profile URL for 1 credit (a miss is free) into the richest person record we can reach: headline,
 summary, current job, the whole work history, education, skills, interests and languages. Mapped
-into the shared `LinkedInProfile` deterministically; PDL lowercases names and titles, so those
-are title-cased here (summary, skills and interests are kept as they come)."""
+into the shared `LinkedInProfile` deterministically; PDL lowercases names, titles, skills and
+interests, so those are title-cased here (the summary is kept as it comes). Fields the org is not
+entitled to (contact data, some social URLs) arrive as booleans and are ignored."""
 
 from typing import Any
 
@@ -16,12 +17,13 @@ ENRICH_CREDITS = 1       # listed price per record found
 MIN_LIKELIHOOD = 8       # a profile-URL match scores 10; anything weaker is not this person
 
 _SMALL = {"of", "and", "the", "at", "in", "for", "on", "de", "da", "du", "von", "van", "der", "y"}
+_SHORT_WORDS = {"go", "do", "my", "so", "to", "we", "no", "is", "if", "or", "up"}   # not acronyms
 
 
 def _word(word: str, first: bool) -> str:
     if not first and word in _SMALL:
         return word
-    if len(word) <= 2 and word.isalpha():       # td, it, hr, ai, vp: an acronym, not a word
+    if len(word) <= 2 and word.isalpha() and word not in _SHORT_WORDS:   # td, it, hr, ai, vp
         return word.upper()
     return word.capitalize()
 
@@ -41,9 +43,15 @@ def _names(values: Any) -> list[str]:
     out: list[str] = []
     for v in values if isinstance(values, list) else []:
         name = v.get("name") if isinstance(v, dict) else v
-        if name not in (None, "") and str(name) not in out:
-            out.append(str(name))
+        if isinstance(name, str) and name.strip() and name not in out:
+            out.append(name)
     return out
+
+
+def _url(value: Any) -> str | None:
+    """A URL field, or None: fields the org is not entitled to arrive as booleans (present or
+    not), never as text."""
+    return normalize_url(value) if isinstance(value, str) else None
 
 
 def _position(e: dict[str, Any]) -> Position:
@@ -67,12 +75,12 @@ def from_record(rec: dict[str, Any]) -> LinkedInProfile:
     company = None
     if rec.get("job_company_name"):
         company = Company(name=_title(rec["job_company_name"]) or str(rec["job_company_name"]),
-                          linkedin_url=normalize_url(rec.get("job_company_linkedin_url")),
-                          website=normalize_url(rec.get("job_company_website")))
+                          linkedin_url=_url(rec.get("job_company_linkedin_url")),
+                          website=_url(rec.get("job_company_website")))
     others: list[str] = []
     for raw in (rec.get("twitter_url"), rec.get("facebook_url"),
                 *(p.get("url") for p in rec.get("profiles") or [] if isinstance(p, dict))):
-        url = normalize_url(raw)
+        url = _url(raw)
         if url and not linkedin_profile(url) and not github_profile(url) and url not in others:
             others.append(url)
     positions = [p for p in (_position(e) for e in rec.get("experience") or []
@@ -83,13 +91,13 @@ def from_record(rec: dict[str, Any]) -> LinkedInProfile:
         last_name=_title(rec.get("last_name")), headline=rec.get("headline") or None,
         location=_title(location), summary=rec.get("summary") or None,
         current_title=_title(rec.get("job_title")), current_company=company,
-        github_url=github_profile(normalize_url(rec.get("github_url"))), other_links=others,
+        github_url=github_profile(_url(rec.get("github_url"))), other_links=others,
         experience=positions,
         education=[e for e in (_education(x) for x in rec.get("education") or []
                                if isinstance(x, dict)) if e.school or e.degree],
-        skills=_names(rec.get("skills")),
+        skills=[t for t in map(_title, _names(rec.get("skills"))) if t],
         languages=[t for t in map(_title, _names(rec.get("languages"))) if t],
-        interests=_names(rec.get("interests")),
+        interests=[t for t in map(_title, _names(rec.get("interests"))) if t],
     )
 
 

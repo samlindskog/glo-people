@@ -170,6 +170,10 @@ class AsyncFirecrawl:
             raise NotConfigured("FIRECRAWL_API_KEY is not set")
         for attempt in range(3):
             resp = await self._http().post(path, json=body)
+            if resp.status_code in (502, 503, 504) and attempt < 1:   # a gateway blip: once more
+                log.warning("Firecrawl %s: HTTP %s, retrying once", path, resp.status_code)
+                await asyncio.sleep(2.0)
+                continue
             if resp.status_code == 429 and attempt < 2:
                 await asyncio.sleep(2.0 * (attempt + 1))
                 continue

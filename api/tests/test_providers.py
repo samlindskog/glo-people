@@ -42,9 +42,16 @@ def test_pdl_record_maps_to_the_shared_profile():
         "experience": "Chief Executive Officer at Payrail (2021–present); Product Lead at Paystack "
                       "(2018–2021); Engineer at Stripe (2015–2017)",
         "education": "Bachelors Computer Science, University of Lagos (2010–2014)",
-        "skills": ["payments", "python", "go"], "languages": ["English", "Yoruba"],
-        "interests": ["fintech policy", "open source"]}
+        "skills": ["Payments", "Python", "Go"], "languages": ["English", "Yoruba"],
+        "interests": ["Fintech Policy", "Open Source"]}
     assert pdl.from_record({"summary": "x"}).experience == []
+    # fields the org is not entitled to arrive as booleans; skills and interests are title-cased
+    redacted = {**rec, "github_url": False, "twitter_url": True, "job_company_website": False,
+                "skills": ["machine learning", "ai"], "interests": ["open source"]}
+    q = pdl.from_record(redacted)
+    assert q.github_url is None and q.other_links == ["https://angel.co/adaokafor"]
+    assert q.current_company.website is None
+    assert q.skills == ["Machine Learning", "AI"] and q.interests == ["Open Source"]
     assert pdl._title("it service desk & incident manager at td") == "IT Service Desk & Incident Manager at TD"
     assert pdl._title("head of it") == "Head of IT" and pdl._title("supra its") == "Supra Its"
     assert pdl._title("McKinsey & Company") == "McKinsey & Company"       # mixed case: untouched

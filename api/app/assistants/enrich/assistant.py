@@ -58,6 +58,10 @@ from app.urls import (
 
 log = logging.getLogger(__name__)
 ASSISTANT = "enrich"
+# Decided deterministically from the same provider record by the direct writes (or by the
+# repair tool): the storage agent may confirm them but never derives them from the passage.
+LOCKED = frozenset({"name", "company", "linkedin", "linkedin_headline", "location", "record_kind",
+                    "company_description", "github_summary", "related_links"})
 MAX_RELATED_LINKS = 50        # a person record is not a link directory
 
 
@@ -452,15 +456,17 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
         return
     text = st.passage.render()
     st.result["passage"], st.result["passage_hash"] = text, st.passage.digest()
-    for key, source in st.passage.dropped:
-        deps.skip("storage", f"{key}: a second value, from {source}, was not filed")
+    for source, keys in st.passage.dropped_by_source().items():
+        deps.skip("storage", f"{source} also stated {', '.join(keys)}; the first source's "
+                             "values were kept")
     if deps.current("enrichment_passage") == text:
         st.result["storage"] = "unchanged"
         deps.skip("storage", "the same facts were filed before")
         return
     sources = dict.fromkeys(s for ss in st.passage.sources.values() for s in ss)
     deps.emit("step", f"storage: filing {len(st.passage.keys)} facts from {', '.join(sources)}")
-    opts = store_tool.StoreOptions(max_new=st.options.max_new_properties, overflow="ignore")
+    opts = store_tool.StoreOptions(max_new=st.options.max_new_properties, overflow="ignore",
+                                   locked=sorted(LOCKED))
     try:
         with logfire.span("storage"):
             res = await deps.tool(store_tool.store, "storage", passage=text, opts=opts)

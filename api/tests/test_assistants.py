@@ -410,17 +410,17 @@ async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, p
     assert res["linkedin_provider"] == "fullenrich"            # the first match is the profile
     assert item["credits"] == LINKEDIN_CREDITS + PDL_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
     w = written(res)
-    assert w["interests"] == ["fintech policy", "open source"]              # PDL only
-    assert w["skills"] == ["Payments", "Fintech", "python", "go"]           # unioned, fold-deduped
+    assert w["interests"] == ["Fintech Policy", "Open Source"]              # PDL only
+    assert w["skills"] == ["Payments", "Fintech", "Python", "Go"]           # unioned, fold-deduped
     assert w["languages"] == ["English", "Yoruba"]
     assert w["about"] == "Founder of PayRail. Previously Paystack and Stripe."   # first text wins
     assert ("# LinkedIn profile (people-data-labs/person/enrich)\n"
-            "interests: fintech policy; open source\n# Personal site") in res["passage"]
+            "interests: Fintech Policy; Open Source\n# Personal site") in res["passage"]
     assert res["stored"]["skills"]["provider"] == ("fullenrich/people/match, "
                                                    "people-data-labs/person/enrich")
     dropped = [s["reason"] for s in res["skipped"] if s["step"] == "storage"]
-    assert "about: a second value, from people-data-labs/person/enrich, was not filed" in dropped
-    assert len(dropped) == 4                                     # about, title, experience, education
+    assert dropped == [("people-data-labs/person/enrich also stated about, title_enriched, "
+                        "experience, education; the first source's values were kept")]
     assert model_calls == {"site": 1, "company": 2, "storage": 1}
     # a person PDL does not know: a free miss, FullEnrich's facts are filed as usual
     run = await run_for(writer, [people["Bo Chen"]], providers=["people-data-labs"])
@@ -462,6 +462,15 @@ def test_passage_merges_lists_and_drops_a_second_text():
     assert p.source_of("skills") == "fullenrich/people/match, pdl/person/enrich"
     assert p.dropped == [("about", "pdl/person/enrich")]
     assert len(p.digest()) == 16 and p.digest() == Passage.digest(p)
+
+
+def test_profile_lines_clean_provider_text():
+    prof = profile_mod.LinkedInProfile(
+        summary="Strategy &amp; ops \u2800\u2800 leader\u200b", languages=["english", "Yoruba"],
+        skills=["Payments", " payments "])
+    assert dict(profile_mod.profile_lines(prof)) == {
+        "about": "Strategy & ops leader", "skills": ["Payments", "payments"],
+        "languages": ["English", "Yoruba"]}
 
 
 def test_profile_lines_use_spec_properties_of_the_right_type():

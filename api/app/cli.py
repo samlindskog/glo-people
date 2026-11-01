@@ -247,9 +247,12 @@ async def run_report(run_id: int, show_items: bool, show_events: bool) -> None:
         while True:
             evs = await runner.events(run_id, after=after, limit=1000)
             for e in evs:
-                if e.get("kind") in ("error", "failed", "skip") or "fail" in (e.get("message") or "") \
-                        or "error" in (e.get("message") or "").lower():
-                    print(f"    event {e['id']} {e.get('kind')}: {(e.get('message') or '')[:160]}")
+                msg = e.get("message") or ""
+                if e.get("kind") in ("error", "failed", "skip") or "fail" in msg \
+                        or "error" in msg.lower() or "rejected" in msg:
+                    reason = (e.get("data") or {}).get("reason") or ""
+                    print(f"    event {e['id']} {e.get('kind')}: {msg[:160]}"
+                          + (f"  — {reason[:200]}" if reason else ""))
                     bad += 1
             if len(evs) < 1000:
                 break

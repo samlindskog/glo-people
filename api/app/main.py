@@ -21,7 +21,10 @@ from app.routers import properties as properties_router
 from app.routers import search as search_router
 from app.tools import invoke
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# force: an imported library (FastMCP) has already installed a Rich handler that wraps every line
+# at 80 columns, which makes the logs impossible to grep; one plain line per record instead.
+logging.basicConfig(level=logging.INFO, force=True,
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(get_settings().log_level.upper())
 observability.setup()
 

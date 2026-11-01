@@ -206,6 +206,37 @@ async def test_store_overflow_ignore_and_evidence(people_by_name, writer, reader
     assert cat["about"]["embeddable"] and cat["experience"]["type"] == "text"
 
 
+def test_storage_check_evidence_locked_and_confirmations():
+    from app.properties import Property
+    from app.tools.store import NewProperty, Proposal, Write, check
+    cat = {k: Property(key=k, type="text", label=k, description="", embeddable=True,
+                       normalisable=False, filter_ops=[], source="spec")
+           for k in ("about", "company", "title_enriched", "notes")}
+    passage = ("about: Currently a medical student, but I’ve always had one too many shoes I "
+               "wanted to have the foot in. I found that defining myself a Renaissance woman "
+               "would make it all more cohesive… and it does in some sense.\n"
+               "title_enriched: Research Assistant")
+    # a curly apostrophe copied as a straight one, and a long quote shortened at its end
+    ok = Proposal(writes=[Write(key="about", value="x", evidence="Currently a medical student, "
+                                "but I've always had one too many shoes I wanted"),
+                          Write(key="title_enriched", value="Research Assistant",
+                                evidence="title_enriched: Research Assistant")])
+    assert check(ok, cat, passage) == []
+    made_up = Proposal(writes=[Write(key="about", value="x", evidence="Studied at Oxford")])
+    assert check(made_up, cat, passage) == ["about: evidence must be copied verbatim from the passage"]
+    # locked keys may be confirmed, never written; confirmations need a current value
+    locked = frozenset({"company"})
+    bad = Proposal(writes=[Write(key="company", value="ICLUB", evidence="title_enriched: Research")],
+                   confirmed=["title_enriched"],
+                   new_properties=[NewProperty(key="hat_size", label="Hat size",
+                                               description="d", value="7")])
+    problems = check(bad, cat, passage, current={"about": "old"}, locked=locked)
+    assert problems[0].startswith("company is set by the caller")
+    assert "title_enriched has no current value" in problems[1]
+    fine = Proposal(confirmed=["company", "about"])
+    assert check(fine, cat, passage, current={"about": "old"}, locked=locked) == []
+
+
 async def test_store_from_file(people_by_name, writer, reader):
     bo = people_by_name["Bo"]
     r = await writer.post(f"/api/people/{bo}/store/file?wait=true",
