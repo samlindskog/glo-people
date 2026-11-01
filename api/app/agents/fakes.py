@@ -174,8 +174,12 @@ def repair(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     prompt = _prompt(messages)
     name = re.search(r"^Name: (.*)$", prompt, re.MULTILINE).group(1).strip()
     evidence = prompt.split("Evidence:", 1)[-1]
-    kind = "Company" if re.search(r"\b(inc|llc|ltd|ventures?|capital|labs?|fund)\b", name,
-                                  re.IGNORECASE) else "Person"
+    if re.search(r"\b(inc|llc|ltd|ventures?|capital|labs?|fund)\b", name, re.IGNORECASE):
+        kind = "Company"
+    elif not re.search(r"[A-Za-z]{2,}", name) or re.match(r"^(store|click|test)\b", name, re.IGNORECASE):
+        kind = "Unidentifiable"                      # nothing that names a human or a firm
+    else:
+        kind = "Person"
     proposed = None
     if " - " in name:
         proposed = name.split(" - ", 1)[0].strip()

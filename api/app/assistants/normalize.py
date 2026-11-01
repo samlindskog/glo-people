@@ -5,6 +5,7 @@ the enrich ladder on the same item and budget, so the paid profile supplies the 
 everything else it knows; then the repair of identity data (record kind, misfiled values) on the
 completed record. The enrich ladder is the only paid part; the run cap bounds it."""
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import Field
@@ -15,6 +16,7 @@ from app.assistants.enrich import assistant as enrich_assistant
 from app.assistants.enrich import budget as enrich_budget
 from app.assistants.enrich.models import EnrichOptions
 from app.auth import Principal
+from app.config import get_settings
 from app.integrations.firecrawl import AsyncFirecrawl, Budget
 from app.integrations.profile import is_full_name
 from app.tools import normalize as normalize_tool
@@ -55,8 +57,22 @@ def item_cap(options: NormalizeRunOptions) -> int:
     return enrich_budget.item_cap(_enrich_options()) if options.enrich else 0
 
 
+def enriched_recently(deps: AssistantDeps) -> str | None:
+    """The date of the last enrich write on the record inside the TTL, or None: an enrichment
+    that left the name incomplete is not repeated, the providers would answer the same."""
+    ttl = datetime.now(UTC) - timedelta(days=get_settings().enrich_ttl_days)
+    latest = None
+    for entries in ((deps.person or {}).get("history") or {}).values():
+        for e in entries:
+            by = (e.get("src") or {}).get("by") or ""
+            if by.startswith("enrich/") and e.get("ts") and datetime.fromisoformat(e["ts"]) >= ttl:
+                latest = max(latest or e["ts"], e["ts"])
+    return latest[:10] if latest else None
+
+
 def wants_enrich(deps: AssistantDeps, options: NormalizeRunOptions) -> bool:
-    """A person-looking record (not a Company) with a LinkedIn profile URL and no full name."""
+    """A person-looking record (not a Company) with a LinkedIn profile URL and no full name, not
+    enriched within the TTL."""
     if not options.enrich:
         return False
     kind = deps.current("record_kind")
@@ -64,7 +80,12 @@ def wants_enrich(deps: AssistantDeps, options: NormalizeRunOptions) -> bool:
         return False
     if is_full_name(str(deps.current("name") or "")):
         return False
-    return bool(linkedin_profile(deps.current("linkedin")))
+    if not linkedin_profile(deps.current("linkedin")):
+        return False
+    if when := enriched_recently(deps):
+        deps.skip("enrich", f"enriched {when}; the providers gave no full name then")
+        return False
+    return True
 
 
 async def _enrich(deps: AssistantDeps) -> dict[str, Any]:
@@ -81,7 +102,7 @@ async def _enrich(deps: AssistantDeps) -> dict[str, Any]:
     deps.skipped.extend({"step": f"enrich/{s['step']}", "reason": s["reason"]}
                         for s in edeps.skipped)
     keep = ("text", "status", "linkedin", "linkedin_provider", "providers", "company", "storage",
-            "stored", "not_found")
+            "stored", "not_found", "review")
     return {k: res.get(k) for k in keep if k in res}
 
 
@@ -127,11 +148,19 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     assert isinstance(first, normalize_tool.NormalizeResult)
     # 2. enrichment, only when the record still cannot settle its own name
     enriched = await _enrich(deps) if wants_enrich(deps, options) else None
-    # 3. repair on the completed record (the parser only confirms on this pass)
+    # 3. repair on the completed record (the parser only confirms on this pass); an enrichment
+    #    ends with its own review of the record, which stands in for this stage
     result = first
-    if options.repair:
-        force = options.force or (deps.current("record_kind") == "Unidentifiable"
-                                  and is_full_name(str(deps.current("name") or "")))
+    review = (enriched or {}).get("review") or {}
+    repair_from_review = ({"kind": review["kind"], "name_source": review.get("name_source"),
+                           "agent_called": True, "note": review.get("note", ""),
+                           "mechanical": review.get("mechanical", []),
+                           "rejected": review.get("rejected", []), "signals": [], "confidence": None}
+                          if review.get("kind") else None)
+    if options.repair and repair_from_review is None:
+        # an Unidentifiable mark is re-judged every time: the rule is common sense now, and the
+        # record may have gained a name or evidence since
+        force = options.force or deps.current("record_kind") == "Unidentifiable"
         second = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME,
                                  opts=options.model_copy(update={"force": force}))
         if second is None:
@@ -150,7 +179,8 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             "skipped": deps.skipped, "enrich": enriched,
             "agent_called": result.agent_called, "unmapped": result.unmapped,
             "merged": result.merged, "allocated": result.allocated, "rejected": result.rejected,
-            "repair": result.repair.model_dump(exclude={"changes"}) if result.repair else None}
+            "repair": (repair_from_review if repair_from_review is not None else
+                       result.repair.model_dump(exclude={"changes"}) if result.repair else None)}
 
 
 DETAILS = """\
@@ -162,7 +192,7 @@ DETAILS = """\
 
 **Stage 2, the normaliser agent (one model call, only when something stayed unmapped).** It sees each unmapped text with the property's type and canonical values, and who the person is (name, company, role, one-liner, bio, sectors, company description). Per item it merges the text into an existing value (the text becomes an alias, so the parser handles it next time), allocates a new canonical value when the text names a category the list lacks and fits the person (enum types only, within `max_new_values`, one new value per property per call), or drops it as non-normalisable. A validator fixes spellings and rejects unusable answers; what the caps refuse is reported as rejected.
 
-**Stage 3, repair (when the record has no record kind yet, or with `force`).** Mechanical fixes first: mojibake re-decoded, an all-lowercase name title-cased (never a handle, email or URL). Then the repair agent judges the record from its own facts (name history, LinkedIn slug, emails, website, company, role, headline, bio, intro, notes, source file): the kind (Person, Company, Unidentifiable, or a new kind it allocates), a first-and-last name only when the current one is broken and the evidence gives it verbatim, and values filed under the wrong property (moved to the property it names, usually notes, and tombstoned where they were; at most 3). The repair tool never calls a data provider. A Person whose name stays partial after the enrichment is marked Unidentifiable; a record marked Unidentifiable earlier is re-judged, free, once its name is complete. A full name behind a LinkedIn profile URL always counts as a Person.
+**Stage 3, repair (when the record has no record kind yet, or with `force`).** Mechanical fixes first: mojibake re-decoded, an all-lowercase name title-cased (never a handle, email or URL). Then the repair agent judges the record from its own facts (name history, LinkedIn slug, emails, website, company, role, headline, bio, intro, notes, source file): the kind (Person, Company, Unidentifiable, or a new kind it allocates), a first-and-last name only when the current one is broken and the evidence gives it verbatim, and values filed under the wrong property (moved to the property it names, usually notes, and tombstoned where they were; at most 3). The repair tool never calls a data provider. The kind is common sense: a human name, even a first name alone, is a Person; Company for an organisation recorded as a person; Unidentifiable only when nothing on the record names a human or an organisation. A record marked Unidentifiable is re-judged, free, on every run. When the enrichment ran, its closing review stands in for this stage; a record enriched within the last 90 days without gaining a full name is not enriched again.
 
 **The write.** One commit carries the norm entries, any new values and the record kind, each history entry attributed to its author: the parser as system/normalize, the agent as normalize/normalizer with the run and item reference, the repair agent as repair, mechanical fixes as system/repair, the enrichment's writes as enrich/<step>.
 

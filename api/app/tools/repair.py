@@ -5,9 +5,9 @@ agent (defined here) judges the record: what it is (`record_kind`: Person, Compa
 Unidentifiable, or a kind it allocates), whether the name is a real first and last name and, when
 it is broken, the full name the record's own evidence gives verbatim; and values filed under the
 wrong property. It never calls a data provider: a record whose name the evidence cannot complete
-is enriched by the normalise assistant (the enrich ladder) before repair runs, and a Person whose
-name stays partial or broken is Unidentifiable. Every fix is an appended history entry; nothing is
-deleted."""
+is enriched by the normalise assistant (the enrich ladder) before repair runs. The kind is common
+sense: a human name, even a first name alone, is a Person; Unidentifiable is for records with
+nothing identifying on them. Every fix is an appended history entry; nothing is deleted."""
 
 import re
 from dataclasses import dataclass, field
@@ -29,8 +29,9 @@ KIND = "record_kind"
 PERSON, COMPANY, UNIDENTIFIABLE = "Person", "Company", "Unidentifiable"
 TEXT_LIKE = ("text", "keyword", "url", "contact", "list")
 EVIDENCE_KEYS = ("linkedin", "email", "emails", "github", "website", "company", "role",
-                 "linkedin_headline", "one_liner", "bio", "intro_bio", "notes", "entity_type",
-                 "location")
+                 "linkedin_headline", "title_enriched", "one_liner", "bio", "intro_bio", "about",
+                 "experience", "notes", "entity_type", "location")
+EVIDENCE_CLIP = {"about": 600, "experience": 400, "notes": 800}   # long texts: their opening
 _COMPANY_WORDS = re.compile(r"\b(inc|llc|ltd|ventures?|capital|labs?|studio|partners|holdings|"
                             r"group|technologies|fund|gmbh|corp|company|co)\b", re.IGNORECASE)
 _HANDLE = re.compile(r"@\w")
@@ -187,18 +188,22 @@ record's own facts establish. You see the current name and its earlier values, h
 looks wrong, the evidence on the record (LinkedIn URL and slug, emails, website, company, role,
 headline, bio, intro, notes, entity type, source file) and the kinds of record.
 
-Decide the kind: Person for a human; Company for a firm, fund or organisation recorded as if it
-were a person (its name is the company's and counts as complete); Unidentifiable when nothing on
-the record says who or what this is; another kind only when it clearly fits and the list lacks it.
+Decide the kind by common sense. Person for a human: a human name is enough, even a first name
+alone ("Vlad", "Jack M."), as is a headline, bio or job history that describes a person. Company
+for a firm, fund or organisation recorded as if it were a person (its name is the company's and
+counts as complete). Unidentifiable only when nothing on the record names a human or an
+organisation: an empty, random or generic string ("E", "Click", "Store eo39uo") with no telling
+evidence. Another kind only when it clearly fits and the list lacks it.
 
-The name must be a first and last name. Propose a new name only when the current one is broken
-(a handle, an email, a company, a role or company suffix such as "CEO MyBot" or "_Founder of X",
-a parenthetical) and the evidence gives the full name verbatim: the first and last name inside
-the current name itself ("Andres Niño CEO MyBot" → "Andres Niño"), a bio that opens with it, an
-intro, an email local part such as "polly.israni", a LinkedIn slug such as "brad-topliff". Never
-guess or complete a surname; an initial is not a surname. When the name is just a first name,
-leave it and say name_complete is false; something else will ask the LinkedIn profile. Mojibake
-and casing are already fixed; do not re-propose the current name unchanged.
+A proposed name must be a first and last name. Propose one when the current name is broken (a
+handle, an email, a company, a role or company suffix such as "CEO MyBot" or "_Founder of X", a
+parenthetical) or incomplete (a first name only) and the evidence gives the full name verbatim:
+the first and last name inside the current name itself ("Andres Niño CEO MyBot" → "Andres Niño"),
+a headline or about text that states it ("I'm Jack Mathews, …"), an intro, an email local part
+such as "polly.israni", a LinkedIn slug such as "brad-topliff". Never guess or complete a surname;
+an initial is not a surname. When the evidence gives no full name, leave the name and say
+name_complete is false. Mojibake and casing are already fixed; do not re-propose the current name
+unchanged.
 
 Misfiled: a value that plainly belongs to another property (prose in website, a URL in company):
 name the property and where to move it (notes when unsure), at most a few.""",
@@ -257,7 +262,7 @@ def _evidence(doc: dict) -> tuple[str, str]:
         value = _cur(doc, key)
         if value in (None, "", []):
             continue
-        text = fields.text_of(value)[:fields.MAX_TEXT_CHARS]
+        text = fields.text_of(value)[:EVIDENCE_CLIP.get(key, fields.MAX_TEXT_CHARS)]
         lines.append(f"{key}: {text}")
         folded.append(fields.fold(text))
         if key in ("email", "emails"):
@@ -317,7 +322,6 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         name, name_source = verdict.name, "evidence"
     elif verdict.name:
         result.rejected.append(f"name {verdict.name!r} (low confidence)")
-    complete = verdict.name_complete or name is not None or is_full_name(current_name)
     kind_proposed = verdict.kind
     li = _cur(doc, "linkedin")
     if fields.fold(kind_proposed) == fields.fold(UNIDENTIFIABLE) and is_full_name(current_name) \
@@ -326,15 +330,13 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         # agent made of an earlier Unidentifiable mark
         kind_proposed = PERSON
         result.note = f"{result.note} A full name and a LinkedIn profile identify a person.".strip()
-    if fields.fold(kind_proposed) == fields.fold(PERSON) and not complete:
-        kind_proposed = UNIDENTIFIABLE
     result.name_source = name_source
 
     kind, allocated = await properties.resolve_enum_value(
         KIND, kind_proposed, opts.allocate, src=f"agent:{AGENT_NAME} {ctx.source.ref or ''}".strip())
     if kind is None:
         result.rejected.append(f"kind {kind_proposed!r} (allocation off)")
-        kind = PERSON if complete else UNIDENTIFIABLE
+        kind = PERSON if _tokens(current_name) else UNIDENTIFIABLE
     if allocated:
         ctx.tx.record_catalog(Change(key=KIND, action="enum_value_added", value=kind), tag="repair")
         ctx.emit("note", f"new record kind {kind!r}", value=kind)

@@ -421,22 +421,19 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     assert "website" not in person and person["history"]["website"][-1]["v"] is None
 
 
-async def test_repair_marks_partial_names_unidentifiable_without_asking_anyone(writer, reader):
-    """The repair tool never calls a data provider: a bare first name with a LinkedIn URL is the
-    normalise assistant's cue to enrich; left alone, the record is Unidentifiable."""
+async def test_repair_judges_kind_by_common_sense_without_asking_anyone(writer, reader):
+    """The repair tool never calls a data provider. A human name, even a first name alone, is a
+    Person; Unidentifiable is for records with nothing identifying on them."""
     src = Source("agent", "repair", "test")
     pid = await make(writer, {"name": "Ada", "linkedin": "https://www.linkedin.com/in/adaokafor"})
     res = await repair(pid, src)
-    assert res.kind == "Unidentifiable" and res.credits == 0 and res.calls == []
+    assert res.kind == "Person" and res.credits == 0 and res.calls == []
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "Ada" and "linkedin_headline" not in person
-    assert set(person) - {"id", "tier", "created_at", "updated_at", "schema_version", "norm",
-                          "norm_flags", "history", "history_norm", "name", "linkedin",
-                          "record_kind"} == set()
-    # no LinkedIn: Unidentifiable as well
     pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
-    res = await repair(pid, src)
-    assert res.kind == "Unidentifiable"
+    assert (await repair(pid, src)).kind == "Person"
+    pid = await make(writer, {"name": "Store eo39uo"})
+    assert (await repair(pid, src)).kind == "Unidentifiable"
     assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
 
 async def test_repair_validator_refuses_invented_names_and_allocates_kinds(writer, reader):
@@ -479,12 +476,12 @@ async def test_repair_validator_refuses_invented_names_and_allocates_kinds(write
 async def test_normalize_repairs_once_unless_forced(people_by_name, writer, reader):
     cy = people_by_name["Cy"]
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
-    assert res["repair"]["kind"] == "Unidentifiable"           # "Cy": one token, no LinkedIn
-    assert (await reader.get(f"/api/people/{cy}")).json()["record_kind"] == "Unidentifiable"
+    assert res["repair"]["kind"] == "Person"                   # "Cy": a human first name is enough
+    assert (await reader.get(f"/api/people/{cy}")).json()["record_kind"] == "Person"
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert res["repair"] is None                               # already classified
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"force": True}})).json()
-    assert res["repair"]["kind"] == "Unidentifiable" and res["repair"]["agent_called"]
+    assert res["repair"]["kind"] == "Person" and res["repair"]["agent_called"]
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true", json={"options": {"repair": False, "force": True}})).json()
     assert res["repair"] is None
 
@@ -499,11 +496,11 @@ async def test_normalize_assistant_run(people_by_name, writer, reader):
     assert run["status"] == "done" and run["done"] == 2 and run["credits_used"] == 0
     by_person = {i["person_id"]: i for i in run["items"]}
     cy = by_person[people_by_name["Cy"]]["result"]
-    assert cy["text"] == "stage → Pre-seed; record kind: Unidentifiable (agent consulted)."
+    assert cy["text"] == "stage → Pre-seed; record kind: Person (agent consulted)."
     assert by_change(cy)[("stage", "normalized")]["value"] == "Pre-seed"
-    assert cy["repair"]["kind"] == "Unidentifiable"
+    assert cy["repair"]["kind"] == "Person"
     ada = by_person[people_by_name["Ada"]]["result"]
-    assert ada["agent_called"] is False and ada["text"] == "record kind: Unidentifiable (agent consulted)."
+    assert ada["agent_called"] is False and ada["text"] == "record kind: Person (agent consulted)."
     person = (await reader.get(f"/api/people/{people_by_name['Cy']}")).json()
     assert person["history_norm"]["stage"][-1]["src"]["by"] == "normalize/normalizer"
     specs = {w["key"]: w for w in (await reader.get("/api/assistants")).json()}

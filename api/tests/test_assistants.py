@@ -306,6 +306,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "languages": ["English", "Yoruba"],
         "one_liner": "Builds payments infrastructure.",
         "enrichment_passage": EXPECTED_PASSAGE,
+        "record_kind": "Person",          # the closing review classifies the record
     }
     # Her own site, location and company are already on the record: not re-added; the provider
     # dump never reaches notes.

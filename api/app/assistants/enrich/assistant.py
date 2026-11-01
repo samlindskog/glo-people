@@ -50,6 +50,7 @@ from app.integrations.profile import (
     profile_values,
 )
 from app.tools import company as company_tool
+from app.tools import repair as repair_tool
 from app.tools import site as site_tool
 from app.tools import store as store_tool
 from app.urls import (
@@ -139,6 +140,7 @@ async def _ladder(deps: AssistantDeps) -> dict[str, Any]:
     await _step_github_and_links(deps, st)
     await _step_company(deps, st)
     await _step_store(deps, st)
+    await _step_review(deps, st)
     return {**st.result, "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
             "skipped": deps.skipped}
 
@@ -164,6 +166,14 @@ def _text(st: State, deps: AssistantDeps) -> str:
     parts = [_STEP_TEXT[(step, st.result[step])]
              for step in ("linkedin", "github", "company", "storage")
              if (step, st.result.get(step)) in _STEP_TEXT]
+    if review := st.result.get("review"):
+        bits = [f"record kind {review['kind']}"] if review.get("kind") else []
+        if review.get("name"):
+            bits.append(f"name completed from the record: {review['name']}")
+        if review.get("status") == "error":
+            bits.append("failed")
+        if bits:
+            parts.append("review: " + ", ".join(bits))
     written = sorted(k for k in deps.written if k not in store_tool.AUDIT_KEYS)
     parts.append(f"wrote {', '.join(written)}" if written else "nothing new to write")
     return "; ".join(parts).capitalize() + "."
@@ -550,3 +560,26 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
     if res.created_properties:
         st.result["created_properties"] = list(res.created_properties)
     await deps.write("storage", {"enrichment_passage": text})
+
+
+async def _step_review(deps: AssistantDeps, st: State) -> None:
+    """Step 6: a sanity review of the record as it now stands, through the repair tool (one model
+    call, no credits): the kind by common sense, a full name the record's own data now states (a
+    headline or about text the ladder just filed), misfiled values. Runs when the ladder wrote
+    anything or the record has no kind yet."""
+    if not deps.changes and deps.current("record_kind"):
+        return
+    try:
+        with logfire.span("review"):
+            res = await deps.tool(repair_tool.repair, "review", opts=repair_tool.RepairOptions())
+    except Exception as e:  # the item stays done; the normalise assistant reviews again anyway
+        log.exception("enrich: the review failed for %s", deps.person_id)
+        st.result["review"] = {"status": "error"}
+        deps.skip("review", f"the review failed: {e}")
+        return
+    if res is None:
+        return
+    assert isinstance(res, repair_tool.RepairResult)
+    name = next((c.value for c in res.changes if c.key == "name" and c.action == "set"), None)
+    st.result["review"] = {"kind": res.kind, "name": name, "name_source": res.name_source,
+                           "mechanical": res.mechanical, "note": res.note, "rejected": res.rejected}
