@@ -173,6 +173,9 @@ def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None 
                             "underscores, not a reserved name")
         elif n.key in catalog:
             problems.append(f"new property {n.key!r} already exists: write to it instead")
+        elif (existing := next((k for k in catalog if len(k) >= 5 and k in n.key.split("_")), None)):
+            problems.append(f"new property {n.key!r}: {existing!r} exists for this kind of fact; "
+                            "write to it instead")
         elif n.key in seen:
             problems.append(f"new property {n.key!r} is proposed twice")
         seen.add(n.key)

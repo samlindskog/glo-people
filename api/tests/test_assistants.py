@@ -464,6 +464,29 @@ def test_passage_merges_lists_and_drops_a_second_text():
     assert len(p.digest()) == 16 and p.digest() == Passage.digest(p)
 
 
+def test_name_fill_from_the_profile():
+    prof = profile_mod.LinkedInProfile(full_name="Alina Kharina")
+    assert profile_mod.name_fill(prof, "Alina") == "Alina Kharina"
+    assert profile_mod.name_fill(prof, "alina ") == "Alina Kharina"
+    assert profile_mod.name_fill(prof, None) == "Alina Kharina"
+    assert profile_mod.name_fill(prof, "Fleek") is None             # a different name: repair's call
+    assert profile_mod.name_fill(prof, "Alina K.") is None          # two tokens: not a bare first name
+    assert profile_mod.name_fill(prof, "Alina Kharina") is None
+    assert profile_mod.name_fill(profile_mod.LinkedInProfile(first_name="Ada"), "Ada") is None
+
+
+async def test_a_bare_first_name_is_completed_from_the_profile(writer, reader):
+    await import_people(writer, "Name,LinkedIn\nAda,https://www.linkedin.com/in/adaokafor\n",
+                        "p.csv", "plus_one")
+    ada = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
+    run = await run_for(writer, [ada])
+    res = run["items"][0]["result"]
+    assert written(res)["name"] == "Ada Okafor"
+    person = (await reader.get(f"/api/people/{ada}")).json()
+    assert person["name"] == "Ada Okafor"
+    assert [e["src"]["by"] for e in person["history"]["name"]] == ["p.csv", "enrich/linkedin_reader"]
+
+
 def test_profile_lines_clean_provider_text():
     prof = profile_mod.LinkedInProfile(
         summary="Strategy &amp; ops \u2800\u2800 leader\u200b", languages=["english", "Yoruba"],

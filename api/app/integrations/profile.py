@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app import fields
 from app.urls import github_profile
 
 
@@ -57,6 +58,41 @@ class LinkedInProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
     interests: list[str] = Field(default_factory=list)
+
+
+def _tokens(name: str) -> list[str]:
+    return fields.fold(name).split()
+
+
+def is_full_name(name: str) -> bool:
+    """A first and a last name: two or more tokens, the last one a word of two or more letters
+    (so "Polly I." and "Ada O" do not count)."""
+    toks = _tokens(name)
+    return len(toks) >= 2 and len(toks[-1]) >= 2 and not toks[-1].isdigit()
+
+
+def full_name(profile: LinkedInProfile | None) -> str | None:
+    """The profile's first and last name, or None when it has no full name."""
+    if profile is None:
+        return None
+    name = " ".join((profile.full_name or f"{profile.first_name or ''} {profile.last_name or ''}")
+                    .split())
+    return name if is_full_name(name) else None
+
+
+def name_fill(profile: LinkedInProfile, current: Any) -> str | None:
+    """The provider's full name for a record whose name is missing or a single token that the
+    full name contains ("Alina" → "Alina Kharina"). Anything else (a different name, a company
+    name on a person's record) is the repair tool's judgement, not a mechanical fill."""
+    full = full_name(profile)
+    if not full:
+        return None
+    toks = _tokens(str(current or ""))
+    if not toks:
+        return full
+    if len(toks) == 1 and toks[0] in _tokens(full) and not is_full_name(str(current)):
+        return full
+    return None
 
 
 def profile_values(profile: LinkedInProfile, current: dict[str, Any]) -> dict[str, Any]:

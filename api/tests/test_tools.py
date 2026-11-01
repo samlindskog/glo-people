@@ -240,6 +240,13 @@ def test_storage_check_evidence_locked_and_confirmations():
     assert check(anchored, cat, passage) == []
     assert check(Proposal(writes=[Write(key="notes", value="x", evidence="a paraphrase")]),
                  cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
+    # a proposed property that names an existing one is that property
+    dup = Proposal(new_properties=[NewProperty(key="professional_interests", label="Professional interests",
+                                               description="d", value=["x"])])
+    cat2 = {**cat, "interests": Property(key="interests", type="list", label="Interests", description="",
+                                         embeddable=True, normalisable=False, filter_ops=[], source="spec")}
+    assert check(dup, cat2, None) == [("new property 'professional_interests': 'interests' exists "
+                                       "for this kind of fact; write to it instead")]
     # an empty answer to a non-empty passage is not an answer
     assert check(Proposal(), cat, passage)[0].startswith("the proposal is empty")
     assert check(Proposal(ignored=["hi there"]), cat, "hi there") == []

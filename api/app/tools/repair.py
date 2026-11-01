@@ -22,6 +22,7 @@ from app.agents.common import run_agent
 from app.history import Change, Source
 from app.integrations import fullenrich
 from app.integrations.firecrawl import AsyncFirecrawl, FirecrawlError, NotConfigured, NotFound
+from app.integrations.profile import _tokens, full_name, is_full_name
 from app.tools import Emit, ToolContext, ToolResult, silent
 from app.urls import linkedin_profile
 
@@ -214,17 +215,6 @@ name the property and where to move it (notes when unsure), at most a few.""",
 )
 
 
-def _tokens(name: str) -> list[str]:
-    return fields.fold(name).split()
-
-
-def is_full_name(name: str) -> bool:
-    """A first and a last name: two or more tokens, the last one a word of two or more letters
-    (so "Polly I." and "Ada O" do not count)."""
-    toks = _tokens(name)
-    return len(toks) >= 2 and len(toks[-1]) >= 2 and not toks[-1].isdigit()
-
-
 @agent.output_validator
 async def _grounded(ctx: RunContext[RepairDeps], v: Verdict) -> Verdict:
     problems = []
@@ -329,10 +319,7 @@ async def _provider_profile(doc: dict, firecrawl: AsyncFirecrawl,
 
 def _profile_name(profile: fullenrich.LinkedInProfile | None) -> str | None:
     """The profile's first and last name, or None when it has no full name."""
-    if profile is None:
-        return None
-    name = " ".join((profile.full_name or f"{profile.first_name or ''} {profile.last_name or ''}").split())
-    return name if is_full_name(name) else None
+    return full_name(profile)
 
 
 # --- the tool -----------------------------------------------------------------------------------------

@@ -41,7 +41,7 @@ from app.integrations.firecrawl import (
     NotFound,
     TermsRequired,
 )
-from app.integrations.profile import LinkedInProfile, profile_lines, profile_values
+from app.integrations.profile import LinkedInProfile, name_fill, profile_lines, profile_values
 from app.tools import company as company_tool
 from app.tools import site as site_tool
 from app.tools import store as store_tool
@@ -253,7 +253,11 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
             if github_url := github_profile(profile.github_url):
                 st.github_urls.append(github_url)
             st.related.extend(profile.other_links)
-            await deps.write("linkedin_reader", profile_values(profile, deps.person or {}))
+            values = profile_values(profile, deps.person or {})
+            if name := name_fill(profile, deps.current("name")):
+                values["name"] = name           # "Alina" → the profile's "Alina Kharina"
+                st.name = name
+            await deps.write("linkedin_reader", values)
     if st.profile is None:
         # the step's status is the worst of the providers': an error beats a miss
         st.result["linkedin"] = ("error" if "error" in statuses.values() else
