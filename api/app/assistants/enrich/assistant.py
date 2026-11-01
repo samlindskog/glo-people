@@ -213,9 +213,11 @@ async def _provider_call(deps: AssistantDeps, step: str, call, who: str = "the d
 
 
 async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
-    """Step 1: the person's record at each data provider the run names, in order (exact LinkedIn
-    URL; FullEnrich 5 credits; a miss is free). The first match is the profile the direct writes
-    and the later steps rest on; every match adds its facts to the passage."""
+    """Step 1: the person's record at the data providers the run names, in order (exact LinkedIn
+    URL; People Data Labs 1 credit, FullEnrich 5; a miss is free). The first match is the profile
+    the direct writes and the later steps rest on; every match adds its facts to the passage.
+    Under the default `gaps` policy the next provider is asked only when the one before had no
+    record or no about text, since the records overlap almost entirely."""
     li = linkedin_profile(deps.current("linkedin"))
     if not li:
         deps.skip("linkedin", "no linkedin.com/in URL on the record")
@@ -235,6 +237,11 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
         return
     statuses: dict[str, str] = st.result["providers"]
     for spec in (PROVIDERS[k] for k in dict.fromkeys(st.options.providers)):
+        if st.options.provider_policy == "gaps" and st.profile is not None \
+                and (st.profile.summary or "").strip():
+            deps.skip("linkedin", f"{spec.label} not asked: the record is complete without it")
+            statuses[spec.key] = "skipped"
+            continue
         deps.emit("step", f"LinkedIn: asking {spec.label} about {li}")
         with logfire.span("linkedin_reader {provider}", provider=spec.key):
             profile, statuses[spec.key] = await _provider_call(
@@ -267,12 +274,15 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
-    """The profile's personal sites plus every website on the record, except the ones the company
-    step itself wrote (a company site is not the person's own; reading it again on a refresh
-    would cost a page and a model call for nothing)."""
+    """The profile's personal sites plus every website on the record, except the employer's: the
+    ones the company step or the provider record wrote, and the profile's current company site (a
+    company site is not the person's own; reading it again would cost a page and a model call)."""
+    employer_writers = {f"{ASSISTANT}/{company_tool.AGENT_NAME}", f"{ASSISTANT}/linkedin_reader"}
     company_sites = {url_key(e["v"]) for e in ((deps.person or {}).get("history") or {})
                      .get("website", []) if isinstance(e.get("v"), str)
-                     and (e.get("src") or {}).get("by") == f"{ASSISTANT}/{company_tool.AGENT_NAME}"}
+                     and (e.get("src") or {}).get("by") in employer_writers}
+    if st.profile and st.profile.current_company and st.profile.current_company.website:
+        company_sites.add(url_key(st.profile.current_company.website))
     raws = [*(st.profile.personal_sites if st.profile else []),
             *split_urls(deps.current("website")),
             *(u for v in deps.history_values("website") for u in split_urls(v))]
@@ -396,9 +406,30 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
         deps.skip("company", "no current company known")
         return
     company = str(company)
-    if not st.options.refresh and _recent(deps, "company_description", "company"):
-        deps.skip("company", "already summarised within the TTL (an earlier attempt)")
+    if not st.options.refresh and (_recent(deps, "company_description", "company")
+                                   or _recent(deps, "company_description", "linkedin_reader")):
+        deps.skip("company", "already described within the TTL (an earlier attempt)")
         st.result["company"] = "resolved"
+        return
+    provider_co = st.profile.current_company if st.profile and st.profile.current_company \
+        and st.profile.current_company.name.strip().lower() == company.strip().lower() else None
+    if provider_co and provider_co.description and provider_co.description.strip():
+        # The paid record already describes the employer: write it instead of paying for pages
+        # and a model call. Research is for companies the providers do not describe.
+        values: dict[str, Any] = {}
+        website = normalize_url(provider_co.website)
+        if website and not _has_url(deps, "website", website):
+            values["website"] = website
+        if "website" in values or not deps.current("company_description"):
+            values["company_description"] = _clip(provider_co.description)
+        if not deps.current("company"):
+            values["company"] = company
+        st.result["company"] = "resolved"
+        st.result["company_evidence"] = {"confidence": "provider", "evidence_url": website}
+        if values:
+            await deps.write("linkedin_reader", values)
+        else:
+            deps.skip("company", "description kept: the provider's matches the record's website")
         return
     deps.emit("step", f"company: researching {company}")
     if "company" in st.previously_missing:
@@ -407,9 +438,6 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
         return
     context = ", ".join(str(x) for x in (deps.current("location"), deps.current("sectors"),
                                           deps.current("role")) if x)
-    if st.profile and st.profile.current_company and st.profile.current_company.description:
-        context += ". The data provider describes the company as: " \
-                   f"{_clip(st.profile.current_company.description, 400)}"
     try:
         with logfire.span("company {company}", company=company):
             summary = await company_tool.research_company(

@@ -107,7 +107,8 @@ class FakeFirecrawl(AsyncFirecrawl):
             url = options["linkedin_url"]
             if "exchange-fail" in url:
                 raise FirecrawlError("fullenrich/people/match: upstream_error provider timeout")
-            if url_key(url) == url_key("https://www.linkedin.com/in/adaokafor"):
+            if url_key(url) in (url_key("https://www.linkedin.com/in/adaokafor"),
+                                url_key("https://www.linkedin.com/in/nosummary")):
                 self.budget.charge("scrape", target, LINKEDIN_CREDITS)
                 return AlexandriaResult(provider, capability,
                                         json.loads((FIX / "fullenrich_ada.json").read_text()),
@@ -125,6 +126,11 @@ class FakeFirecrawl(AsyncFirecrawl):
                 self.budget.charge("scrape", target, PDL_CREDITS)
                 return AlexandriaResult(provider, capability,
                                         json.loads((FIX / "pdl_ada.json").read_text()), PDL_CREDITS)
+            if url_key(options["profile"]) == url_key("https://www.linkedin.com/in/nosummary"):
+                self.budget.charge("scrape", target, PDL_CREDITS)   # a record without an about text
+                data = json.loads((FIX / "pdl_ada.json").read_text())
+                data["data"]["summary"] = None
+                return AlexandriaResult(provider, capability, data, PDL_CREDITS)
             raise NotFound("not_found")
         if target == "github-com/repositories/user":
             if url_key(options["url"]) == url_key("https://github.com/adaok"):
@@ -235,6 +241,7 @@ async def people(writer):
 
 
 async def run_for(client, ids, **options):
+    options = {"providers": ["fullenrich"], **options}      # the older tests describe FullEnrich
     r = await client.post("/api/assistants/enrich/runs", json={"person_ids": ids,
                                                               "options": options})
     assert r.status_code == 201, r.text
@@ -274,8 +281,8 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                           "Top repos: rails-sdk (★48), settle (★12). Languages: Python, Go.",
         "related_links": ["https://twitter.com/adaokafor", "https://rails.substack.com"],
         "website": "https://payrail.io",
-        "company_description": "PayRail provides payments infrastructure for merchants in West "
-                           "Africa, with next-day local settlement.",
+        # the employer's own description from the paid record: no page fetched, no model call
+        "company_description": "Payments infrastructure for merchants across West Africa.",
         # the provider record and the site's one-liner, filed by the storage agent
         "about": "Founder of PayRail. Previously Paystack and Stripe.",
         "title_enriched": "CEO & Co-founder",
@@ -294,10 +301,10 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                                        "evidence": "skills: Payments; Fintech"}
     assert res["stored"]["one_liner"]["provider"] == "site_reader"
     assert res["providers"] == {"fullenrich": "matched"} and res.get("dropped") is None
-    assert item["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    assert item["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS   # her site only
     assert item["credits"] == run["credits_used"]
     assert [c for c in FakeFirecrawl.calls if c[0] == "search"] == []
-    assert model_calls == {"site": 1, "company": 2, "storage": 1}   # none for LinkedIn or GitHub
+    assert model_calls == {"site": 1, "storage": 1}   # none for LinkedIn, GitHub or the company
     assert "facts filed through the storage agent" in res["text"]
     assert "enrichment_passage" not in res["text"]
 
@@ -306,7 +313,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     src = person["history"]["github"][0]["src"]
     assert src == {"kind": "agent", "by": "enrich/linkedin_reader",
                    "ref": f"run:{run['id']}/item:{item['id']}"}
-    assert person["history"]["company_description"][0]["src"]["by"] == "enrich/company"
+    assert person["history"]["company_description"][0]["src"]["by"] == "enrich/linkedin_reader"
     assert person["history"]["github_summary"][0]["src"]["by"] == "enrich/github"
     assert person["history"]["about"][0]["src"]["by"] == "enrich/storage"
     assert person["history"]["enrichment_passage"][0]["src"]["by"] == "enrich/storage"
@@ -328,8 +335,8 @@ async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, r
     before = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()["history"]
     third = await run_for(writer, [people["Ada Okafor"]], refresh=True)
     assert third["items"][0]["status"] == "done" and third["credits_used"] == first["credits_used"]
-    # the company site the first run wrote is not read again as a candidate personal site
-    assert [c for c in FakeFirecrawl.calls if c[0] == "scrape"].count(("scrape", "https://payrail.io")) == 2
+    # the employer's site is never fetched: the provider describes it, and it is not a personal site
+    assert ("scrape", "https://payrail.io") not in FakeFirecrawl.calls
     assert third["items"][0]["result"]["storage"] == "unchanged"
     after = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()["history"]
     assert {k: len(v) for k, v in after.items()} == {k: len(v) for k, v in before.items()}
@@ -400,15 +407,49 @@ async def test_redo_pays_linkedin_again_only_when_the_facts_were_not_filed(write
     assert run["credits_used"] == SCRAPE_CREDITS
 
 
+async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer, reader, people):
+    defaults = {"providers": ["people-data-labs", "fullenrich"], "provider_policy": "gaps"}
+    specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
+    props = specs["enrich"]["options_schema"]["properties"]
+    assert props["providers"]["default"] == defaults["providers"]
+    assert props["provider_policy"]["default"] == "gaps"
+    # PDL has an about text: FullEnrich is not asked, 1 credit instead of 6
+    run = await run_for(writer, [people["Ada Okafor"]], **defaults)
+    item = run["items"][0]
+    res = item["result"]
+    assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "skipped"}
+    assert res["linkedin_provider"] == "people-data-labs"
+    assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
+    assert any("not asked" in s["reason"] for s in res["skipped"] if s["step"] == "linkedin")
+    w = written(res)
+    assert w["about"] == "Payments builder. Ex-Paystack, ex-Stripe." and w["interests"]
+    assert w["linkedin_headline"] == "CEO at PayRail"
+    # PDL has no description of the employer: the company is researched (payrail.io, 1 page)
+    assert res["company"] == "resolved" and model_calls["company"] >= 1
+    assert item["credits"] == PDL_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    # a PDL record without an about text is a gap: FullEnrich is asked and fills it
+    await import_people(writer, "Name,LinkedIn\nNia Summers,https://www.linkedin.com/in/nosummary\n",
+                        "n.csv", "plus_one")
+    nia = str((await db().people.find_one({"name.v": "Nia Summers"}))["_id"])
+    FakeFirecrawl.calls = []
+    run = await run_for(writer, [nia], **defaults)
+    res = run["items"][0]["result"]
+    assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "matched"}
+    assert res["linkedin_provider"] == "people-data-labs"       # the first match stays the profile
+    assert res["stored"]["about"]["provider"] == "fullenrich/people/match"
+    assert written(res)["about"] == "Founder of PayRail. Previously Paystack and Stripe."
+    assert run["credits_used"] >= PDL_CREDITS + LINKEDIN_CREDITS
+
+
 async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, people):
     run = await run_for(writer, [people["Ada Okafor"]],
-                        providers=["fullenrich", "people-data-labs"])
+                        providers=["fullenrich", "people-data-labs"], provider_policy="all")
     item = run["items"][0]
     res = item["result"]
     assert item["status"] == "done", item
     assert res["providers"] == {"fullenrich": "matched", "people-data-labs": "matched"}
     assert res["linkedin_provider"] == "fullenrich"            # the first match is the profile
-    assert item["credits"] == LINKEDIN_CREDITS + PDL_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    assert item["credits"] == LINKEDIN_CREDITS + PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
     w = written(res)
     assert w["interests"] == ["Fintech Policy", "Open Source"]              # PDL only
     assert w["skills"] == ["Payments", "Fintech", "Python", "Go"]           # unioned, fold-deduped
@@ -421,7 +462,7 @@ async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, p
     dropped = [s["reason"] for s in res["skipped"] if s["step"] == "storage"]
     assert dropped == [("people-data-labs/person/enrich also stated about, title_enriched, "
                         "experience, education; the first source's values were kept")]
-    assert model_calls == {"site": 1, "company": 2, "storage": 1}
+    assert model_calls == {"site": 1, "storage": 1}
     # a person PDL does not know: a free miss, FullEnrich's facts are filed as usual
     run = await run_for(writer, [people["Bo Chen"]], providers=["people-data-labs"])
     res = run["items"][0]["result"]
@@ -563,7 +604,7 @@ async def test_run_credit_cap_pauses_and_a_raised_cap_resumes(writer, reader, pe
     statuses = {it["person_id"]: it["status"] for it in run["items"]}
     assert statuses[people["Ada Okafor"]] == "done" and statuses[people["Bo Chen"]] == "queued"
     assert run["status"] == "paused" and run["pause_reason"] == "credit cap"
-    assert run["done"] == 1 and run["credits_used"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    assert run["done"] == 1 and run["credits_used"] == LINKEDIN_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
     active = (await reader.get("/api/assistants/runs?status=active")).json()["items"]
     assert [r["id"] for r in active] == [run["id"]]
     assert (await writer.post(f"/api/assistants/runs/{run['id']}/pause")).status_code == 409

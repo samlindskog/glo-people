@@ -100,7 +100,8 @@ Rules:
   anything that fits nowhere go to `notes`. Prefer an existing property over a new one.
 - `ignored`: greetings, requests, and anything not about this person — copy the passage words
   themselves, do not explain.
-- `evidence`: copy the passage words the write rests on, verbatim. Never invent facts.""",
+- `evidence`: copy the passage words the write rests on, verbatim. When the passage line is
+  labelled with the property key ("skills: …"), the key alone is enough. Never invent facts.""",
 )
 
 
