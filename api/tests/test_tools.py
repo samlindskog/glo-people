@@ -153,13 +153,15 @@ async def test_store_files_facts_under_properties(people_by_name, writer, reader
     r = await writer.post(f"/api/people/{ada}/store?wait=true", json={"passage": "new favourite tools: hammer",
                                                            "options": {"near_duplicate": 0.3}})
     assert r.json()["redirected"] == {"favourite_tools": "favourite_tool"}
-    assert by_change(r.json())[("favourite_tool", "set")] == {
-        "key": "favourite_tool", "action": "set", "value": "hammer", "previous": "lathe", "flag": None}
+    # a redirected fact joins the existing text as a new line (the record keeps both)
+    assert by_change(r.json())[("favourite_tool", "append")] == {
+        "key": "favourite_tool", "action": "append", "value": "lathe\nhammer", "previous": "lathe",
+        "flag": None}
     # beyond max_new the facts go to notes instead of a new property
     r = await writer.post(f"/api/people/{ada}/store?wait=true", json={
         "passage": "new eye colour: green. new shoe size: 42", "options": {"max_new": 1}})
     assert r.json()["created_properties"] == ["eye_colour"] and r.json()["to_notes"] == ["Shoe size"]
-    assert by_change(r.json())[("notes", "set")]["value"] == "Shoe size: 42"
+    assert by_change(r.json())[("notes", "append")]["value"] == "follows up next week\nShoe size: 42"
 
     assert (await writer.post("/api/people/000000000000000000000000/store?wait=true",
                               json={"passage": "x: y"})).status_code == 404
@@ -416,7 +418,7 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     res = await repair(pid, src)
     by = {(c.key, c.action): c for c in res.changes}
     assert by[("website", "removed")].previous == "previously marketing manager at Gap Inc."
-    assert by[("notes", "set")].value == "met in June\npreviously marketing manager at Gap Inc."
+    assert by[("notes", "append")].value == "met in June\npreviously marketing manager at Gap Inc."
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert "website" not in person and person["history"]["website"][-1]["v"] is None
 

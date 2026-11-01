@@ -24,7 +24,7 @@ and one commit; plan → search) but never anything above them.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -92,10 +92,34 @@ class ToolContext:
         budget = self.firecrawl.budget if self.firecrawl is not None else None
         return list(budget.calls) if budget is not None else []
 
+    async def stage(self, values: dict[str, Any], *, append: Iterable[str] = (),
+                    tier: str | None = None, src: Source | None = None) -> list[Change]:
+        """Stage values on the transaction under this context's source (or `src`) and report
+        each set, append or removal as a `write` event: the one way a tool writes a value."""
+        changes = await self.tx.set_values(values, src or self.source, tier=tier, append=append)
+        for c in changes:
+            if c.action in ("set", "append", "removed"):
+                self.emit("write", f"{c.key}: {c.action}", key=c.key, action=c.action)
+        return changes
+
+    async def stage_norm(self, parsed: dict[str, Any], src: Source | None = None) -> list[Change]:
+        """Stage normalised values and report them as `write` events."""
+        changes = await self.tx.set_norm(parsed, src or self.source)
+        for c in changes:
+            if c.action == "normalized":
+                self.emit("write", f"{c.key} \u2192 {c.value}", key=c.key, value=c.value)
+            elif c.action == "flagged":
+                self.emit("write", f"{c.key}: {c.flag}", key=c.key, flag=c.flag)
+        return changes
+
     def child(self, agent: str) -> ToolContext:
         """The context for a tool this tool calls: same transaction, budget and activity, the
-        entries attributed to `agent` with this write's reference."""
-        return ToolContext(tx=self.tx, source=Source("agent", agent, self.source.ref),
+        entries attributed to `agent` with this write's reference. An assistant's prefix is kept
+        (`enrich/storage` → `enrich/normalizer`), so every entry of an item names the assistant."""
+        by = self.source.by or ""
+        prefix = by.split("/")[0] if self.source.kind == "agent" and "/" in by else None
+        return ToolContext(tx=self.tx, source=Source("agent", f"{prefix}/{agent}" if prefix else agent,
+                                                     self.source.ref),
                            principal=self.principal, firecrawl=self.firecrawl, emit=self.emit)
 
 

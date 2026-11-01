@@ -249,6 +249,9 @@ class StoreOptions(BaseModel):
                               description="Properties the caller writes itself from the same data "
                                           "(identity, employer); the agent may confirm them but "
                                           "not write them")
+    audit_key: str | None = Field(None, description="A text property that keeps the passage as "
+                                                    "sent, written in the same commit when the "
+                                                    "agent filed or confirmed anything")
 
 
 class StoreResult(ToolResult):
@@ -268,11 +271,6 @@ class StoreResult(ToolResult):
     evidence: dict[str, str] = Field(default_factory=dict,
                                      description="Property → the passage words its write rests on")
     normalization: NormalizeResult | None = Field(None, description="The clean-up pass")
-
-
-def _merge_list(current: Any, items: list[str]) -> list[str]:
-    base = list(current) if isinstance(current, list) else ([current] if current else [])
-    return fields.distinct([*base, *items])
 
 
 def _as_text(value: Value) -> str:
@@ -296,17 +294,21 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
     appended: set[str] = set()
 
     def put(key: str, value: Value, append: bool) -> None:
+        """Collect the proposal's writes per key; the transaction merges appends into the
+        record's current value."""
         prop = cat.get(key)
         if prop is not None and prop.type in LIST_TYPES:
             incoming = value if isinstance(value, list) else [value]
             if append or key in values:
-                values[key] = _merge_list(values.get(key, person.get(key)), incoming)
+                values[key] = fields.distinct([*values.get(key, []), *incoming])
                 appended.add(key)
             else:
                 values[key] = incoming
         else:
             text = _as_text(value)
             values[key] = f"{values[key]}\n{text}" if key in values else text
+            if append:
+                appended.add(key)
 
     for w in proposal.writes:
         put(w.key, w.value, w.action == "append")
@@ -329,7 +331,7 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
                 cat[n.key] = await properties.get(n.key)  # type: ignore[assignment]
                 result.created_properties.append(n.key)
                 ctx.tx.record_catalog(Change(key=n.key, action="property_created",
-                                             value=n.description), tag="store")
+                                             value=n.description))
                 ctx.emit("note", f"new property {n.key}: {n.description}", key=n.key)
                 put(n.key, n.value, append=False)
                 if n.evidence:
@@ -340,15 +342,15 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
                          label=n.label)
             else:
                 result.to_notes.append(n.label)
-                put(NOTES, f"{n.label}: {_as_text(n.value)}", append=False)
+                put(NOTES, f"{n.label}: {_as_text(n.value)}", append=True)
 
     if values:
-        for c in await ctx.tx.set_values(values, ctx.source, appended=appended, tag="store"):
-            if c.action in ("set", "append", "removed"):
-                ctx.emit("write", f"{c.key}: {c.action}", key=c.key, action=c.action)
+        await ctx.stage(values, append=appended)
+    if opts.audit_key and (values or result.confirmed):
+        await ctx.stage({opts.audit_key: passage.strip()[:MAX_PASSAGE_CHARS]})
     ctx.emit("step", f"{len(values)} propert{'y' if len(values) == 1 else 'ies'} staged, "
                      f"{len(result.confirmed)} confirmed, {len(result.ignored)} ignored")
     result.normalization = await normalize_tool.normalize(
         ctx.child(normalize_tool.AGENT_NAME), normalize_tool.NormalizeOptions(repair=False))
-    result.changes = ctx.tx.changes("store", "normalize", "repair")
+    result.changes = ctx.tx.changes()
     return result

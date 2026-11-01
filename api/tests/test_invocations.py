@@ -41,13 +41,13 @@ async def test_transaction_stages_values_and_norm_in_one_write(people_by_name, r
     before = await _doc(cy)
     tx = await people.Transaction.open(cy)
     assert tx is not None and not tx.dirty
-    staged = await tx.set_values({"mrr": "20k"}, SRC, tag="a")
+    staged = await tx.set_values({"mrr": "20k"}, SRC)
     assert [(c.key, c.action, c.value) for c in staged] == [("mrr", "set", "20k"),
                                                             ("mrr", "normalized", 20000)]
     assert tx.view["mrr"]["v"] == "20k"                      # later stages read the staged state
-    staged = await tx.set_norm({"stage": Parsed("Pre-seed")}, SRC, tag="b")
+    staged = await tx.set_norm({"stage": Parsed("Pre-seed")}, SRC)
     assert [(c.key, c.action, c.value) for c in staged] == [("stage", "normalized", "Pre-seed")]
-    assert tx.changes("b") == staged and len(tx.changes()) == 3
+    assert tx.changes()[-1:] == staged and len(tx.changes()) == 3
     assert (await _doc(cy))["rev"] == before["rev"]          # nothing written yet
     res = await tx.commit(None)
     after = await _doc(cy)
@@ -93,7 +93,7 @@ async def test_transaction_conflict_leaves_the_document_alone(people_by_name, mo
     bo = people_by_name["Bo"]
     before = await _doc(bo)
 
-    async def never(oid, doc, to_set):
+    async def never(oid, doc, to_set, **kw):
         return False
 
     monkeypatch.setattr(people, "_cas_write", never)
@@ -252,3 +252,48 @@ async def test_invocation_404_before_anything_starts(writer):
     assert r.status_code == 404
     r = await writer.post("/api/people/not-an-id/store", json={"passage": "x"})
     assert r.status_code == 422
+
+
+async def test_transaction_append_unions_lists_and_adds_text_lines(people_by_name):
+    cy = people_by_name["Cy"]
+    tx = await people.Transaction.open(cy)
+    await tx.set_values({"skills": ["Payments"], "notes": "met at the summit"}, SRC)
+    staged = await tx.set_values({"skills": ["payments", "Go"], "notes": "follows up next week"},
+                                 SRC, append={"skills", "notes"})
+    assert [(c.key, c.action, c.value) for c in staged] == [
+        ("skills", "append", ["Payments", "Go"]),
+        ("notes", "append", "met at the summit\nfollows up next week")]
+    # a line the text already holds appends nothing; a replace still replaces
+    assert await tx.set_values({"notes": "Met at the summit"}, SRC, append={"notes"}) == []
+    staged = await tx.set_values({"skills": ["Go"]}, SRC)
+    assert [(c.key, c.action, c.value) for c in staged] == [("skills", "set", ["Go"])]
+    await tx.commit(None)
+    doc = await _doc(cy)
+    assert doc["skills"]["v"] == ["Go"] and len(doc["skills"]["h"]) == 3
+    assert doc["notes"]["v"] == "met at the summit\nfollows up next week"
+
+
+async def test_transaction_new_creates_a_person_in_one_write(reader):
+    tx = people.Transaction.new("plus_one")
+    with pytest.raises(people.PersonError):
+        await tx.commit(None)                                 # no name yet
+    await tx.set_values({"name": "New Person", "email": "new@example.com"}, SRC)
+    res = await tx.commit(None)
+    assert res is not None
+    assert [(c.key, c.action) for c in res.changes] == [("name", "set"), ("email", "set")]
+    doc = await _doc(res.person["id"])
+    assert doc["rev"] == 1 and doc["tier"] == "plus_one" and doc["name"]["v"] == "New Person"
+    assert doc["name"]["h"][0]["src"] == SRC.doc() and doc.get("created_at")
+    person = (await reader.get(f"/api/people/{res.person['id']}")).json()
+    assert person["name"] == "New Person" and person["tier"] == "plus_one"
+
+
+def test_child_context_keeps_the_assistant_prefix():
+    from app.history import Source
+    from app.tools import ToolContext
+    tx = people.Transaction.new("member")
+    nested = ToolContext(tx=tx, source=Source("agent", "enrich/storage", "run:1/item:2")).child("normalizer")
+    assert nested.source.by == "enrich/normalizer" and nested.source.ref == "run:1/item:2"
+    assert nested.child("repair").source.by == "enrich/repair"
+    assert ToolContext(tx=tx, source=Source("agent", "repair", "t")).child("x").source.by == "x"
+    assert ToolContext(tx=tx, source=Source("ui", "sam")).child("normalizer").source.by == "normalizer"

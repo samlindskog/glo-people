@@ -11,7 +11,7 @@ registers (e.g. embeddings).
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -262,11 +262,29 @@ def _rev_filter(doc: dict | None) -> dict[str, Any]:
     return {"rev": {"$exists": False}}
 
 
-async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any]) -> bool:
-    """Apply `to_set` if the document is still at the revision we read; False otherwise."""
+async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any], *, upsert: bool = False) -> bool:
+    """Apply `to_set` if the document is still at the revision we read; False otherwise. With
+    `upsert` (a new document) the write inserts when nothing is there yet."""
     res = await db().people.update_one({"_id": oid, **_rev_filter(doc)},
-                                       {"$set": to_set, "$inc": {"rev": 1}})
-    return res.matched_count == 1
+                                       {"$set": to_set, "$inc": {"rev": 1}}, upsert=upsert)
+    return res.matched_count == 1 or res.upserted_id is not None
+
+
+def _merged(prop: Any, value: Any) -> Any:
+    """`value` appended to the property's current value: list items unioned (duplicates by
+    `fields.fold` dropped, order kept), a text added as a new line unless the text already holds
+    that line, anything else replaced."""
+    current = history.current(prop)
+    if isinstance(value, list) or isinstance(current, list):
+        cur_items = current if isinstance(current, list) else (
+            [current] if current not in (None, "") else [])
+        new_items = value if isinstance(value, list) else [value]
+        return fields.distinct([*cur_items, *new_items])
+    if current in (None, "") or not isinstance(current, str) or not isinstance(value, str):
+        return value
+    if fields.fold(value) in {fields.fold(line) for line in current.split("\n")}:
+        return current
+    return f"{current}\n{value}"
 
 
 # --- staged writes: one commit per document -----------------------------------------------------------
@@ -279,9 +297,8 @@ class _Op:
     kind: str                                     # values | norm
     data: dict[str, Any]                          # cleaned values, or parsed normalised values
     src: Source
-    tag: str = ""
     tier: str | None = None
-    appended: frozenset[str] = frozenset()        # values whose `set` is reported as `append`
+    append: frozenset[str] = frozenset()          # values merged into the current one (`_merged`)
     of_expected: dict[str, str] = field(default_factory=dict)   # norm: key → hash of the text judged
 
 
@@ -297,16 +314,17 @@ class Transaction:
     happen in the registry right away and are only *reported* here, with `record_catalog`.
     """
 
-    def __init__(self, doc: dict) -> None:
+    def __init__(self, doc: dict, *, new: bool = False) -> None:
         self.doc = doc
+        self.is_new = new
         self.ops: list[_Op] = []
-        self.catalog: list[tuple[str, Change]] = []
+        self.catalog: list[Change] = []
         self.committed = False
         self._reset()
 
     def _reset(self) -> None:
         self._to_set: dict[str, Any] = {}
-        self._changes: list[tuple[str, Change]] = []
+        self._changes: list[Change] = []
         self._set: set[str] = set()
         self._unset: set[str] = set()
         self._unchanged: set[str] = set()
@@ -317,6 +335,15 @@ class Transaction:
         """Read the document; None when the person does not exist."""
         doc = await db().people.find_one({"_id": _oid(person_id)})
         return cls(doc) if doc else None
+
+    @classmethod
+    def new(cls, tier: str) -> "Transaction":
+        """A person that does not exist yet: staged like any other, inserted by `commit` (which
+        refuses a document without a name). Its id is known from the start."""
+        _check_tier(tier)
+        now = datetime.now(UTC)
+        return cls({"_id": ObjectId(), "tier": tier, "created_at": now, "updated_at": now,
+                    "schema_version": history.SCHEMA_VERSION}, new=True)
 
     @property
     def person_id(self) -> str:
@@ -332,33 +359,32 @@ class Transaction:
 
     @property
     def dirty(self) -> bool:
-        return bool(self._to_set) or self.doc.get("schema_version") != history.SCHEMA_VERSION
+        return self.is_new or bool(self._to_set) \
+            or self.doc.get("schema_version") != history.SCHEMA_VERSION
 
-    def changes(self, *tags: str) -> list[Change]:
-        """The changes staged so far: catalog changes first, then the document's, in order;
-        with `tags`, only the ones staged under those tags."""
-        wanted = set(tags)
-        out = [c for t, c in self.catalog if not wanted or t in wanted]
-        return out + [c for t, c in self._changes if not wanted or t in wanted]
+    def changes(self) -> list[Change]:
+        """The changes staged so far: catalog changes first, then the document's, in order."""
+        return [*self.catalog, *self._changes]
 
-    def record_catalog(self, change: Change, tag: str = "") -> None:
+    def record_catalog(self, change: Change) -> None:
         """Report a registry change made on this document's behalf (property_created,
         enum_value_added); a stopped invocation uses the list to clean up."""
-        self.catalog.append((tag, change))
+        self.catalog.append(change)
 
     async def set_values(self, values: dict[str, Any], src: Source, *, tier: str | None = None,
-                         appended: frozenset[str] | set[str] = frozenset(),
-                         tag: str = "") -> list[Change]:
-        """Stage new values (None removes); returns the changes this op adds."""
+                         append: Iterable[str] = ()) -> list[Change]:
+        """Stage new values (None removes); keys in `append` are merged into the current value
+        (list items unioned, a text added as a line) instead of replacing it. Returns the changes
+        this op adds."""
         cleaned = await _clean(values)
         if "name" in cleaned and cleaned["name"] is None:
             raise PersonError("name cannot be removed")
         if tier is not None:
             _check_tier(tier)
-        op = _Op("values", cleaned, src, tag, tier, frozenset(appended))
+        op = _Op("values", cleaned, src, tier, frozenset(append))
         return await self._stage(op)
 
-    async def set_norm(self, parsed: dict[str, Parsed], src: Source, *, tag: str = "") -> list[Change]:
+    async def set_norm(self, parsed: dict[str, Parsed], src: Source) -> list[Change]:
         """Stage normalised values for typed properties; returns the changes this op adds."""
         view = self.view
         for key in parsed:
@@ -366,24 +392,26 @@ class Transaction:
             if sp is None or sp.type not in NORMALISABLE or not history.is_prop(view.get(key)):
                 raise PersonError(f"{key!r} is not a typed property of this person")
         of = {k: normalize.text_hash(history.current(view[k])) for k in parsed}
-        op = _Op("norm", dict(parsed), src, tag, of_expected=of)
+        op = _Op("norm", dict(parsed), src, of_expected=of)
         return await self._stage(op)
 
     async def _stage(self, op: _Op) -> list[Change]:
         n = len(self._changes)
         await self._apply(op)
         self.ops.append(op)
-        return [c for _, c in self._changes[n:]]
+        return self._changes[n:]
 
     async def _apply(self, op: _Op) -> None:
         base = self.view
         now = datetime.now(UTC)
         if op.kind == "values":
-            before = {k: history.jsonable(history.current(base.get(k))) for k in op.data}
-            to_set, changed, removed, unchanged = history.apply(base, op.data, op.src, now,
+            data = {k: _merged(base.get(k), v) if k in op.append and v is not None else v
+                    for k, v in op.data.items()}
+            before = {k: history.jsonable(history.current(base.get(k))) for k in data}
+            to_set, changed, removed, unchanged = history.apply(base, data, op.src, now,
                                                                 fields.SYSTEM_FIELDS)
-            changes = [Change(key=k, action="append" if k in op.appended else "set",
-                              value=op.data[k], previous=before[k]) for k in changed]
+            changes = [Change(key=k, action="append" if k in op.append else "set",
+                              value=data[k], previous=before[k]) for k in changed]
             changes += [Change(key=k, action="removed", previous=before[k]) for k in removed]
             if op.tier is not None and op.tier != base.get("tier"):
                 to_set["tier"] = op.tier
@@ -411,7 +439,7 @@ class Transaction:
             changes += more
             self._set |= set(to_set)
         self._to_set.update(to_set)
-        self._changes += [(op.tag, c) for c in changes]
+        self._changes += changes
 
     async def _replay(self, doc: dict) -> None:
         self.doc = doc
@@ -424,12 +452,16 @@ class Transaction:
         record one activity row. None when the person vanished meanwhile."""
         if self.committed:
             raise PersonError("transaction already committed")
+        if self.is_new and not history.current(self.view.get("name")):
+            raise PersonError("name is required")
         oid = self.doc["_id"]
         for _ in range(CAS_RETRIES):
             if not self.dirty:
                 break
-            if await _cas_write(oid, self.doc, {**self._to_set,
-                                                "schema_version": history.SCHEMA_VERSION}):
+            to_set = {**self._to_set, "schema_version": history.SCHEMA_VERSION}
+            if self.is_new:
+                to_set.update({k: self.doc[k] for k in ("tier", "created_at", "updated_at")})
+            if await _cas_write(oid, self.doc, to_set, upsert=self.is_new):
                 break
             fresh = await db().people.find_one({"_id": oid})
             if fresh is None:
@@ -439,9 +471,12 @@ class Transaction:
             raise ConflictError(f"person {self.person_id} is being modified concurrently; retry")
         self.committed = True
         pid = self.person_id
-        if self._value_changed:
+        if self._value_changed or self.is_new:
             await _after_write(pid)
-        if self.ops:
+        if self.is_new:
+            await activity.record("person.create", principal, pid,
+                                  {"fields": sorted(self._set), "src": self.ops[0].src.kind})
+        elif self.ops:
             action = "person.update" if any(op.kind == "values" for op in self.ops) \
                 else "person.normalize"
             await activity.record(action, principal, pid, {
@@ -452,26 +487,12 @@ class Transaction:
 
 async def create(principal: Principal, tier: str, values: dict[str, Any],
                  source: Source | None = None) -> WriteResult:
-    _check_tier(tier)
-    cleaned = await _clean(values)
-    if not cleaned.get("name"):
-        raise PersonError("name is required")
-    src = source or Source.for_rest(principal)
-    now = datetime.now(UTC)
-    present = {k: v for k, v in cleaned.items() if v is not None}
-    doc: dict[str, Any] = {k: history.new_prop(v, src, now) for k, v in present.items()}
-    doc.update({"tier": tier, "created_at": now, "updated_at": now,
-                "schema_version": history.SCHEMA_VERSION, "rev": 1})
-    norm: dict[str, Any] = {}
-    changes = [Change(key=k, action="set", value=v) for k, v in present.items()]
-    changes += await _normalize_into(doc, norm, now)
-    doc.update(norm)
-    res = await db().people.insert_one(doc)
-    pid = str(res.inserted_id)
-    await _after_write(pid)
-    await activity.record("person.create", principal, pid,
-                          {"fields": sorted(present), "src": src.kind})
-    return WriteResult(await get(pid), changes)
+    """A new person: a transaction on a document that does not exist yet, committed once."""
+    tx = Transaction.new(tier)
+    await tx.set_values(values, source or Source.for_rest(principal))
+    res = await tx.commit(principal)
+    assert res is not None
+    return res
 
 
 async def update(principal: Principal, person_id: str, values: dict[str, Any],

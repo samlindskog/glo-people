@@ -157,12 +157,17 @@ class Invocation:
 
 # --- starting and finding invocations ----------------------------------------------------------------------
 
-async def make_context(person_id: str, source: Source, principal: Principal | None = None, *,
-                       firecrawl: AsyncFirecrawl | None = None, owns_firecrawl: bool = False,
-                       sink: Sink | None = None) -> ToolContext | None:
+async def make_context(person_id: str | None, source: Source, principal: Principal | None = None,
+                       *, tier: str | None = None, firecrawl: AsyncFirecrawl | None = None,
+                       owns_firecrawl: bool = False, sink: Sink | None = None) -> ToolContext | None:
     """Open the record's transaction and build the tool's context; None when the person does not
-    exist (so a surface answers 404 before anything starts). `sink` receives every event."""
-    tx = await people.Transaction.open(person_id)
+    exist (so a surface answers 404 before anything starts). With `person_id` None the context is
+    for a person that does not exist yet (`tier` required): the first commit creates it. `sink`
+    receives every event."""
+    if person_id is None:
+        tx: people.Transaction | None = people.Transaction.new(tier or "member")
+    else:
+        tx = await people.Transaction.open(person_id)
     if tx is None:
         return None
     ctx = ToolContext(tx=tx, source=source, principal=principal, firecrawl=firecrawl,
@@ -280,7 +285,7 @@ async def _drive(inv: Invocation, tool: Callable[..., Awaitable[ToolResult | Non
 
 async def _rollback(ctx: ToolContext) -> None:
     """Best effort after a stop or failure: registry entries the tool created and nothing uses."""
-    for _, change in ctx.tx.catalog:
+    for change in ctx.tx.catalog:
         try:
             if change.action == "property_created":
                 await properties.remove_unused(change.key)

@@ -204,7 +204,7 @@ async def normalize(ctx: ToolContext, opts: NormalizeOptions | None = None) -> N
         result.repair = await repair_tool.repair(
             ctx.child(repair_tool.AGENT_NAME),
             RepairOptions(allocate=opts.allocate))
-    result.changes = ctx.tx.changes("normalize", "repair")
+    result.changes = ctx.tx.changes()
     return result
 
 
@@ -213,7 +213,7 @@ async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeRes
     doc = ctx.tx.view
     parsed = await people.pending_normalization(doc)
     if parsed:
-        changes = await ctx.tx.set_norm(parsed, people.NORMALIZE_SRC, tag="normalize")
+        changes = await ctx.stage_norm(parsed, src=people.NORMALIZE_SRC)
         ctx.emit("step", f"parser: {len(parsed)} typed value{'s' if len(parsed) != 1 else ''} "
                          f"re-read, {len(changes)} changed", keys=sorted(parsed))
         doc = ctx.tx.view
@@ -268,8 +268,7 @@ async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeRes
             if allocated:
                 allocated_total += 1
                 result.allocated.setdefault(m.field, []).append(canon)
-                ctx.tx.record_catalog(Change(key=m.field, action="enum_value_added", value=canon),
-                                      tag="normalize")
+                ctx.tx.record_catalog(Change(key=m.field, action="enum_value_added", value=canon))
                 ctx.emit("note", f"{m.field}: new value {canon!r}", key=m.field, value=canon)
             if item.type == "enum" and await properties.add_alias(m.field, canon, item.text):
                 result.merged[m.field] = canon
@@ -277,9 +276,4 @@ async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeRes
             decided[m.field] = Parsed(accepted if item.type == "enum_list" else accepted[0])
     result.unmapped = sorted(i.field for i in items if i.field not in decided)
     if decided:
-        changes = await ctx.tx.set_norm(decided, ctx.source, tag="normalize")
-        for c in changes:
-            if c.action == "normalized":
-                ctx.emit("write", f"{c.key} → {c.value}", key=c.key, value=c.value)
-            elif c.action == "flagged":
-                ctx.emit("write", f"{c.key}: {c.flag}", key=c.key, flag=c.flag)
+        await ctx.stage_norm(decided)

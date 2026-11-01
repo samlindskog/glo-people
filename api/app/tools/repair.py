@@ -274,12 +274,12 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         ctx.emit("step", "looks wrong: " + "; ".join(result.signals), signals=result.signals)
 
     if opts.mechanical and (fixes := mechanical_fixes(doc)):
-        await ctx.tx.set_values(fixes, Source("system", "repair"), tag="repair")
+        await ctx.stage(fixes, src=Source("system", "repair"))
         result.mechanical = sorted(fixes)
         ctx.emit("write", "mechanical fixes: " + ", ".join(result.mechanical), keys=result.mechanical)
         doc = ctx.tx.view
     if not opts.agent:
-        result.changes = ctx.tx.changes("repair")
+        result.changes = ctx.tx.changes()
         return result
 
     result.agent_called = True
@@ -308,11 +308,12 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         result.rejected.append(f"kind {kind_proposed!r} (allocation off)")
         kind = PERSON if names.tokens(current_name) else UNIDENTIFIABLE
     if allocated:
-        ctx.tx.record_catalog(Change(key=KIND, action="enum_value_added", value=kind), tag="repair")
+        ctx.tx.record_catalog(Change(key=KIND, action="enum_value_added", value=kind))
         ctx.emit("note", f"new record kind {kind!r}", value=kind)
     result.kind = kind
 
     values: dict[str, Any] = {}
+    moves: dict[str, str] = {}
     if _cur(doc, KIND) != kind:
         values[KIND] = kind
     for m in verdict.misfiled[:opts.max_edits]:
@@ -320,16 +321,17 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         if not text or m.key in values:
             continue
         if m.move_to:
-            target = _cur(doc, m.move_to)
-            values[m.move_to] = f"{fields.text_of(target)}\n{text}" if target else text
+            moves[m.move_to] = f"{moves[m.move_to]}\n{text}" if m.move_to in moves else text
         values[m.key] = None
-        ctx.emit("write", f"{m.key} misfiled: " + (f"moved to {m.move_to}" if m.move_to else "removed"),
+        ctx.emit("note", f"{m.key} misfiled: " + (f"moved to {m.move_to}" if m.move_to else "removed"),
                  key=m.key, move_to=m.move_to)
     if name:
         values["name"] = name
     if values:
-        await ctx.tx.set_values(values, ctx.source, tag="repair")
-    result.changes = ctx.tx.changes("repair")
+        await ctx.stage(values)
+    if moves:
+        await ctx.stage(moves, append=set(moves))      # the text joins the target as new lines
+    result.changes = ctx.tx.changes()
     ctx.emit("step", f"record kind: {kind}" + (f"; name → {name} ({name_source})" if name else ""),
              record_kind=kind, name=name, name_source=name_source)
     return result
