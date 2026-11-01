@@ -1,7 +1,9 @@
 """Credit discipline for the enrichment assistant: the per-item caps and what each step may spend."""
 
 from app.assistants.enrich.models import EnrichOptions
-from app.integrations.firecrawl import Budget
+from app.assistants.enrich.providers import PROVIDERS
+from app.integrations import github
+from app.integrations.firecrawl import SCRAPE_CREDITS, SEARCH_CREDITS, Budget
 
 CAPS = {"max_scrapes": 4, "max_searches": 1, "max_credits": 60,
         "sites": 2, "follow": 1, "company_pages": 2}
@@ -16,3 +18,12 @@ def budget_for(options: EnrichOptions) -> Budget:
 
 def item_cap(options: EnrichOptions) -> int:
     return CAPS["max_credits"]
+
+
+def worst_case(options: EnrichOptions) -> int:
+    """The most one item can spend with these options: every provider matched, the GitHub tool,
+    every site and company page, the one search. Must stay within `CAPS["max_credits"]` (a test
+    holds the line), so a new provider's price is checked before it joins the table."""
+    return (sum(PROVIDERS[k].credits for k in dict.fromkeys(options.providers))
+            + github.USER_CREDITS + (CAPS["sites"] + CAPS["company_pages"]) * SCRAPE_CREDITS
+            + CAPS["max_searches"] * SEARCH_CREDITS)

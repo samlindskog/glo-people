@@ -126,6 +126,41 @@ async def drop_property(keys: list[str], yes: bool) -> None:
               f"{'deleted' if removed else 'absent'}")
 
 
+async def list_providers(alexandria: bool, categories: list[str], providers: list[str] | None,
+                         limit: int) -> None:
+    """The data providers the enrich ladder can ask (the `providers` run option), then, with
+    --alexandria, the Firecrawl catalogue's live prices and inputs for the people-data tools (a
+    free call): the place to read a candidate provider's price before it joins the table."""
+    from app.assistants.enrich.providers import PROVIDERS
+    from app.integrations.firecrawl import AsyncFirecrawl
+
+    print("Providers of the enrich assistant (run option `providers`, in this order):")
+    for spec in PROVIDERS.values():
+        print(f"  {spec.key:16} {spec.label:14} {spec.source:34} {spec.credits} credits per match")
+    if not alexandria:
+        return
+    client = AsyncFirecrawl()
+    try:
+        tools = await client.find_tools(providers=providers,
+                                        categories=None if providers else categories, limit=limit)
+    finally:
+        await client.aclose()
+    print(f"\nAlexandria catalogue: {len(tools)} tool(s) for {providers or categories}")
+    for t in tools:
+        per = " per record" if t.get("perRecord") else ""
+        print(f"\n{t.get('provider')}/{t.get('capability')}  —  {t.get('creditsCost', '?')} "
+              f"credits{per}")
+        if desc := t.get("description"):
+            print(f"  {' '.join(str(desc).split())[:300]}")
+        if one_of := t.get("requiresOneOf"):
+            print(f"  needs one of: {' | '.join(', '.join(group) for group in one_of)}")
+        for o in t.get("options") or []:
+            if isinstance(o, dict):
+                flag = " (required)" if o.get("required") else ""
+                desc = " ".join(str(o.get("description") or "").split())[:140]
+                print(f"    {o.get('name')}{flag} [{o.get('type', '')}]: {desc}")
+
+
 async def migrate_history(dry_run: bool) -> None:
     n = await people.migrate_legacy(dry_run=dry_run)
     print(f"{'would migrate' if dry_run else 'migrated'} {n} people documents to field history")
@@ -223,6 +258,14 @@ def main() -> None:
     dp = sub.add_parser("drop-property", help="delete properties (documents, vectors, registry)")
     dp.add_argument("keys", nargs="+")
     dp.add_argument("--yes", action="store_true", help="without it: list the holders only")
+    pv = sub.add_parser("providers", help="the enrich ladder's data providers; --alexandria adds "
+                                          "the Firecrawl catalogue's live prices and inputs (free)")
+    pv.add_argument("--alexandria", action="store_true")
+    pv.add_argument("--category", action="append", default=None,
+                    help="catalogue category (repeatable; default: people)")
+    pv.add_argument("--provider", action="append", default=None,
+                    help="only these providers (repeatable)")
+    pv.add_argument("--limit", type=int, default=50)
     args = p.parse_args()
 
     async def run() -> None:
@@ -246,6 +289,9 @@ def main() -> None:
                     await migrate_history(args.dry_run)
                 case "drop-property":
                     await drop_property(args.keys, args.yes)
+                case "providers":
+                    await list_providers(args.alexandria, args.category or ["people"],
+                                         args.provider, args.limit)
         finally:
             await mongo.close()
             await db.dispose()

@@ -28,9 +28,10 @@ from app.assistants.context import AssistantDeps
 from app.assistants.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
 from app.assistants.enrich.models import EnrichOptions
 from app.assistants.enrich.passage import Passage
+from app.assistants.enrich.providers import PROVIDERS
 from app.auth import Principal
 from app.config import get_settings
-from app.integrations import fullenrich, github
+from app.integrations import github
 from app.integrations.firecrawl import (
     AsyncFirecrawl,
     BudgetExceeded,
@@ -40,7 +41,7 @@ from app.integrations.firecrawl import (
     NotFound,
     TermsRequired,
 )
-from app.integrations.fullenrich import LinkedInProfile
+from app.integrations.profile import LinkedInProfile, profile_lines, profile_values
 from app.tools import company as company_tool
 from app.tools import site as site_tool
 from app.tools import store as store_tool
@@ -88,7 +89,8 @@ class State:
     passage: Passage = field(default_factory=Passage)   # what the storage step files
     redo: bool = False      # an earlier attempt already ran the ladder to the end for this person
     result: dict[str, Any] = field(default_factory=lambda: {
-        "linkedin": "absent", "company": "absent", "storage": "skipped", "not_found": []})
+        "linkedin": "absent", "company": "absent", "storage": "skipped", "not_found": [],
+        "providers": {}})
 
 
 def _has_url(deps: AssistantDeps, key: str, url: str) -> bool:
@@ -126,8 +128,7 @@ async def _ladder(deps: AssistantDeps) -> dict[str, Any]:
     await _step_github_and_links(deps, st)
     await _step_company(deps, st)
     await _step_store(deps, st)
-    return {**st.result, "providers": {fullenrich.PROVIDER: st.result["linkedin"]},
-            "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
+    return {**st.result, "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
             "skipped": deps.skipped}
 
 
@@ -184,32 +185,32 @@ async def _recently_enriched(deps: AssistantDeps, options: EnrichOptions) -> dic
             "changes": [], "skipped": deps.skipped}
 
 
-async def _provider_call(deps: AssistantDeps, st: State, step: str, call):
-    """Run one data-provider call with the ladder's error policy: a miss is `not_found`,
-    unaccepted provider terms or a provider error are `error` (the rest of the ladder still runs),
-    an exhausted item budget is a skipped step."""
+async def _provider_call(deps: AssistantDeps, step: str, call, who: str = "the data provider"):
+    """Run one data-provider call with the ladder's error policy: `(result, "ok")`, or None with
+    the status: a miss is `not_found`, an exhausted item budget `skipped`, unaccepted provider
+    terms or a provider error `error` (the rest of the ladder still runs)."""
     try:
-        return await call()
+        return await call(), "ok"
     except NotFound:
-        st.result[step] = "not_found"
-        st.result["not_found"].append(step)
-        deps.skip(step, "the data provider has no record")
+        deps.skip(step, f"{who} has no record")
+        return None, "not_found"
     except BudgetExceeded as e:
-        st.result[step] = "skipped"
         deps.skip(step, str(e))
+        return None, "skipped"
     except TermsRequired as e:
-        st.result[step] = "error"
-        deps.skip(step, f"{e}" + (f" Accept them at {e.url}" if e.url else ""))
+        deps.skip(step, f"{who}: {e}" + (f" Accept them at {e.url}" if e.url else ""))
+        return None, "error"
     except NotConfigured:
         raise
     except FirecrawlError as e:
-        st.result[step] = "error"
-        deps.skip(step, str(e))
-    return None
+        deps.skip(step, f"{who}: {e}")
+        return None, "error"
 
 
 async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
-    """Step 1: the person's FullEnrich record (exact LinkedIn URL, 5 credits; a miss is free)."""
+    """Step 1: the person's record at each data provider the run names, in order (exact LinkedIn
+    URL; FullEnrich 5 credits; a miss is free). The first match is the profile the direct writes
+    and the later steps rest on; every match adds its facts to the passage."""
     li = linkedin_profile(deps.current("linkedin"))
     if not li:
         deps.skip("linkedin", "no linkedin.com/in URL on the record")
@@ -223,30 +224,37 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
         st.result["linkedin"] = "skipped"
         st.redo = True
         return
-    deps.emit("step", f"LinkedIn: asking the data provider about {li}")
     if "linkedin" in st.previously_missing:
         deps.skip("linkedin", "no provider record last time; not retried within the TTL")
         st.result["linkedin"] = "not_found"
         return
-    with logfire.span("linkedin_reader"):
-        profile = await _provider_call(deps, st, "linkedin",
-                                       lambda: fullenrich.match(deps.firecrawl, li))
-    if profile is None:
-        if st.result["linkedin"] == "absent":
-            st.result["linkedin"] = "not_found"
+    statuses: dict[str, str] = st.result["providers"]
+    for spec in (PROVIDERS[k] for k in dict.fromkeys(st.options.providers)):
+        deps.emit("step", f"LinkedIn: asking {spec.label} about {li}")
+        with logfire.span("linkedin_reader {provider}", provider=spec.key):
+            profile, statuses[spec.key] = await _provider_call(
+                deps, "linkedin", lambda match=spec.match: match(deps.firecrawl, li), spec.label)
+        if profile is None:
+            if statuses[spec.key] == "ok":          # a clean miss: the provider has no record
+                statuses[spec.key] = "not_found"
+                deps.skip("linkedin", f"{spec.label} has no record for this profile")
+            continue
+        statuses[spec.key] = "matched"
+        st.passage.add(spec.source, "LinkedIn profile", profile_lines(profile))
+        if st.profile is None:
+            st.profile = profile
+            st.result["linkedin"] = "matched"
+            st.result["linkedin_provider"] = spec.key
+            if github_url := github_profile(profile.github_url):
+                st.github_urls.append(github_url)
+            st.related.extend(profile.other_links)
+            await deps.write("linkedin_reader", profile_values(profile, deps.person or {}))
+    if st.profile is None:
+        # the step's status is the worst of the providers': an error beats a miss
+        st.result["linkedin"] = ("error" if "error" in statuses.values() else
+                                 "skipped" if "skipped" in statuses.values() else "not_found")
+        if st.result["linkedin"] == "not_found":
             st.result["not_found"].append("linkedin")
-            deps.skip("linkedin", "no data provider has a record for this profile")
-        return
-    st.result["linkedin"] = "matched"
-    st.result["linkedin_provider"] = fullenrich.PROVIDER
-    st.profile = profile
-    github_url = github_profile(profile.github_url)
-    if github_url:
-        st.github_urls.append(github_url)
-    st.related.extend(profile.other_links)
-    await deps.write("linkedin_reader", fullenrich.profile_values(profile, deps.person or {}))
-    st.passage.add(f"{fullenrich.PROVIDER}/people/match", "LinkedIn profile",
-                   fullenrich.profile_lines(profile))
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
@@ -335,9 +343,13 @@ async def _github_facts(deps: AssistantDeps, st: State, github_url: str) -> None
         deps.skip("github", "already summarised for this account")
         return
     with logfire.span("github {url}", url=github_url):
-        found = await _provider_call(deps, st, "github",
-                                     lambda: github.lookup(deps.firecrawl, github_url))
+        found, status = await _provider_call(deps, "github",
+                                             lambda: github.lookup(deps.firecrawl, github_url),
+                                             "the GitHub data tool")
     if not found:
+        st.result["github"] = status
+        if status == "not_found":
+            st.result["not_found"].append("github")
         return
     st.result["github"] = "matched"
     values: dict[str, Any] = {"github_summary": _clip(found.summary())}

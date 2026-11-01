@@ -235,6 +235,24 @@ class AsyncFirecrawl:
         return AlexandriaResult(provider=provider, capability=capability,
                                 data=item.get("data"), credits=credits)
 
+    async def find_tools(self, *, providers: list[str] | None = None,
+                         categories: list[str] | None = None,
+                         capabilities: list[str] | None = None, level: str = "tools",
+                         expand: tuple[str, ...] = ("options",), limit: int = 50,
+                         offset: int = 0) -> list[dict[str, Any]]:
+        """The Alexandria catalogue (free). At the `tools` level: the tools matching the filters,
+        each with `provider`, `capability`, `description`, `creditsCost` (`perRecord`),
+        `requiresOneOf` and, expanded, its `options` (inputs). At the `providers` level: the
+        providers of a category (`expand` is not accepted there). Read a provider's live price
+        here before adding it to the enrich ladder."""
+        options = {k: v for k, v in {"providers": providers, "categories": categories,
+                                     "capabilities": capabilities, "level": level,
+                                     "expand": list(expand) if level == "tools" else None,
+                                     "limit": limit, "offset": offset}.items() if v}
+        res = await self.alexandria("firecrawl", "find-tools", options, expected_credits=0)
+        items = res.data.get("items") if isinstance(res.data, dict) else res.data
+        return [t for t in items or [] if isinstance(t, dict)]
+
     async def search(self, query: str, limit: int = 5) -> list[SearchHit]:
         if self.budget:
             self.budget.check_search()

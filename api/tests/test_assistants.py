@@ -333,7 +333,8 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert "linkedin" in res["not_found"] and "github" in res["not_found"]
     assert model_calls["site"] == 1
     steps = {s["step"]: s["reason"] for s in res["skipped"]}
-    assert "no data provider" in steps["linkedin"]
+    assert steps["linkedin"] == "FullEnrich has no record for this profile"
+    assert res["providers"] == {"fullenrich": "not_found"}
     assert steps["github"] == "no GitHub link on the profile or sites"
     # The LinkedIn miss cost nothing: one site scrape plus the one company search allowed.
     assert item["credits"] == SCRAPE_CREDITS + SEARCH_CREDITS
