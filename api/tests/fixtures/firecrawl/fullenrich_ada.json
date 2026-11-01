@@ -27,24 +27,35 @@
         "url": "https://www.linkedin.com/company/payrail"
        }
       }
-     }
+     },
+     "start_at": "2021-03-01T00:00:00Z"
     },
     "all": [
      {
       "title": "CEO & Co-founder",
+      "seniority": "Founder",
       "is_current": true,
-      "start_date": "2021-03-01",
-      "end_date": null,
+      "start_at": "2021-03-01T00:00:00Z",
       "company": {
        "id": "c-payrail",
-       "name": "PayRail"
+       "name": "PayRail",
+       "website": "payrail.io"
       }
      },
      {
       "title": "Product Lead",
-      "is_current": false,
-      "start_date": "2018-01-01",
-      "end_date": "2021-02-01",
+      "seniority": "Lead",
+      "start_at": "2018-01-01T00:00:00Z",
+      "end_at": "2021-02-01T00:00:00Z",
+      "company": {
+       "name": "Paystack"
+      }
+     },
+     {
+      "title": "Product Lead",
+      "seniority": "Lead",
+      "start_at": "2018-01-01T00:00:00Z",
+      "end_at": "2021-02-01T00:00:00Z",
       "company": {
        "name": "Paystack"
       }
@@ -68,18 +79,23 @@
    },
    "educations": [
     {
-     "school": {
-      "name": "University of Lagos"
-     },
-     "degree": "BSc",
-     "field_of_study": "Computer Science",
-     "start_date": "2010-09-01",
-     "end_date": "2014-07-01"
+     "school_name": "University of Lagos",
+     "degree": "BSc Computer Science"
+    },
+    {
+     "school_name": "University of Lagos",
+     "degree": "BSc Computer Science"
     }
    ],
    "languages": [
-    "English",
-    "Yoruba"
+    {
+     "language": "English",
+     "proficiency": "NATIVE_OR_BILINGUAL"
+    },
+    {
+     "language": "Yoruba",
+     "proficiency": "PROFESSIONAL_WORKING"
+    }
    ],
    "skills": [
     "Payments",

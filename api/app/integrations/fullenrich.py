@@ -3,6 +3,10 @@
 `fullenrich/people/match` resolves an exact LinkedIn URL for 5 credits; a miss costs nothing.
 The whole record is mapped into the shared `LinkedInProfile` deterministically: identity, headline,
 location, current position, the work history, education, languages and skills, and the links.
+Record shape (read from a live record, 2026-10-31): `description` is the about text;
+`employment.all[]` has `title`, `company{name, website, domain, description, …}`, `is_current`,
+`start_at`/`end_at` (ISO timestamps); `educations[]` has `school_name` and sometimes `degree` (no
+dates); `languages[]` has `language` and `proficiency`; `skills` is a list of strings.
 """
 
 from typing import Any
@@ -40,7 +44,7 @@ def _pick(d: Any, *keys: str) -> Any:
 def _name(v: Any) -> str | None:
     """A provider value that is a string or an object with a name."""
     if isinstance(v, dict):
-        v = _pick(v, "name", "title", "label")
+        v = _pick(v, "name", "language", "title", "label")
     return str(v) if v not in (None, "") else None
 
 
@@ -51,17 +55,17 @@ def _names(values: Any) -> list[str]:
 def _position(e: dict[str, Any]) -> Position:
     return Position(title=_name(_pick(e, "title", "position", "role")),
                     company=_name(_pick(e, "company", "company_name", "organization")),
-                    start=_name(_pick(e, "start_date", "start", "started_at", "from")),
-                    end=_name(_pick(e, "end_date", "end", "ended_at", "to")),
+                    start=_name(_pick(e, "start_at", "start_date", "start", "started_at", "from")),
+                    end=_name(_pick(e, "end_at", "end_date", "end", "ended_at", "to")),
                     is_current=bool(e.get("is_current")))
 
 
 def _education(e: dict[str, Any]) -> Education:
-    return Education(school=_name(_pick(e, "school", "school_name", "institution", "university")),
+    return Education(school=_name(_pick(e, "school_name", "school", "institution", "university")),
                      degree=_name(_pick(e, "degree", "degree_name")),
                      field=_name(_pick(e, "field_of_study", "field", "major")),
-                     start=_name(_pick(e, "start_date", "start", "from")),
-                     end=_name(_pick(e, "end_date", "end", "to")))
+                     start=_name(_pick(e, "start_at", "start_date", "start", "from")),
+                     end=_name(_pick(e, "end_at", "end_date", "end", "to")))
 
 
 def from_record(rec: dict[str, Any]) -> LinkedInProfile:

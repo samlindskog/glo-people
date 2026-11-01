@@ -12,7 +12,10 @@ MIN_PAGE_CHARS = 200          # a page shorter than this is not worth an LLM cal
 
 
 def budget_for(options: EnrichOptions) -> Budget:
-    return Budget(max_scrapes=CAPS["max_scrapes"], max_searches=CAPS["max_searches"],
+    """The item's budget: `max_scrapes` page scrapes plus one data-tool call per provider asked
+    and one for GitHub (data-tool calls go through the same counter), one search, the credit cap."""
+    tool_calls = len(dict.fromkeys(options.providers)) + 1
+    return Budget(max_scrapes=CAPS["max_scrapes"] + tool_calls, max_searches=CAPS["max_searches"],
                   max_credits=CAPS["max_credits"])
 
 

@@ -65,7 +65,7 @@ the details in a "How it works" toggle on the card.
 | Assistant | Scope | Items | Item result |
 |---|---|---|---|
 | ask | single (`people:read`) | the question (`options.question`, tuning, tier, filters) | `{text, citations, request, rationale, total, results, search_id}`; MCP `ask_people` calls `ask()` directly for a synchronous answer |
-| enrich | people (selector `linkedin`) | one per person | `{text, changes, skipped, not_found, storage, passage, passage_hash, stored, confirmed, providers, credits, …}`; identifiers are written directly, everything prose- or tag-like from the providers and the site reader is one labelled passage the last step files through the store tool (`max_new` = the run's `max_new_properties`, default 0; `overflow="ignore"`) and keeps on the record as `enrichment_passage`; a redo skips a paid step whose entry is already on the record (TTL), a refresh whose passage is unchanged makes no storage call |
+| enrich | people (selector `linkedin`) | one per person | `{text, changes, skipped, not_found, storage, passage, passage_hash, stored, confirmed, providers, credits, …}`; the data providers (`enrich/providers.py`: FullEnrich, People Data Labs opt-in; `options.providers`) are asked in order and `budget.worst_case` must fit the item cap; identifiers are written directly, everything prose- or tag-like from the providers and the site reader is one labelled passage the last step files through the store tool (`max_new` = the run's `max_new_properties`, default 0; `overflow="ignore"`) and keeps on the record as `enrichment_passage`; a redo skips a paid step whose entry is already on the record (TTL), a refresh whose passage is unchanged makes no storage call |
 | normalize | people (selector `name`) | one per person | `{text, changes, agent_called, unmapped, merged, allocated, rejected, repair}` |
 | import | batches | `ImportOptions{tier, batch, embed}`; the surface parses the CSV (`importer.parse_csv`), creates the properties and cuts the rows into items (`import_csv.prepare_csv`) | `{text, inserted, updated, embedded, people}` per batch (`people.upsert_imported` + `embeddings.sync_people`) |
 | embed | batches | `EmbedOptions{fields, batch}`; everyone or `person_ids`; property-name vectors synced in `prepare` | `{text, vectors}` per batch |
@@ -73,7 +73,10 @@ the details in a "How it works" toggle on the card.
 
 `python -m app.cli import|embed|normalize --all` create these runs and execute them in the CLI
 process (`worker = cli:<pid>`), printing the events; the API's scheduler leaves a run alone while
-its owner heartbeats.
+its owner heartbeats. Other CLI commands: `properties` (the catalog with coverage), `drop-property
+<key>… [--yes]` (removes test leftovers: documents, vectors, registry; refuses spec keys),
+`providers [--alexandria]` (the enrich ladder's provider table and, free, the Firecrawl catalogue's
+people-data tools with live prices and inputs).
 
 ### Runs
 

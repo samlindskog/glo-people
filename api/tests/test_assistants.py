@@ -42,6 +42,7 @@ from tests.conftest import import_people
 
 FIX = Path(__file__).parent / "fixtures" / "firecrawl"
 LINKEDIN_CREDITS = 5    # fullenrich/people/match
+PDL_CREDITS = 1         # people-data-labs/person/enrich
 GITHUB_CREDITS = 5      # github-com/repositories/user
 
 PEOPLE = """Name,Company,Location,LinkedIn,Website,Bio
@@ -57,7 +58,7 @@ EXPECTED_PASSAGE = """\
 about: Founder of PayRail. Previously Paystack and Stripe.
 title_enriched: CEO & Co-founder
 experience: CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack (2018–2021)
-education: BSc Computer Science, University of Lagos (2010–2014)
+education: BSc Computer Science, University of Lagos
 skills: Payments; Fintech
 languages: English; Yoruba
 # Personal site https://adaokafor.dev (site_reader)
@@ -118,6 +119,13 @@ class FakeFirecrawl(AsyncFirecrawl):
                 data["people"][0].update(full_name=None, first_name=None, last_name=None)
                 return AlexandriaResult(provider, capability, data, LINKEDIN_CREDITS)
             return AlexandriaResult(provider, capability, {"people": []}, 0)
+        if target == "people-data-labs/person/enrich":
+            assert options["min_likelihood"] == 8
+            if url_key(options["profile"]) == url_key("https://www.linkedin.com/in/adaokafor"):
+                self.budget.charge("scrape", target, PDL_CREDITS)
+                return AlexandriaResult(provider, capability,
+                                        json.loads((FIX / "pdl_ada.json").read_text()), PDL_CREDITS)
+            raise NotFound("not_found")
         if target == "github-com/repositories/user":
             if url_key(options["url"]) == url_key("https://github.com/adaok"):
                 self.budget.charge("scrape", target, GITHUB_CREDITS)
@@ -273,7 +281,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "title_enriched": "CEO & Co-founder",
         "experience": "CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack "
                       "(2018–2021)",
-        "education": "BSc Computer Science, University of Lagos (2010–2014)",
+        "education": "BSc Computer Science, University of Lagos",      # FullEnrich dates no degrees
         "skills": ["Payments", "Fintech"],
         "languages": ["English", "Yoruba"],
         "one_liner": "Builds payments infrastructure.",
@@ -320,6 +328,9 @@ async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, r
     before = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()["history"]
     third = await run_for(writer, [people["Ada Okafor"]], refresh=True)
     assert third["items"][0]["status"] == "done" and third["credits_used"] == first["credits_used"]
+    # the company site the first run wrote is not read again as a candidate personal site
+    assert [c for c in FakeFirecrawl.calls if c[0] == "scrape"].count(("scrape", "https://payrail.io")) == 2
+    assert third["items"][0]["result"]["storage"] == "unchanged"
     after = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()["history"]
     assert {k: len(v) for k, v in after.items()} == {k: len(v) for k, v in before.items()}
     assert written(third["items"][0]["result"]) == {}
@@ -384,8 +395,38 @@ async def test_redo_pays_linkedin_again_only_when_the_facts_were_not_filed(write
     assert res["linkedin"] == "skipped" and res["storage"] == "skipped"
     assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
     assert {s["step"]: s["reason"] for s in res["skipped"]}["storage"] == "filed by the earlier attempt"
-    # the GitHub account and the company are already on the record too: only the sites are re-read
-    assert run["credits_used"] == 2 * SCRAPE_CREDITS
+    # the GitHub account and the company are already on the record too: only her own site is
+    # re-read (the company site the first run wrote is not a personal-site candidate)
+    assert run["credits_used"] == SCRAPE_CREDITS
+
+
+async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, people):
+    run = await run_for(writer, [people["Ada Okafor"]],
+                        providers=["fullenrich", "people-data-labs"])
+    item = run["items"][0]
+    res = item["result"]
+    assert item["status"] == "done", item
+    assert res["providers"] == {"fullenrich": "matched", "people-data-labs": "matched"}
+    assert res["linkedin_provider"] == "fullenrich"            # the first match is the profile
+    assert item["credits"] == LINKEDIN_CREDITS + PDL_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
+    w = written(res)
+    assert w["interests"] == ["fintech policy", "open source"]              # PDL only
+    assert w["skills"] == ["Payments", "Fintech", "python", "go"]           # unioned, fold-deduped
+    assert w["languages"] == ["English", "Yoruba"]
+    assert w["about"] == "Founder of PayRail. Previously Paystack and Stripe."   # first text wins
+    assert ("# LinkedIn profile (people-data-labs/person/enrich)\n"
+            "interests: fintech policy; open source\n# Personal site") in res["passage"]
+    assert res["stored"]["skills"]["provider"] == ("fullenrich/people/match, "
+                                                   "people-data-labs/person/enrich")
+    dropped = [s["reason"] for s in res["skipped"] if s["step"] == "storage"]
+    assert "about: a second value, from people-data-labs/person/enrich, was not filed" in dropped
+    assert len(dropped) == 4                                     # about, title, experience, education
+    assert model_calls == {"site": 1, "company": 2, "storage": 1}
+    # a person PDL does not know: a free miss, FullEnrich's facts are filed as usual
+    run = await run_for(writer, [people["Bo Chen"]], providers=["people-data-labs"])
+    res = run["items"][0]["result"]
+    assert res["providers"] == {"people-data-labs": "not_found"} and res["linkedin"] == "not_found"
+    assert run["credits_used"] == SCRAPE_CREDITS + SEARCH_CREDITS
 
 
 async def test_max_new_properties_reaches_the_storage_tool(writer, people, monkeypatch):

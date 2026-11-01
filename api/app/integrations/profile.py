@@ -3,6 +3,7 @@ and how one is turned into record values: `profile_values` for the deterministic
 (identifiers), `profile_lines` for the labelled lines the enrich assistant hands to the storage
 agent. Pure data: no provider calls, no app-level decisions."""
 
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -106,6 +107,11 @@ def education_text(e: Education) -> str:
     return f"{head} ({years})" if head and years else head
 
 
+def _distinct(texts: Iterable[str]) -> list[str]:
+    """Non-empty texts, first occurrence kept (providers repeat an entry now and then)."""
+    return [t for t in dict.fromkeys(texts) if t]
+
+
 def profile_lines(profile: LinkedInProfile) -> list[Line]:
     """The profile's facts as `(property key, value)` lines for the storage agent: the about text,
     the current title, the work history and education as one clause per entry, and the list
@@ -115,9 +121,9 @@ def profile_lines(profile: LinkedInProfile) -> list[Line]:
         lines.append(("about", about))
     if title := _clean(profile.current_title):
         lines.append(("title_enriched", title))
-    if positions := [t for t in map(position_text, profile.experience) if t]:
+    if positions := _distinct(map(position_text, profile.experience)):
         lines.append(("experience", "; ".join(positions)))
-    if schools := [t for t in map(education_text, profile.education) if t]:
+    if schools := _distinct(map(education_text, profile.education)):
         lines.append(("education", "; ".join(schools)))
     for key in LIST_KEYS:
         if items := [_clean(v) for v in getattr(profile, key) if _clean(v)]:

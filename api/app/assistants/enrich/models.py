@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ProviderKey = Literal["fullenrich"]      # grows with each provider in enrich/providers.py
+ProviderKey = Literal["fullenrich", "people-data-labs"]   # one per row of enrich/providers.py
 
 
 class EnrichOptions(BaseModel):

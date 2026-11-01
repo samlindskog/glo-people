@@ -258,9 +258,16 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
+    """The profile's personal sites plus every website on the record, except the ones the company
+    step itself wrote (a company site is not the person's own; reading it again on a refresh
+    would cost a page and a model call for nothing)."""
+    company_sites = {url_key(e["v"]) for e in ((deps.person or {}).get("history") or {})
+                     .get("website", []) if isinstance(e.get("v"), str)
+                     and (e.get("src") or {}).get("by") == f"{ASSISTANT}/{company_tool.AGENT_NAME}"}
     raws = [*(st.profile.personal_sites if st.profile else []),
             *split_urls(deps.current("website")),
             *(u for v in deps.history_values("website") for u in split_urls(v))]
+    raws = [r for r in raws if url_key(r) not in company_sites]
     out: list[str] = []
     for raw in raws:
         n = normalize_url(raw)

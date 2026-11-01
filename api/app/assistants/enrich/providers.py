@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import get_args
 
 from app.assistants.enrich.models import ProviderKey
-from app.integrations import fullenrich
+from app.integrations import fullenrich, pdl
 from app.integrations.firecrawl import AsyncFirecrawl
 from app.integrations.profile import LinkedInProfile
 
@@ -33,6 +33,10 @@ class ProviderSpec:
 PROVIDERS: dict[ProviderKey, ProviderSpec] = {
     "fullenrich": ProviderSpec(key="fullenrich", label="FullEnrich", capability="people/match",
                                credits=fullenrich.MATCH_CREDITS, match=fullenrich.match),
+    # off by default: the org's acceptance of PDL's terms and a live record are still to be seen
+    "people-data-labs": ProviderSpec(key="people-data-labs", label="People Data Labs",
+                                     capability=pdl.CAPABILITY, credits=pdl.ENRICH_CREDITS,
+                                     match=pdl.match),
 }
 
 assert set(PROVIDERS) == set(get_args(ProviderKey)), "models.ProviderKey and PROVIDERS disagree"

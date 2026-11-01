@@ -1,0 +1,16 @@
+{"status": 200, "likelihood": 10,
+ "data": {"id": "pdl-ada", "full_name": "ada okafor", "first_name": "ada", "last_name": "okafor",
+  "headline": "CEO at PayRail", "summary": "Payments builder. Ex-Paystack, ex-Stripe.",
+  "job_title": "chief executive officer", "job_company_name": "payrail",
+  "job_company_website": "payrail.io", "job_company_linkedin_url": "linkedin.com/company/payrail",
+  "location_name": "lagos, lagos, nigeria", "linkedin_url": "linkedin.com/in/adaokafor",
+  "github_url": "github.com/adaok", "twitter_url": "twitter.com/adaokafor",
+  "profiles": [{"network": "angellist", "url": "angel.co/adaokafor"}],
+  "experience": [
+   {"company": {"name": "paystack"}, "title": {"name": "product lead"}, "start_date": "2018-01", "end_date": "2021-02", "is_primary": false},
+   {"company": {"name": "payrail", "website": "payrail.io"}, "title": {"name": "chief executive officer"}, "start_date": "2021-03", "end_date": null, "is_primary": true},
+   {"company": {"name": "stripe"}, "title": {"name": "engineer"}, "start_date": "2015-06", "end_date": "2017-12", "is_primary": false}],
+  "education": [{"school": {"name": "university of lagos"}, "degrees": ["bachelors"], "majors": ["computer science"], "start_date": "2010", "end_date": "2014"}],
+  "skills": ["payments", "python", "go"],
+  "interests": ["fintech policy", "open source"],
+  "languages": [{"name": "english", "proficiency": 5}, {"name": "yoruba", "proficiency": 4}]}}
