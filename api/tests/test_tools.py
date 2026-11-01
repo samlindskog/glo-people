@@ -432,7 +432,7 @@ async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentif
     # a first name with a LinkedIn profile the provider knows: the name comes from the profile
     pid = await make(writer, {"name": "Ada", "linkedin": "https://www.linkedin.com/in/adaokafor"})
     fc = fake_firecrawl()
-    res = await repair(pid, src, firecrawl=fc)
+    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fc)
     assert res.provider_called and res.credits == 5 and res.name_source == "provider"
     assert res.kind == "Person"
     person = (await reader.get(f"/api/people/{pid}")).json()
@@ -449,19 +449,19 @@ async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentif
                           *res.profile_written} == set()                        # and nothing beyond it
     # a profile the provider does not know: Unidentifiable, no credits spent, nothing written
     pid = await make(writer, {"name": "Bo", "linkedin": "https://www.linkedin.com/in/nobody-here"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
     assert res.provider_called and res.credits == 0 and res.kind == "Unidentifiable"
     assert res.profile_written == [] and "linkedin_headline" not in (await reader.get(f"/api/people/{pid}")).json()
     # a matched profile without a full name: still Unidentifiable, but the paid profile lands
     pid = await make(writer, {"name": "Nam", "linkedin": "https://www.linkedin.com/in/nameless"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
     assert res.provider_called and res.credits == 5 and res.kind == "Unidentifiable"
     assert res.name_source == "unchanged" and res.profile_written == ["company", "github", "linkedin_headline", "location"]
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "Nam" and person["company"] == "PayRail"
     # no LinkedIn: no provider call, Unidentifiable
     pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
     assert not res.provider_called and res.kind == "Unidentifiable"
     assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
     # provider switched off: no call either

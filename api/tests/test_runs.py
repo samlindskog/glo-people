@@ -44,7 +44,9 @@ class Gate:
 
 async def _start(writer, ids, **options):
     r = await writer.post("/api/assistants/normalize/runs",
-                          json={"person_ids": ids, "options": {"provider": False, **options}})
+                          # the runner is under test, not the paid steps: no provider, no enrichment
+                          json={"person_ids": ids, "options": {"provider": False, "enrich": False,
+                                                               **options}})
     assert r.status_code == 201, r.text
     return r.json()["id"]
 

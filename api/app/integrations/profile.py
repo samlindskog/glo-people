@@ -81,18 +81,14 @@ def full_name(profile: LinkedInProfile | None) -> str | None:
 
 
 def name_fill(profile: LinkedInProfile, current: Any) -> str | None:
-    """The provider's full name for a record whose name is missing or a single token that the
-    full name contains ("Alina" → "Alina Kharina"). Anything else (a different name, a company
-    name on a person's record) is the repair tool's judgement, not a mechanical fill."""
+    """The matched profile's full name for a record whose name is missing or not a full name
+    ("Alina" → "Alina Kharina"; "Fleek", a company name on a person's record, → the person behind
+    the LinkedIn URL). A record that already has a first and last name keeps it: the profile's
+    other facts are written anyway, so a wrong URL would show there, not in a renamed record."""
     full = full_name(profile)
-    if not full:
+    if not full or fields.fold(full) == fields.fold(str(current or "")):
         return None
-    toks = _tokens(str(current or ""))
-    if not toks:
-        return full
-    if len(toks) == 1 and toks[0] in _tokens(full) and not is_full_name(str(current)):
-        return full
-    return None
+    return full if not is_full_name(str(current or "")) else None
 
 
 def profile_values(profile: LinkedInProfile, current: dict[str, Any]) -> dict[str, Any]:

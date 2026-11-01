@@ -40,7 +40,7 @@ class NormalizeOptions(BaseModel):
     max_new_values: int = Field(3, ge=0, le=10, description="New enum values per call, in total")
     repair: bool = Field(True, description="Repair identity data and set record_kind for records "
                                            "that have none yet")
-    provider: bool = Field(True, description="During repair, ask FullEnrich (5 credits) for the "
+    provider: bool = Field(False, description="During repair, ask FullEnrich (5 credits) for the "
                                              "full name when the record has a LinkedIn URL and "
                                              "no full name")
     force: bool = Field(False, description="Repair even when record_kind is already set")

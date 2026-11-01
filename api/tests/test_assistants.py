@@ -19,6 +19,7 @@ from app import db as db_pg
 from app import embedder
 from app import people as people_mod
 from app.agents import fakes
+from app.assistants import normalize as normalize_assistant
 from app.assistants import runner
 from app.assistants.enrich import assistant as enrich_workflow
 from app.assistants.enrich import budget as enrich_budget
@@ -227,7 +228,13 @@ def _fakes(monkeypatch):
     model_calls.clear()
     monkeypatch.setattr(enrich_workflow, "AsyncFirecrawl",
                         lambda budget: FakeFirecrawl(api_key="fake", budget=budget))
+    monkeypatch.setattr(normalize_assistant, "AsyncFirecrawl",
+                        lambda budget: FakeFirecrawl(api_key="fake", budget=budget))
     with ExitStack() as stack:
+        from app.tools import normalize as normalize_tool
+        from app.tools import repair as repair_tool
+        stack.enter_context(repair_tool.agent.override(model=fakes.model_for(repair_tool.agent)))
+        stack.enter_context(normalize_tool.agent.override(model=fakes.model_for(normalize_tool.agent)))
         stack.enter_context(site.agent.override(model=FunctionModel(site_model)))
         stack.enter_context(company.agent.override(model=FunctionModel(company_model)))
         stack.enter_context(store.agent.override(model=FunctionModel(storage_model)))
@@ -510,9 +517,10 @@ def test_name_fill_from_the_profile():
     assert profile_mod.name_fill(prof, "Alina") == "Alina Kharina"
     assert profile_mod.name_fill(prof, "alina ") == "Alina Kharina"
     assert profile_mod.name_fill(prof, None) == "Alina Kharina"
-    assert profile_mod.name_fill(prof, "Fleek") is None             # a different name: repair's call
-    assert profile_mod.name_fill(prof, "Alina K.") is None          # two tokens: not a bare first name
+    assert profile_mod.name_fill(prof, "Fleek") == "Alina Kharina"   # not a full name: the profile's
+    assert profile_mod.name_fill(prof, "Alina K.") == "Alina Kharina"  # an initial is not a last name
     assert profile_mod.name_fill(prof, "Alina Kharina") is None
+    assert profile_mod.name_fill(prof, "Someone Else") is None        # a full name is kept
     assert profile_mod.name_fill(profile_mod.LinkedInProfile(first_name="Ada"), "Ada") is None
 
 
@@ -526,6 +534,37 @@ async def test_a_bare_first_name_is_completed_from_the_profile(writer, reader):
     person = (await reader.get(f"/api/people/{ada}")).json()
     assert person["name"] == "Ada Okafor"
     assert [e["src"]["by"] for e in person["history"]["name"]] == ["p.csv", "enrich/linkedin_reader"]
+
+
+async def test_normalise_enriches_a_record_without_a_full_name_first(writer, reader):
+    await import_people(writer, "Name,LinkedIn\nAda,https://www.linkedin.com/in/adaokafor\nCy Diaz,\n",
+                        "p.csv", "plus_one")
+    ids = {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
+    r = await writer.post("/api/assistants/normalize/runs",
+                          json={"person_ids": [ids["Ada"], ids["Cy Diaz"]]})
+    assert r.status_code == 201, r.text
+    await runner.drain()
+    run = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()
+    by = {i["label"]: i for i in run["items"]}
+    ada, cy = by["Ada"], by["Cy Diaz"]
+    res = ada["result"]
+    assert ada["status"] == "done", ada
+    assert res["enrich"]["linkedin"] == "matched" and res["enrich"]["storage"] == "stored"
+    assert res["enrich"]["linkedin_provider"] == "people-data-labs"
+    assert written(res)["name"] == "Ada Okafor" and written(res)["about"]
+    assert res["repair"]["kind"] == "Person" and not res["repair"]["provider_called"]
+    assert res["text"].startswith("Enriched first: Linkedin profile matched")
+    # PDL, the GitHub tool and one company page (PDL carries no employer description)
+    assert ada["credits"] == PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
+    person = (await reader.get(f"/api/people/{ids['Ada']}")).json()
+    assert person["name"] == "Ada Okafor" and person["record_kind"] == "Person"
+    assert person["history"]["name"][-1]["src"]["by"] == "enrich/linkedin_reader"
+    # a full name, no LinkedIn: nothing to enrich, nothing paid
+    assert cy["result"]["enrich"] is None and cy["credits"] == 0
+    assert not cy["result"]["text"].startswith("Enriched first")
+    specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
+    assert specs["normalize"]["options_schema"]["properties"]["enrich"]["default"] is True
+    assert specs["normalize"]["options_schema"]["properties"]["provider"]["default"] is False
 
 
 def test_profile_lines_clean_provider_text():

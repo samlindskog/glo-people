@@ -47,8 +47,10 @@ _SYMBOLS = re.compile(r"[^\w\s.'’\-(),&/]", re.UNICODE)
 class RepairOptions(BaseModel):
     mechanical: bool = Field(True, description="Re-decode mojibake, title-case lowercase names")
     agent: bool = Field(True, description="Let the repair agent judge the record")
-    provider: bool = Field(True, description="Ask FullEnrich (5 credits) for the full name when "
-                                             "the record has a LinkedIn URL and no full name")
+    provider: bool = Field(False, description="Ask FullEnrich (5 credits) for the full name when "
+                                              "the record has a LinkedIn URL and no full name; "
+                                              "off by default: the normalise assistant runs the "
+                                              "enrich ladder for such records instead")
     max_edits: int = Field(3, ge=0, le=10, description="Misfiled values moved or removed per call")
     allocate: bool = Field(True, description="Let the agent add a new record kind")
 
