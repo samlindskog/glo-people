@@ -4,6 +4,7 @@ and how one is turned into record values: `profile_values` for the deterministic
 agent. Pure data: no provider calls, no app-level decisions."""
 
 import html
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -60,24 +61,36 @@ class LinkedInProfile(BaseModel):
     interests: list[str] = Field(default_factory=list)
 
 
+_NOT_A_NAME = re.compile(r"[|@/#&_(){}\[\]<>\d]|\bhttp")   # handles, titles, taglines, addresses
+
+
 def _tokens(name: str) -> list[str]:
     return fields.fold(name).split()
 
 
 def is_full_name(name: str) -> bool:
-    """A first and a last name: two or more tokens, the last one a word of two or more letters
-    (so "Polly I." and "Ada O" do not count)."""
+    """A first and a last name: two or more tokens, the last one a word of two or more letters,
+    and none of the marks of a handle or tagline ("Polly I.", "Ada O", "Jordan | Cofounder | UXUY"
+    and "Lena@Cohere" do not count)."""
+    if _NOT_A_NAME.search(name or ""):
+        return False
     toks = _tokens(name)
     return len(toks) >= 2 and len(toks[-1]) >= 2 and not toks[-1].isdigit()
 
 
 def full_name(profile: LinkedInProfile | None) -> str | None:
-    """The profile's first and last name, or None when it has no full name."""
+    """The profile's first and last name, or None when it has none: the provider's full_name
+    field when it is one, else first and last name joined (a provider may give "Jack" as the full
+    name next to a last name of its own)."""
     if profile is None:
         return None
-    name = " ".join((profile.full_name or f"{profile.first_name or ''} {profile.last_name or ''}")
-                    .split())
-    return name if is_full_name(name) else None
+    candidates = [profile.full_name or "",
+                  f"{profile.first_name or ''} {profile.last_name or ''}"]
+    for raw in candidates:
+        name = " ".join(raw.split())
+        if is_full_name(name):
+            return name
+    return None
 
 
 def name_fill(profile: LinkedInProfile, current: Any) -> str | None:

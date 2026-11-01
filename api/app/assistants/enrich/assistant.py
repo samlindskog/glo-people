@@ -267,9 +267,13 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
         statuses[spec.key] = "matched"
         st.passage.add(spec.source, "LinkedIn profile", profile_lines(profile))
         values: dict[str, Any] = {}
-        if not name_done and (name := name_fill(profile, deps.current("name"))):
-            values["name"] = name               # "Alina" → the profile's "Alina Kharina"
-            st.name, name_done = name, True
+        if not name_done:
+            if name := name_fill(profile, deps.current("name")):
+                values["name"] = name           # "Alina" → the profile's "Alina Kharina"
+                st.name, name_done = name, True
+            else:
+                deps.emit("note", f"{spec.label} gives no full name: {profile.full_name!r} "
+                                  f"({profile.first_name!r} {profile.last_name!r})")
         if st.profile is None:
             st.profile = profile
             st.result["linkedin"] = "matched"

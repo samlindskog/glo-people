@@ -537,6 +537,16 @@ def test_name_fill_from_the_profile():
     assert profile_mod.name_fill(prof, "Alina K.") == "Alina Kharina"  # an initial is not a last name
     assert profile_mod.name_fill(prof, "Alina Kharina") is None
     assert profile_mod.name_fill(prof, "Someone Else") is None        # a full name is kept
+    # the provider's full_name field is not always the full name
+    halves = profile_mod.LinkedInProfile(full_name="Jack", first_name="Jack", last_name="Mathews")
+    assert profile_mod.full_name(halves) == "Jack Mathews"
+    assert profile_mod.full_name(profile_mod.LinkedInProfile(full_name="jack", last_name=None)) is None
+    assert profile_mod.full_name(profile_mod.LinkedInProfile(first_name="Jack", last_name="M.")) is None
+    # taglines and handles are not full names, whatever their token count
+    for junk in ("Jordan | Cofounder | UXUY", "Lena@Cohere Commerce", "Raj - LootMogul accelerated by a16z",
+                 "Anna (she/her)", "DJ_Deep"):
+        assert not profile_mod.is_full_name(junk), junk
+    assert profile_mod.is_full_name("Rwaida Gharib-Kane") and profile_mod.is_full_name("O'Neil Mcdonald")
     assert profile_mod.name_fill(profile_mod.LinkedInProfile(first_name="Ada"), "Ada") is None
 
 
