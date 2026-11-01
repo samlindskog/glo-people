@@ -432,7 +432,7 @@ async def test_repair_judges_kind_by_common_sense_without_asking_anyone(writer, 
     assert person["name"] == "Ada" and "linkedin_headline" not in person
     pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
     assert (await repair(pid, src)).kind == "Person"
-    pid = await make(writer, {"name": "Store eo39uo"})
+    pid = await make(writer, {"name": "E 42"})
     assert (await repair(pid, src)).kind == "Unidentifiable"
     assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
 
