@@ -6,6 +6,7 @@ import { useAuth } from '../auth'
 import ActivityFeed from '../components/ActivityFeed'
 import ImportDialog from '../components/ImportDialog'
 import { ErrorNote, PageHeader } from '../components/Layout'
+import Prose from '../components/Prose'
 import { useRunEvents } from '../hooks/useEvents'
 import { formatDate, formatValue } from '../lib'
 import type { AssistantRun, AssistantRunItem, AssistantSpec, Change, Permission, Person, RunItemStatus, RunStatus } from '../types'
@@ -133,6 +134,14 @@ function AssistantCard({ spec, canRun, onStarted }: { spec: AssistantSpec; canRu
       <div>
         <h3 className="font-semibold">{spec.label}</h3>
         <p className="mt-1 text-sm text-slate-600">{spec.description}</p>
+        {spec.details && (
+          <details className="mt-2" data-testid={`how-${spec.key}`}>
+            <summary className="cursor-pointer select-none text-sm text-brand-700">How it works</summary>
+            <div className="mt-2 rounded-md border border-slate-100 bg-slate-50 p-3">
+              <Prose text={spec.details} />
+            </div>
+          </details>
+        )}
       </div>
       {canRun && spec.key === 'import' && <ImportDialog onStarted={(r) => onStarted(r.run_id)} />}
       {canRun && spec.key !== 'import' && (

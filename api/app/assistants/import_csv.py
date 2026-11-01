@@ -61,6 +61,18 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             "people": ids}
 
 
+DETAILS = """\
+**What it does.** Loads a CSV into people records as a run of row batches, so a large file is resumable and visible like any other run. The file is parsed when the run is created; each item then writes one batch of rows and embeds the people it touched.
+
+**Starting it.** Upload a CSV on the People page or in this card, choose the tier (members or plus ones). Options: `batch` (200 rows per item), `embed` (true). The CLI does the same with `python -m app.cli import`. Free apart from the embedder.
+
+**Parsing.** Every header becomes a property key (lowercase, underscores; a header that collides with a system key is prefixed `col_`). An `ID` column is the match key; otherwise a row is identified by name plus email, so re-importing the same file updates people instead of duplicating them. A row without a name (or first and last name) is skipped. Each column's cells are stored as entered, split into list items when the column is a list property or clearly holds lists; typed properties get their normalised value at write time. Properties the file introduces are created as free text, embeddable.
+
+**Writing a batch.** Rows are upserted by (file, source id): a new id inserts, an existing one appends the changed cells to each property's history; unchanged cells append nothing and leave the update time alone. Rows sharing an id fold in file order so no entry is lost. Every write is compare-and-set, so an edit made while the import runs is never overwritten; a lost race is redone for that row alone. Then the passages of the touched people are embedded.
+
+**Result.** Per batch: inserted, updated, vectors computed, and the ids written. An interrupted batch is redone on resume or after a restart without duplicating anything.
+"""
+
 SPEC = register(AssistantSpec(
     key=ASSISTANT,
     label="Import a CSV",
@@ -73,4 +85,5 @@ SPEC = register(AssistantSpec(
     run_item=run_item,
     item_cap=lambda options: 0,
     scope="batches",
+    details=DETAILS,
 ))

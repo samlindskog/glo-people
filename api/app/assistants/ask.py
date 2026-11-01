@@ -181,6 +181,20 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             **result.model_dump(mode="json", exclude={"text", "changes"})}
 
 
+DETAILS = """\
+**What it does.** Answers a question about people in text, with citations, as a run with one item. The planner agent turns the question into an executable search, the search engine runs it, and the answer agent writes the answer from the hits. Nothing is written to any record; readers may run it.
+
+**Starting it.** The Ask box on the People page, this card, or MCP's `ask_people` (synchronous). Options: `question`, `tier`, extra `filters` (ANDed with the plan), `k` (12 people to read), `mode` (`avg`: a person's property scores combine by average; `max`: the best property counts), `threshold` (0.4 minimum similarity for a semantic hit; unrelated text scores around 0.2 to 0.3).
+
+**Planning (one model call).** The planner sees the property catalog with types, canonical values and coverage counts. It answers with literal filters on typed properties (canonical enum values, numbers, ISO dates) and one passage per text property worth comparing semantically. A validator makes sure the plan is executable (known properties, usable values) and retries otherwise; the result is an ordinary search request.
+
+**Searching.** The engine runs the request: literal filters on the normalised values, the semantic passages against each property's vectors (a property's score is its best-matching passage across its history), combined by `mode` and cut at `threshold`, `k` results. The executed search is saved to the history like any other, marked as an ask, so it can be re-run or opened as a search.
+
+**Answering (one model call, only when there are hits).** The answer agent reads each hit as a record: name and id, the searched properties' texts with their normalised values, the similarity. It writes two to eight sentences naming people, never JSON, and one citation per person named (id, property, value); citations must use the given ids or the answer is retried. No hits: a plain "no one matches".
+
+**Result.** The text, the citations, the request that ran (re-runnable), the planner's rationale, the hit count, the hits and the saved search id. The Ask box streams the steps (planning, searched, answering, answered) while it works.
+"""
+
 SPEC = register(AssistantSpec(
     key=ASSISTANT,
     label="Ask a question",
@@ -193,4 +207,5 @@ SPEC = register(AssistantSpec(
     scope="single",
     permission="people:read",
     prepare=prepare,
+    details=DETAILS,
 ))

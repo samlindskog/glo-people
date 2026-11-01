@@ -56,6 +56,18 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     return {"text": f"{n} vectors for {len(ids)} people.", "changes": [], "vectors": n}
 
 
+DETAILS = """\
+**What it does.** Brings the passage vectors behind semantic search in line with the records, for everyone (or the chosen people), in batches. Free apart from the embedder's own cost; no agents, no Firecrawl.
+
+**Starting it.** Everyone, in batches of `batch` people (200); `fields` limits the work to some properties. The CLI's `python -m app.cli embed` creates the same run.
+
+**Before the first batch.** The property registry is synced with the specs in code and the property-name vectors (used to redirect near-duplicate new properties) are recomputed for names that changed.
+
+**Each batch.** For every embeddable property of each person, every history entry (passage) that has no vector yet is embedded, and vectors of passages that no longer apply (person deleted, value removed, property no longer embeddable) are deleted. A removed value keeps its history but gets no vectors. Passages are embedded in chunks; identical texts are embedded once.
+
+**Result.** Vectors computed per batch. Running it again computes nothing when everything is in step.
+"""
+
 SPEC = register(AssistantSpec(
     key=ASSISTANT,
     label="Embed passages",
@@ -68,4 +80,5 @@ SPEC = register(AssistantSpec(
     item_cap=lambda options: 0,
     scope="batches",
     prepare=prepare,
+    details=DETAILS,
 ))

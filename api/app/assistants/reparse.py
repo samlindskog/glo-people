@@ -41,6 +41,16 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     return {"text": f"{n} of {len(ids)} documents re-parsed.", "changes": [], "written": n}
 
 
+DETAILS = """\
+**What it does.** Runs the deterministic parser over the typed properties (number, date, boolean, enum, enum list) of every record, in batches, and writes only what changes. Free; no agents, no Firecrawl.
+
+**Starting it.** Everyone, in batches of `batch` people (200). `force` (true) redoes the parser's own earlier results too, as after a parser upgrade or a new alias; what an agent or a person decided for the current text is always kept. The CLI's `python -m app.cli normalize --all` creates the same run (and `make prod-migrate` runs it after a deploy).
+
+**Each batch.** For each person the parser is applied to every typed value whose text has not been normalised, or whose normalised value came from the parser when `force` is on. A compare-and-set write per changed document.
+
+**Result.** Documents written per batch. The normalise assistant is the one that consults agents and repairs records; this one only re-reads texts.
+"""
+
 SPEC = register(AssistantSpec(
     key=ASSISTANT,
     label="Re-parse typed values",
@@ -52,4 +62,5 @@ SPEC = register(AssistantSpec(
     item_cap=lambda options: 0,
     scope="batches",
     prepare=prepare,
+    details=DETAILS,
 ))

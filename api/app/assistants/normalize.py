@@ -78,6 +78,24 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             "repair": result.repair.model_dump(exclude={"changes"}) if result.repair else None}
 
 
+DETAILS = """\
+**What it does.** Brings one record's typed values up to date and, once per record, repairs its identity data and classifies it. Three stages, one write: the parser, the normaliser agent for what the parser cannot read, and the repair tool. Everything is staged on the record's transaction and lands in a single compare-and-set write; stopping before that writes nothing.
+
+**Starting it.** One person, or everyone with a property (the Properties page's Normalise buttons do that per property). Options: `allocate` (true: agents may add canonical values to enum properties), `max_new_values` (3 new enum values per record per call), `repair` (true), `provider` (true: ask FullEnrich for a missing full name), `force` (false: repair even when the record kind is set), `max_credits` (1500 for the run). Each item reserves 5 credits while it runs; the run pauses at the cap and Resume with a higher cap continues it.
+
+**Stage 1, the parser (free).** For every typed property (number, date, boolean, enum, enum list) whose current text has not been normalised yet, the deterministic parser gives the typed value, or flags the text: `unmapped` when it cannot read it, `non_normalizable` when it says there is no value. Enum texts match canonical values and their aliases case-insensitively. Decisions an agent made earlier for the same text are kept.
+
+**Stage 2, the normaliser agent (one model call, only when something stayed unmapped).** It sees each unmapped text with the property's type and canonical values, and who the person is (name, company, role, one-liner, bio, sectors, company description). Per item it merges the text into an existing value (the text becomes an alias, so the parser handles it next time), allocates a new canonical value when the text names a category the list lacks and fits the person (enum types only, within `max_new_values`, one new value per property per call), or drops it as non-normalisable. A validator fixes spellings and rejects unusable answers; what the caps refuse is reported as rejected.
+
+**Stage 3, repair (when the record has no record kind yet, or with `force`).** Mechanical fixes first: mojibake re-decoded, an all-lowercase name title-cased (never a handle, email or URL). Then the repair agent judges the record from its own facts (name history, LinkedIn slug, emails, website, company, role, headline, bio, intro, notes, source file): the kind (Person, Company, Unidentifiable, or a new kind it allocates), a first-and-last name only when the current one is broken and the evidence gives it verbatim, and values filed under the wrong property (moved to the property it names, usually notes, and tombstoned where they were; at most 3). A Person still without a full name whose record has a LinkedIn URL triggers one FullEnrich lookup (5 credits, a miss is free): the profile's name is taken, and because the lookup was paid for its headline, GitHub, location and company are written too. A Person whose name stays partial is marked Unidentifiable.
+
+**The write.** One commit carries the norm entries, any new values and the record kind, each history entry attributed to its author: the parser as system/normalize, the agent as normalize/normalizer with the run and item reference, the repair agent as repair, mechanical fixes as system/repair, provider data as repair/fullenrich.
+
+**Cost profile.** Model calls only for records with unmapped texts or without a record kind; Firecrawl credits only for Persons lacking a full name with a LinkedIn URL. A second run over everyone is nearly free: the parser confirms, the agents are not consulted, repair is skipped.
+
+**Result.** One line per person ("stage → Seed; region: new value 'Lisbon'; name → Pooja Nagpal; record kind: Person (agent consulted)"), every change, the merges, allocations and rejections, what is still unmapped, and the repair's kind, name source, signals, mechanical fixes, provider use and credits.
+"""
+
 SPEC = register(AssistantSpec(
     key=ASSISTANT,
     label="Normalise and repair records",
@@ -87,6 +105,7 @@ SPEC = register(AssistantSpec(
                  "record's own facts, or from the FullEnrich profile behind the LinkedIn URL for "
                  "5 credits) and classifies the record as Person, Company or Unidentifiable."),
     selector_field="name",
+    details=DETAILS,
     options_model=NormalizeRunOptions,
     make_deps=make_deps,
     run_item=run_item,

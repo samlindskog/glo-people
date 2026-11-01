@@ -58,6 +58,10 @@ assistants or surfaces.
 
 ## Assistants (level 3)
 
+Each spec carries a one-line `description` and a long-form `details` text (the full functionality
+spec), both returned by `GET /api/assistants` and MCP `list_assistants`; the Assistants page shows
+the details in a "How it works" toggle on the card.
+
 | Assistant | Scope | Items | Item result |
 |---|---|---|---|
 | ask | single (`people:read`) | the question (`options.question`, tuning, tier, filters) | `{text, citations, request, rationale, total, results, search_id}`; MCP `ask_people` calls `ask()` directly for a synchronous answer |

@@ -341,6 +341,8 @@ export interface AssistantSpec {
   key: string
   label: string
   description: string
+  /** The full functionality spec, shown in the card's "How it works" toggle. */
+  details: string
   scope: AssistantScope
   permission: string
   selector_field: string | null
