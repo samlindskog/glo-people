@@ -46,6 +46,8 @@ test('reader can manage readers but not grant writer; activity shows it', async 
 
   await page.getByRole('link', { name: 'History' }).click()
   await page.getByRole('tab', { name: 'Activity' }).click()
+  // the other specs' runs and imports fill the first page of activity: narrow it to account actions
+  await page.getByLabel('Action').selectOption('user')
   await expect(page.getByTestId('activity-table')).toContainText('user.create')
   await expect(page.getByTestId('activity-table')).toContainText(username)
 })
