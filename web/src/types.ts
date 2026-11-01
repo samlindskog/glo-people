@@ -276,6 +276,8 @@ export interface NormalizeResult {
 export interface StoreResult {
   person_id: string | null
   changes: Change[]
+  /** Firecrawl credits the tool spent (none for a stored passage; kept for the shared shape). */
+  credits: number
   confirmed: string[]
   ignored: string[]
   conflicts: string[]

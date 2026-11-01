@@ -22,6 +22,7 @@ from app.routers import search as search_router
 from app.tools import invoke
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logging.getLogger("app").setLevel(get_settings().log_level.upper())
 observability.setup()
 
 mcp_app = build_mcp_app()

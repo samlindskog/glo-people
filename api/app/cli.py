@@ -5,6 +5,7 @@ process (visible on the Assistants page like any other run)."""
 import argparse
 import asyncio
 import getpass
+import json
 import re
 import statistics
 import sys
@@ -161,6 +162,101 @@ async def list_providers(alexandria: bool, categories: list[str], providers: lis
                 print(f"    {o.get('name')}{flag} [{o.get('type', '')}]: {desc}")
 
 
+async def run_report(run_id: int, show_items: bool, show_events: bool) -> None:
+    """What happened in one run, for finding bugs after the fact: status and credits, items by
+    status, each step's outcomes, the skipped reasons and provider statuses as histograms, what
+    the storage step filed, dropped or created, failures with their errors; `--items` adds one
+    line per item, `--events` the error-like events."""
+    from collections import Counter
+
+    from app.assistants import runner
+
+    run = await runner.get_run(run_id)
+    if run is None:
+        sys.exit(f"no run {run_id}")
+    items: list[dict] = []
+    after = 0
+    while True:
+        page = await runner.get_items(run_id, after=after, limit=500)
+        items += page
+        if len(page) < 500:
+            break
+        after = page[-1]["id"]
+    print(f"run {run_id} ({run['workflow']}): {run['status']}, {run.get('credits_used', 0)} credits, "
+          f"{len(items)} items, started {run.get('started_at')}, finished {run.get('finished_at')}")
+    print(f"  params: {json.dumps(run.get('params'), ensure_ascii=False)[:300]}")
+    by_status = Counter(i["status"] for i in items)
+    print("  items by status:", dict(by_status))
+    credits = sorted((i.get("credits") or 0 for i in items), reverse=True)
+    if credits:
+        print(f"  credits per item: max {credits[0]}, median {credits[len(credits) // 2]}, "
+              f"zero for {sum(1 for c in credits if c == 0)}")
+    results = [(i, i.get("result") or {}) for i in items]
+    steps = Counter()
+    providers = Counter()
+    skipped = Counter()
+    stored = Counter()
+    dropped = Counter()
+    created = Counter()
+    storage = Counter()
+    for _, res in results:
+        for step in ("linkedin", "github", "company", "storage", "repair"):
+            if step in res and isinstance(res[step], str):
+                steps[(step, res[step])] += 1
+        for key, status in (res.get("providers") or {}).items():
+            providers[(key, status)] += 1
+        for s in res.get("skipped") or []:
+            skipped[(s["step"], re.sub(r"https?://\S+", "<url>", s["reason"])[:110])] += 1
+        for key in res.get("stored") or {}:
+            stored[key] += 1
+        for label in res.get("dropped") or []:
+            dropped[label] += 1
+        for key in res.get("created_properties") or []:
+            created[key] += 1
+        if "storage" in res:
+            storage[res["storage"]] += 1
+    if steps:
+        print("  step outcomes:")
+        for (step, outcome), n in sorted(steps.items()):
+            print(f"    {step:9} {outcome:12} {n}")
+    if providers:
+        print("  providers:", {f"{k}:{s}": n for (k, s), n in sorted(providers.items())})
+    if stored:
+        print("  properties filed by the storage agent:", dict(stored.most_common()))
+    if dropped:
+        print("  facts dropped (no property, none allowed):", dict(dropped.most_common(20)))
+    if created:
+        print("  properties created:", dict(created))
+    if skipped:
+        print("  skipped reasons:")
+        for (step, reason), n in skipped.most_common(25):
+            print(f"    {n:4}  {step:9} {reason}")
+    failed = [i for i in items if i["status"] == "failed" or i.get("error")]
+    if failed:
+        print("  failures:")
+        for i in failed:
+            print(f"    item {i['id']} {i.get('label') or i.get('person_id')}: {str(i.get('error'))[:200]}")
+    if show_items:
+        print("  items:")
+        for i, res in results:
+            print(f"    {i['id']:5} {i['status']:8} {i.get('credits') or 0:3}cr  "
+                  f"{(i.get('label') or i.get('person_id') or '')[:28]:28} {(res.get('text') or '')[:150]}")
+    if show_events:
+        after = 0
+        bad = 0
+        while True:
+            evs = await runner.events(run_id, after=after, limit=1000)
+            for e in evs:
+                if e.get("kind") in ("error", "failed", "skip") or "fail" in (e.get("message") or "") \
+                        or "error" in (e.get("message") or "").lower():
+                    print(f"    event {e['id']} {e.get('kind')}: {(e.get('message') or '')[:160]}")
+                    bad += 1
+            if len(evs) < 1000:
+                break
+            after = evs[-1]["id"]
+        print(f"  error-like events: {bad}")
+
+
 async def migrate_history(dry_run: bool) -> None:
     n = await people.migrate_legacy(dry_run=dry_run)
     print(f"{'would migrate' if dry_run else 'migrated'} {n} people documents to field history")
@@ -258,6 +354,11 @@ def main() -> None:
     dp = sub.add_parser("drop-property", help="delete properties (documents, vectors, registry)")
     dp.add_argument("keys", nargs="+")
     dp.add_argument("--yes", action="store_true", help="without it: list the holders only")
+    rr = sub.add_parser("run", help="what happened in one run: outcomes, skipped reasons, "
+                                    "what the storage agent filed, failures")
+    rr.add_argument("run_id", type=int)
+    rr.add_argument("--items", action="store_true", help="one line per item")
+    rr.add_argument("--events", action="store_true", help="the error-like events")
     pv = sub.add_parser("providers", help="the enrich ladder's data providers; --alexandria adds "
                                           "the Firecrawl catalogue's live prices and inputs (free)")
     pv.add_argument("--alexandria", action="store_true")
@@ -289,6 +390,8 @@ def main() -> None:
                     await migrate_history(args.dry_run)
                 case "drop-property":
                     await drop_property(args.keys, args.yes)
+                case "run":
+                    await run_report(args.run_id, args.items, args.events)
                 case "providers":
                     await list_providers(args.alexandria, args.category or ["people"],
                                          args.provider, args.limit)

@@ -9,6 +9,8 @@ services:
       DEV_AUTO_LOGIN: ${DEV_AUTO_LOGIN:-0}
       # FAKE_AGENTS=1: deterministic stand-ins for the pydantic-ai agents (CI, offline demos).
       FAKE_AGENTS: ${FAKE_AGENTS:-0}
+      # DEBUG: every data-provider record's key shape, agent retries and run internals in the logs.
+      LOG_LEVEL: ${LOG_LEVEL:-DEBUG}
     volumes:
       - ./api/app:/app/app
       - ./api/alembic:/app/alembic

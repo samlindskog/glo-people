@@ -8,6 +8,7 @@ tool at its listed price per record found (an empty result costs nothing).
 """
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,6 +63,29 @@ class ScrapeResult:
     title: str
     credits: int
     provider: str | None = None     # third-party provider id for LinkedIn URLs
+
+
+_SHAPE_VALUE_KEYS = ("date", "year", "month", "start", "end", "current", "primary", "likelihood",
+                     "credits", "count", "total")
+
+
+def shape(value: Any, depth: int = 0) -> Any:
+    """A record's key shape for the logs: keys and value types, with the values of date-like,
+    numeric-count and boolean fields kept (they decide how a mapping reads the record) and every
+    other string reduced to `<str>`; lists show their first element and their length."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(v, (dict, list)):
+                out[k] = shape(v, depth + 1) if depth < 4 else type(v).__name__
+            elif isinstance(v, bool) or v is None or any(t in k.lower() for t in _SHAPE_VALUE_KEYS):
+                out[k] = v
+            else:
+                out[k] = f"<{type(v).__name__}>"
+        return out
+    if isinstance(value, list):
+        return [shape(value[0], depth + 1), f"… {len(value)} items"] if value else []
+    return value if isinstance(value, (bool, int, float)) or value is None else f"<{type(value).__name__}>"
 
 
 @dataclass
@@ -223,6 +247,9 @@ class AsyncFirecrawl:
         credits = int(item.get("creditsCost") or 0)
         if self.budget:
             self.budget.charge("scrape", f"{provider}/{capability}", credits)
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("%s/%s record shape (%s credits): %s", provider, capability, credits,
+                      json.dumps(shape(item.get("data")), ensure_ascii=False)[:6000])
         err = item.get("error")
         if err:
             code = str(err.get("code") or "")

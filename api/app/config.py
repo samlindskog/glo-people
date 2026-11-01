@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     firecrawl_credits_cache_s: int = 60
 
     # Logfire: LOGFIRE_TOKEN is read by the SDK itself; nothing is exported without it.
+    log_level: str = "INFO"                # the app's own loggers (`app.*`); libraries stay at INFO
     logfire_environment: str = "dev"
     logfire_include_content: bool = True   # record prompts/page text in spans (PII): off in prod
     logfire_project_url: str = ""          # e.g. https://logfire-us.pydantic.dev/<org>/<project>
