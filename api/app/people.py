@@ -510,6 +510,19 @@ async def update_norm(principal: Principal | None, person_id: str, parsed: dict[
     return await tx.commit(principal)
 
 
+async def drop_field(key: str) -> int:
+    """Remove a property from every document holding it, for a property that is being deleted
+    from the catalog: a hard unset with a revision bump, no tombstone. Returns the documents
+    changed. The caller deletes the field's vectors and registry entry afterwards."""
+    if not fields.valid_key(key):
+        raise PersonError(f"invalid field key {key!r}")
+    res = await db().people.update_many({key: {"$exists": True}},
+                                        {"$unset": {key: ""}, "$inc": {"rev": 1}})
+    if res.modified_count:
+        await activity.record("property.drop", None, key, {"documents": res.modified_count})
+    return res.modified_count
+
+
 async def reparse(ids: list[str], force: bool = True) -> int:
     """Run the parser over these documents (free). With `force` (the default; a parser upgrade)
     the parser's earlier results are redone and only writes that change something land; agent

@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from app import assistants, auth, db, fields, mongo, observability, people, properties
+from app import assistants, auth, db, embeddings, fields, mongo, observability, people, properties
 from app.assistants import embed as embed_assistant
 from app.assistants import import_csv, reparse, runner
 from app.assistants.base import REGISTRY
@@ -102,6 +102,28 @@ async def normalize_people() -> None:
     options = ReparseOptions()
     items = await reparse.prepare({}, options)
     await _run("reparse", items, {"options": options.model_dump()}, "reparse")
+
+
+async def drop_property(keys: list[str], yes: bool) -> None:
+    """Remove properties that should not exist (test leftovers): the field on every document,
+    its passage vectors, its registry entry and its name vector. Lists the holders first; writes
+    only with --yes."""
+    for key in keys:
+        if properties.spec(key) is not None:
+            sys.exit(f"{key} is defined in property_specs.py; remove it from the code instead")
+        holders = await people.count({key: {"$exists": True}})
+        known = await properties.is_known(key)
+        print(f"{key}: {'in the registry' if known else 'not in the registry'}, "
+              f"on {holders} document(s)")
+    if not yes:
+        print("dry run; add --yes to remove")
+        return
+    for key in keys:
+        docs = await people.drop_field(key)
+        await embeddings.delete_field(key)
+        removed = await properties.remove(key)
+        print(f"{key}: removed from {docs} document(s); registry entry "
+              f"{'deleted' if removed else 'absent'}")
 
 
 async def migrate_history(dry_run: bool) -> None:
@@ -198,6 +220,9 @@ def main() -> None:
     nz.add_argument("--all", action="store_true", required=True, help="every document")
     mh = sub.add_parser("migrate-history", help="wrap legacy flat field values into histories")
     mh.add_argument("--dry-run", action="store_true")
+    dp = sub.add_parser("drop-property", help="delete properties (documents, vectors, registry)")
+    dp.add_argument("keys", nargs="+")
+    dp.add_argument("--yes", action="store_true", help="without it: list the holders only")
     args = p.parse_args()
 
     async def run() -> None:
@@ -219,6 +244,8 @@ def main() -> None:
                     await normalize_people()
                 case "migrate-history":
                     await migrate_history(args.dry_run)
+                case "drop-property":
+                    await drop_property(args.keys, args.yes)
         finally:
             await mongo.close()
             await db.dispose()

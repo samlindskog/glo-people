@@ -142,3 +142,38 @@ async def test_coverage_counts_current_values_only(writer, reader):
     await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": None}})
     assert count((await reader.get("/api/properties")).json(), "bio") == 0
     assert await people.value_counts("name") == [("Yan", 1)]
+
+
+async def test_drop_property_removes_field_vectors_and_registry_entry(writer, reader, capsys):
+    from app import cli
+    from app.history import Change  # noqa: F401  (import check: levels unaffected)
+
+    await _import(writer)
+    assert (await reader.get("/api/properties")).json() and "brand_new_column" in await _name_rows()
+    fe = db.field_embeddings
+    async with db.engine().connect() as conn:
+        before = (await conn.execute(select(fe.c.field).where(fe.c.field == "brand_new_column"))).all()
+    assert before, "the free-text column is embedded"
+    # a dry run only lists
+    await cli.drop_property(["brand_new_column"], yes=False)
+    assert "on 1 document(s)" in capsys.readouterr().out
+    assert await mongo_db().people.count_documents({"brand_new_column": {"$exists": True}}) == 1
+    await cli.drop_property(["brand_new_column"], yes=True)
+    out = capsys.readouterr().out
+    assert "removed from 1 document(s); registry entry deleted" in out
+    assert await mongo_db().people.count_documents({"brand_new_column": {"$exists": True}}) == 0
+    ada = await mongo_db().people.find_one({"name.v": "Ada"})
+    assert "brand_new_column" not in ada and ada["rev"] == 2            # a revision bump, no tombstone
+    assert "brand_new_column" not in {p["key"] for p in (await reader.get("/api/properties")).json()}
+    assert "brand_new_column" not in await _name_rows()
+    async with db.engine().connect() as conn:
+        assert (await conn.execute(select(fe.c.field).where(fe.c.field == "brand_new_column"))).all() == []
+    acts = (await writer.get("/api/activity?action=property.drop")).json()["items"]
+    assert acts[0]["target"] == "brand_new_column" and acts[0]["meta"] == {"documents": 1}
+    # spec-defined properties are refused; an unknown key is harmless
+    with pytest.raises(SystemExit):
+        await cli.drop_property(["mrr"], yes=True)
+    with pytest.raises(properties.PropertyError):
+        await properties.remove("stage")
+    await cli.drop_property(["never_existed"], yes=True)
+    assert "registry entry absent" in capsys.readouterr().out

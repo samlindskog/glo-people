@@ -259,6 +259,23 @@ async def remove_unused(key: str) -> bool:
     return bool(res.deleted_count)
 
 
+async def remove(key: str) -> bool:
+    """Delete a property's registry entry and its name vector. Refused for spec keys and while
+    documents still hold the key: `people.drop_field` (and `embeddings.delete_field`) first; the
+    CLI's `drop-property` does the three in order. False when there was no entry."""
+    if key in SPECS:
+        raise PropertyError(f"{key!r} is defined in property_specs; remove it from the code instead")
+    if await mongo.db().people.count_documents({key: {"$exists": True}}, limit=1):
+        raise PropertyError(f"{key!r} is still on documents; drop the field first")
+    res = await mongo.db().fields.delete_one({"_id": key})
+    if res.deleted_count:
+        reset()
+        async with db.engine().begin() as conn:
+            await conn.execute(delete(db.property_embeddings).where(db.property_embeddings.c.key == key))
+        reset()
+    return bool(res.deleted_count)
+
+
 async def remove_enum_value_if_unused(key: str, value: str) -> bool:
     """Pull a canonical value no document normalises to (the clean-up after a stopped or failed
     tool allocated it). Spec-seeded values stay."""
