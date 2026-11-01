@@ -1,63 +1,25 @@
 """LinkedIn profiles via FullEnrich on Firecrawl Alexandria: structured data, no scraping, no LLM.
 
 `fullenrich/people/match` resolves an exact LinkedIn URL for 5 credits; a miss costs nothing.
-The record is mapped into `LinkedInProfile` deterministically.
+The whole record is mapped into the shared `LinkedInProfile` deterministically: identity, headline,
+location, current position, the work history, education, languages and skills, and the links.
 """
 
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from app.integrations.firecrawl import AsyncFirecrawl
+from app.integrations.profile import (  # noqa: F401  (re-exported for the callers)
+    Company,
+    Education,
+    LinkedInProfile,
+    Position,
+    profile_lines,
+    profile_values,
+)
 from app.urls import github_profile, is_social, normalize_url
 
 PROVIDER = "fullenrich"
 MATCH_CREDITS = 5      # listed price of people/match per record found
-
-
-class Company(BaseModel):
-    name: str = Field(description="Company name as written")
-    linkedin_url: str | None = Field(None, description="linkedin.com/company/... if present")
-    website: str | None = Field(None, description="Company website if the record states it")
-    description: str | None = Field(None, description="The provider's own description")
-
-
-class LinkedInProfile(BaseModel):
-    """What the data-provider record says about the person."""
-
-    full_name: str | None = Field(None, description="The profile's name as the provider has it")
-    first_name: str | None = None
-    last_name: str | None = None
-    headline: str | None = Field(None, description="Profile headline / tagline, verbatim")
-    location: str | None = None
-    summary: str | None = Field(None, description="The profile's about text")
-    current_title: str | None = None
-    current_company: Company | None = Field(None, description="Current employer, if any")
-    personal_sites: list[str] = Field(
-        default_factory=list, description="Personal or portfolio websites listed on the profile "
-                                          "(not the employer's site, not social networks)")
-    github_url: str | None = Field(None, description="github.com/<user> if listed")
-    other_links: list[str] = Field(default_factory=list,
-                                   description="Other URLs on the profile (twitter, blog, ...)")
-
-
-def profile_values(profile: LinkedInProfile, current: dict[str, Any]) -> dict[str, Any]:
-    """What a matched profile adds to a record: the headline, the GitHub account, the location
-    when the record has none, and the current company when it differs from the record's (the
-    old one stays in history). `current` is the record's current values. A paid lookup should
-    never be thrown away: every caller that matched a profile writes these."""
-    values: dict[str, Any] = {}
-    if profile.headline:
-        values["linkedin_headline"] = " ".join(profile.headline.split())
-    if g := github_profile(profile.github_url):
-        values["github"] = g
-    if profile.location and not current.get("location"):
-        values["location"] = profile.location
-    company = profile.current_company.name if profile.current_company else None
-    now = current.get("company")
-    if company and (not isinstance(now, str) or now.strip().lower() != company.strip().lower()):
-        values["company"] = company
-    return values
 
 
 async def match(client: AsyncFirecrawl, linkedin_url: str) -> LinkedInProfile | None:
@@ -68,13 +30,47 @@ async def match(client: AsyncFirecrawl, linkedin_url: str) -> LinkedInProfile | 
     return from_record(people[0]) if people else None
 
 
+def _pick(d: Any, *keys: str) -> Any:
+    """The first present key of a provider object (their field names vary between tools)."""
+    if not isinstance(d, dict):
+        return None
+    return next((d[k] for k in keys if d.get(k) not in (None, "", [], {})), None)
+
+
+def _name(v: Any) -> str | None:
+    """A provider value that is a string or an object with a name."""
+    if isinstance(v, dict):
+        v = _pick(v, "name", "title", "label")
+    return str(v) if v not in (None, "") else None
+
+
+def _names(values: Any) -> list[str]:
+    return [n for n in map(_name, values if isinstance(values, list) else []) if n]
+
+
+def _position(e: dict[str, Any]) -> Position:
+    return Position(title=_name(_pick(e, "title", "position", "role")),
+                    company=_name(_pick(e, "company", "company_name", "organization")),
+                    start=_name(_pick(e, "start_date", "start", "started_at", "from")),
+                    end=_name(_pick(e, "end_date", "end", "ended_at", "to")),
+                    is_current=bool(e.get("is_current")))
+
+
+def _education(e: dict[str, Any]) -> Education:
+    return Education(school=_name(_pick(e, "school", "school_name", "institution", "university")),
+                     degree=_name(_pick(e, "degree", "degree_name")),
+                     field=_name(_pick(e, "field_of_study", "field", "major")),
+                     start=_name(_pick(e, "start_date", "start", "from")),
+                     end=_name(_pick(e, "end_date", "end", "to")))
+
+
 def from_record(rec: dict[str, Any]) -> LinkedInProfile:
     """Map a FullEnrich person record to our profile model."""
     loc = rec.get("location") or {}
     location = ", ".join(str(loc[k]) for k in ("city", "region", "country") if loc.get(k)) or None
     employment = rec.get("employment") or {}
-    cur = employment.get("current") or next(
-        (e for e in employment.get("all") or [] if e.get("is_current")), None) or {}
+    history = [e for e in employment.get("all") or [] if isinstance(e, dict)]
+    cur = employment.get("current") or next((e for e in history if e.get("is_current")), None) or {}
     company = None
     if cur.get("company", {}).get("name"):
         c = cur["company"]
@@ -82,6 +78,9 @@ def from_record(rec: dict[str, Any]) -> LinkedInProfile:
         company = Company(name=str(c["name"]), linkedin_url=li,
                           website=normalize_url(c.get("website") or c.get("domain")),
                           description=c.get("description"))
+    if cur and not any(e is cur or (e.get("title") == cur.get("title") and e.get("is_current"))
+                       for e in history):
+        history.insert(0, cur)
     github_url, sites, others = None, [], []
     for key, prof in (rec.get("social_profiles") or {}).items():
         url = normalize_url((prof or {}).get("url") if isinstance(prof, dict) else prof)
@@ -106,4 +105,10 @@ def from_record(rec: dict[str, Any]) -> LinkedInProfile:
         personal_sites=sites,
         github_url=github_url,
         other_links=others,
+        experience=[p for p in map(_position, history) if p.title or p.company],
+        education=[e for e in map(_education, rec.get("educations") or [])
+                   if isinstance(e, Education) and (e.school or e.degree)],
+        skills=_names(rec.get("skills")),
+        languages=_names(rec.get("languages")),
+        interests=_names(_pick(rec, "interests", "hobbies")),
     )

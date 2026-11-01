@@ -104,6 +104,7 @@ function Report({ result }: { result: StoreResult }) {
   if (result.conflicts.length) lines.push(`Replaced a different value (kept in history): ${result.conflicts.join(', ')}`)
   if (Object.keys(result.redirected).length) lines.push(`Redirected to existing properties: ${Object.entries(result.redirected).map(([a, b]) => `${a} → ${b}`).join(', ')}`)
   if (result.to_notes.length) lines.push(`Filed under notes (new-property cap): ${result.to_notes.join(', ')}`)
+  if (result.dropped?.length) lines.push(`Dropped (no property for it, none may be created): ${result.dropped.join(', ')}`)
   if (result.ignored.length) lines.push(`Ignored: ${result.ignored.join(' · ')}`)
   if (result.credits) lines.push(`${result.credits} Firecrawl credits`)
   if (result.changes.length === 0 && lines.length === 0) return <p className="text-sm text-slate-500">Nothing about the person was found in the passage.</p>
@@ -126,7 +127,7 @@ function Report({ result }: { result: StoreResult }) {
                   <span className={`badge ${CHANGE_CLASS[c.action]}`}>{CHANGE_LABEL[c.action]}</span>
                   {c.flag && <span className="ml-1 text-xs text-slate-500">{c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}</span>}
                 </td>
-                <td className="max-w-md">
+                <td className="max-w-md" title={result.evidence?.[c.key] ? `From the passage: “${result.evidence[c.key]}”` : undefined}>
                   {c.previous !== null && c.previous !== undefined && c.action === 'set' && <span className="text-slate-400 line-through">{formatValue(c.previous)} </span>}
                   {formatValue(c.value)}
                 </td>

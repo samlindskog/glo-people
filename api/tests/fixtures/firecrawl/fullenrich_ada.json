@@ -1,15 +1,94 @@
-{"people": [{"id": "p-ada", "full_name": "Ada Okafor", "first_name": "Ada", "last_name": "Okafor",
-  "headline": "Building payments infrastructure for African merchants · CEO at PayRail",
-  "description": "Founder of PayRail. Previously Paystack and Stripe.",
-  "location": {"city": "Lagos", "country": "Nigeria", "country_code": "NG"},
-  "employment": {"current": {"title": "CEO & Co-founder", "is_current": true,
-     "company": {"id": "c-payrail", "name": "PayRail", "website": "payrail.io", "domain": "payrail.io",
-                 "description": "Payments infrastructure for merchants across West Africa.",
-                 "social_profiles": {"professional_network": {"url": "https://www.linkedin.com/company/payrail"}}}},
-     "all": []},
-  "social_profiles": {"professional_network": {"url": "https://www.linkedin.com/in/adaokafor", "handle": "adaokafor"},
-                      "github": {"url": "https://github.com/adaok"},
-                      "twitter": {"url": "https://twitter.com/adaokafor"},
-                      "website": {"url": "https://adaokafor.dev"}},
-  "educations": [], "languages": [], "skills": ["Payments"]}],
- "metadata": {"total": 1, "credits": 5}}
+{
+ "people": [
+  {
+   "id": "p-ada",
+   "full_name": "Ada Okafor",
+   "first_name": "Ada",
+   "last_name": "Okafor",
+   "headline": "Building payments infrastructure for African merchants · CEO at PayRail",
+   "description": "Founder of PayRail. Previously Paystack and Stripe.",
+   "location": {
+    "city": "Lagos",
+    "country": "Nigeria",
+    "country_code": "NG"
+   },
+   "employment": {
+    "current": {
+     "title": "CEO & Co-founder",
+     "is_current": true,
+     "company": {
+      "id": "c-payrail",
+      "name": "PayRail",
+      "website": "payrail.io",
+      "domain": "payrail.io",
+      "description": "Payments infrastructure for merchants across West Africa.",
+      "social_profiles": {
+       "professional_network": {
+        "url": "https://www.linkedin.com/company/payrail"
+       }
+      }
+     }
+    },
+    "all": [
+     {
+      "title": "CEO & Co-founder",
+      "is_current": true,
+      "start_date": "2021-03-01",
+      "end_date": null,
+      "company": {
+       "id": "c-payrail",
+       "name": "PayRail"
+      }
+     },
+     {
+      "title": "Product Lead",
+      "is_current": false,
+      "start_date": "2018-01-01",
+      "end_date": "2021-02-01",
+      "company": {
+       "name": "Paystack"
+      }
+     }
+    ]
+   },
+   "social_profiles": {
+    "professional_network": {
+     "url": "https://www.linkedin.com/in/adaokafor",
+     "handle": "adaokafor"
+    },
+    "github": {
+     "url": "https://github.com/adaok"
+    },
+    "twitter": {
+     "url": "https://twitter.com/adaokafor"
+    },
+    "website": {
+     "url": "https://adaokafor.dev"
+    }
+   },
+   "educations": [
+    {
+     "school": {
+      "name": "University of Lagos"
+     },
+     "degree": "BSc",
+     "field_of_study": "Computer Science",
+     "start_date": "2010-09-01",
+     "end_date": "2014-07-01"
+    }
+   ],
+   "languages": [
+    "English",
+    "Yoruba"
+   ],
+   "skills": [
+    "Payments",
+    "Fintech"
+   ]
+  }
+ ],
+ "metadata": {
+  "total": 1,
+  "credits": 5
+ }
+}

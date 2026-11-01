@@ -239,6 +239,8 @@ export interface PlanResult {
 export interface StoreOptions {
   max_new: number
   near_duplicate: number
+  /** Where facts beyond max_new go: filed under notes (default) or dropped and reported. */
+  overflow?: 'notes' | 'ignore'
 }
 
 /** The identity repair inside a normalize result. */
@@ -280,6 +282,10 @@ export interface StoreResult {
   created_properties: string[]
   redirected: Record<string, string>
   to_notes: string[]
+  /** Facts dropped because max_new was reached (overflow "ignore"). */
+  dropped: string[]
+  /** Property → the passage words its write rests on. */
+  evidence: Record<string, string>
   normalization: NormalizeResult | null
 }
 

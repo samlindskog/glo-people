@@ -15,10 +15,16 @@ from pydantic_ai import ModelMessage, ModelResponse
 from pydantic_ai.messages import ModelRequest, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
+from app import db as db_pg
 from app import embedder
+from app import people as people_mod
+from app.agents import fakes
 from app.assistants import runner
 from app.assistants.enrich import assistant as enrich_workflow
 from app.assistants.enrich import budget as enrich_budget
+from app.assistants.enrich.passage import Passage
+from app.history import Source
+from app.integrations import profile as profile_mod
 from app.integrations.firecrawl import (
     SCRAPE_CREDITS,
     SEARCH_CREDITS,
@@ -30,7 +36,7 @@ from app.integrations.firecrawl import (
     SearchHit,
 )
 from app.mongo import db
-from app.tools import company, site
+from app.tools import company, site, store
 from app.urls import url_key
 from tests.conftest import import_people
 
@@ -44,6 +50,19 @@ Bo Chen,Leafy,Berlin,https://linkedin.com/in/bochen,https://bochen.me,Climate fo
 Cy Diaz,,,,,Doctor turned investor
 Dee Evans,,,https://www.linkedin.com/in/exchange-fail,,Operator
 """
+
+EXPECTED_PASSAGE = """\
+# Facts from data providers; each line names the property it belongs to.
+# LinkedIn profile (fullenrich/people/match)
+about: Founder of PayRail. Previously Paystack and Stripe.
+title_enriched: CEO & Co-founder
+experience: CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack (2018–2021)
+education: BSc Computer Science, University of Lagos (2010–2014)
+skills: Payments; Fintech
+languages: English; Yoruba
+# Personal site https://adaokafor.dev (site_reader)
+one_liner: Builds payments infrastructure."""
+
 
 def written(result: dict) -> dict:
     """Property → value an item wrote (set or append changes)."""
@@ -181,6 +200,12 @@ def company_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRespons
                        "evidence_url": None})
 
 
+def storage_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """The shared fake storage agent, counted."""
+    model_calls["storage"] = model_calls.get("storage", 0) + 1
+    return fakes.storage(messages, info)
+
+
 @pytest.fixture(autouse=True)
 def _fakes(monkeypatch):
     embedder.set_embedder(embedder.FakeEmbedder(512))
@@ -191,6 +216,7 @@ def _fakes(monkeypatch):
     with ExitStack() as stack:
         stack.enter_context(site.agent.override(model=FunctionModel(site_model)))
         stack.enter_context(company.agent.override(model=FunctionModel(company_model)))
+        stack.enter_context(store.agent.override(model=FunctionModel(storage_model)))
         yield
 
 
@@ -232,6 +258,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     res = item["result"]
     assert res["linkedin"] == "matched" and res["linkedin_provider"] == "fullenrich"
     assert res["company"] == "resolved" and res["github"] == "matched"
+    assert res["storage"] == "stored" and res["passage"] == EXPECTED_PASSAGE
     assert written(res) == {
         "linkedin_headline": "Building payments infrastructure for African merchants · CEO at PayRail",
         "github": "https://github.com/adaok",
@@ -241,13 +268,30 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "website": "https://payrail.io",
         "company_description": "PayRail provides payments infrastructure for merchants in West "
                            "Africa, with next-day local settlement.",
+        # the provider record and the site's one-liner, filed by the storage agent
+        "about": "Founder of PayRail. Previously Paystack and Stripe.",
+        "title_enriched": "CEO & Co-founder",
+        "experience": "CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack "
+                      "(2018–2021)",
+        "education": "BSc Computer Science, University of Lagos (2010–2014)",
+        "skills": ["Payments", "Fintech"],
+        "languages": ["English", "Yoruba"],
+        "one_liner": "Builds payments infrastructure.",
+        "enrichment_passage": EXPECTED_PASSAGE,
     }
-    # Her own site, location and company are already on the record: not re-added.
-    assert not {"location", "company"} & set(written(res))
+    # Her own site, location and company are already on the record: not re-added; the provider
+    # dump never reaches notes.
+    assert not {"location", "company", "notes"} & set(written(res))
+    assert res["stored"]["skills"] == {"provider": "fullenrich/people/match",
+                                       "evidence": "skills: Payments; Fintech"}
+    assert res["stored"]["one_liner"]["provider"] == "site_reader"
+    assert res["providers"] == {"fullenrich": "matched"} and res.get("dropped") is None
     assert item["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + 2 * SCRAPE_CREDITS
     assert item["credits"] == run["credits_used"]
     assert [c for c in FakeFirecrawl.calls if c[0] == "search"] == []
-    assert model_calls == {"site": 1, "company": 2}        # no LLM call for LinkedIn or GitHub
+    assert model_calls == {"site": 1, "company": 2, "storage": 1}   # none for LinkedIn or GitHub
+    assert "facts filed through the storage agent" in res["text"]
+    assert "enrichment_passage" not in res["text"]
 
     person = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()
     assert person["github"] == "https://github.com/adaok"
@@ -256,12 +300,16 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
                    "ref": f"run:{run['id']}/item:{item['id']}"}
     assert person["history"]["company_description"][0]["src"]["by"] == "enrich/company"
     assert person["history"]["github_summary"][0]["src"]["by"] == "enrich/github"
+    assert person["history"]["about"][0]["src"]["by"] == "enrich/storage"
+    assert person["history"]["enrichment_passage"][0]["src"]["by"] == "enrich/storage"
+    assert person["enrichment_passage"] == EXPECTED_PASSAGE
     assert [e["v"] for e in person["history"]["website"]] == ["www.adaokafor.dev",
                                                               "https://payrail.io"]
     assert len(person["history"]["company"]) == 1
     fl = {f["key"]: f for f in (await reader.get("/api/properties")).json()}
     assert fl["company_description"]["embeddable"] and fl["github_summary"]["embeddable"]
     assert not fl["github"]["embeddable"] and not fl["related_links"]["embeddable"]
+    assert fl["about"]["embeddable"] and not fl["enrichment_passage"]["embeddable"]
 
 
 async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, reader, people):
@@ -298,6 +346,102 @@ async def test_linkedin_not_found_falls_back_to_the_website(writer, reader, peop
     assert any("not the person's own site" in s["reason"] for s in res["skipped"])
 
 
+async def test_storage_failure_is_a_skipped_step_and_the_item_stays_done(writer, reader, people):
+    def broken(messages, info):
+        raise RuntimeError("model down")
+
+    with store.agent.override(model=FunctionModel(broken)):
+        run = await run_for(writer, [people["Ada Okafor"]])
+    item = run["items"][0]
+    assert item["status"] == "done", item
+    res = item["result"]
+    assert res["storage"] == "error" and res["passage"] == EXPECTED_PASSAGE
+    assert "linkedin_headline" in written(res) and "about" not in written(res)
+    assert any(s["step"] == "storage" and "model down" in s["reason"] for s in res["skipped"])
+    person = (await reader.get(f"/api/people/{people['Ada Okafor']}")).json()
+    assert "enrichment_passage" not in person and "about" not in person
+
+
+async def test_redo_pays_linkedin_again_only_when_the_facts_were_not_filed(writer, reader, people):
+    """An item redone after an interruption: with the headline on the record but no filed
+    passage, the lookup is paid once more and the facts are filed; with both, nothing is paid."""
+    ada = people["Ada Okafor"]
+    src = Source("agent", "enrich/linkedin_reader", "run:0/item:0")
+    await people_mod.update(None, ada, {"linkedin_headline": "old headline"}, source=src)
+    run = await run_for(writer, [ada])
+    res = run["items"][0]["result"]
+    assert res["linkedin"] == "matched" and res["storage"] == "stored"
+    assert sum(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls) == 1
+    # now both entries are on the record; wipe the run so the TTL skip does not apply
+    await runner.abort_all()
+    async with db_pg.engine().begin() as conn:
+        for t in (db_pg.workflow_run_events, db_pg.workflow_run_items, db_pg.workflow_runs):
+            await conn.execute(t.delete())
+    FakeFirecrawl.calls = []
+    run = await run_for(writer, [ada])
+    res = run["items"][0]["result"]
+    assert res["linkedin"] == "skipped" and res["storage"] == "skipped"
+    assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
+    assert {s["step"]: s["reason"] for s in res["skipped"]}["storage"] == "filed by the earlier attempt"
+    # the GitHub account and the company are already on the record too: only the sites are re-read
+    assert run["credits_used"] == 2 * SCRAPE_CREDITS
+
+
+async def test_max_new_properties_reaches_the_storage_tool(writer, people, monkeypatch):
+    seen: list[store.StoreOptions] = []
+    original = store.store
+
+    async def spy(ctx, passage, opts=None):
+        seen.append(opts)
+        return await original(ctx, passage, opts)
+
+    monkeypatch.setattr(store, "store", spy)
+    await run_for(writer, [people["Ada Okafor"]], max_new_properties=3)
+    assert [(o.max_new, o.overflow) for o in seen] == [(3, "ignore")]
+    await run_for(writer, [people["Bo Chen"]])
+    assert len(seen) == 1                      # Bo: no profile, no personal site, no passage
+    specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
+    assert specs["enrich"]["options_schema"]["properties"]["max_new_properties"]["default"] == 0
+
+
+def test_passage_merges_lists_and_drops_a_second_text():
+    p = Passage()
+    assert not p
+    p.add("fullenrich/people/match", "LinkedIn profile",
+          [("about", "  Founder\nof PayRail "), ("skills", ["Payments", " payments", "Fintech"]),
+           ("languages", [])])
+    p.add("pdl/person/enrich", "PDL profile", [("skills", ["fintech", "Go-to-market"]),
+                                               ("about", "another about")])
+    assert p and p.keys == ["about", "skills"]
+    assert p.render() == ("# Facts from data providers; each line names the property it belongs to.\n"
+                          "# LinkedIn profile (fullenrich/people/match)\n"
+                          "about: Founder of PayRail\n"
+                          "skills: Payments; Fintech; Go-to-market")
+    assert p.source_of("skills") == "fullenrich/people/match, pdl/person/enrich"
+    assert p.dropped == [("about", "pdl/person/enrich")]
+    assert len(p.digest()) == 16 and p.digest() == Passage.digest(p)
+
+
+def test_profile_lines_use_spec_properties_of_the_right_type():
+    from app.property_specs import SPECS
+    prof = profile_mod.LinkedInProfile(
+        summary="About.", current_title="CTO",
+        experience=[profile_mod.Position(title="CTO", company="Leafy", start="2022", is_current=True),
+                    profile_mod.Position(title="Engineer", start="2019-01", end="2021-12"),
+                    profile_mod.Position(company="Unknown Co")],
+        education=[profile_mod.Education(school="TU Berlin", degree="MSc", field="CS", end="2018")],
+        skills=["Python"], interests=["Climate"])
+    lines = dict(profile_mod.profile_lines(prof))
+    assert lines == {"about": "About.", "title_enriched": "CTO",
+                     "experience": "CTO at Leafy (2022–present); Engineer (2019–2021); Unknown Co",
+                     "education": "MSc CS, TU Berlin (2018)", "skills": ["Python"],
+                     "interests": ["Climate"]}
+    for key, value in lines.items():
+        assert SPECS[key].type == ("list" if isinstance(value, list) else
+                                   "keyword" if key == "title_enriched" else "text"), key
+    assert profile_mod.profile_lines(profile_mod.LinkedInProfile()) == []
+
+
 async def test_provider_error_is_a_skipped_step(writer, people):
     run = await run_for(writer, [people["Dee Evans"]])
     item = run["items"][0]
@@ -322,7 +466,8 @@ async def test_nothing_known_costs_nothing(writer, people):
     item = run["items"][0]
     assert item["status"] == "done" and item["credits"] == 0 and model_calls == {}
     assert {s["step"] for s in item["result"]["skipped"]} == {"linkedin", "sites", "github",
-                                                               "company"}
+                                                               "company", "storage"}
+    assert item["result"]["storage"] == "skipped" and "passage" not in item["result"]
     assert FakeFirecrawl.calls == []
 
 

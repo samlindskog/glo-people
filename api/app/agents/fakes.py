@@ -88,9 +88,11 @@ def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     out: dict = {"writes": [], "new_properties": [], "confirmed": [], "ignored": []}
     # a multi-line passage is one fact per line (the enrich assistant's labelled lines); a single
     # line is split into sentences
-    splitter = r"\n+" if "\n" in passage.strip() else r"\.\s+(?=[a-z_]+\s*:)|(?<=[^0-9])\.\s+|\n+"
+    lines_mode = "\n" in passage.strip()
+    splitter = r"\n+" if lines_mode else r"\.\s+(?=[a-z_]+\s*:)|(?<=[^0-9])\.\s+|\n+"
     for line in [ln.strip() for ln in re.split(splitter, passage) if ln.strip()]:
-        line = line.rstrip(".")
+        if not lines_mode:
+            line = line.rstrip(".")
         if line.startswith("#") or (line.lower().startswith("hi") and ":" not in line):
             out["ignored"].append(line)
             continue

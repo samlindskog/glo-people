@@ -1,9 +1,13 @@
 """Assistant (level 3): the enrichment ladder — LinkedIn (FullEnrich) → personal sites → GitHub
-and links → company — one function per step, cheapest step first, using the site and company
-tools and the data providers.
+and links → company → storage — one function per step, cheapest step first, using the site,
+company and store tools and the data providers.
 
 Every paid call is preceded by a free check and a missing input skips the step; nothing is
-searched for when the record gives no lead. Nothing is overwritten: all writes append history
+searched for when the record gives no lead. Identifiers and our own tools' outputs are written
+directly; everything prose- or tag-like the sources return (about text, title, work history,
+education, skills, languages, the site's one-liner) is collected into one labelled passage that
+the last step hands to the storage agent once, so it lands in the right properties with
+restatements confirmed and conflicts marked. Nothing is overwritten: all writes append history
 entries attributed to `enrich/<agent>`. Per person it returns text for the run table plus the
 changes it caused.
 """
@@ -23,6 +27,7 @@ from app.assistants.base import StopRun
 from app.assistants.context import AssistantDeps
 from app.assistants.enrich.budget import CAPS, MIN_PAGE_CHARS, budget_for
 from app.assistants.enrich.models import EnrichOptions
+from app.assistants.enrich.passage import Passage
 from app.auth import Principal
 from app.config import get_settings
 from app.integrations import fullenrich, github
@@ -38,6 +43,7 @@ from app.integrations.firecrawl import (
 from app.integrations.fullenrich import LinkedInProfile
 from app.tools import company as company_tool
 from app.tools import site as site_tool
+from app.tools import store as store_tool
 from app.urls import (
     github_profile,
     host_mentions,
@@ -79,8 +85,10 @@ class State:
     profile: LinkedInProfile | None = None
     github_urls: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)
+    passage: Passage = field(default_factory=Passage)   # what the storage step files
+    redo: bool = False      # an earlier attempt already ran the ladder to the end for this person
     result: dict[str, Any] = field(default_factory=lambda: {
-        "linkedin": "absent", "company": "absent", "not_found": []})
+        "linkedin": "absent", "company": "absent", "storage": "skipped", "not_found": []})
 
 
 def _has_url(deps: AssistantDeps, key: str, url: str) -> bool:
@@ -117,7 +125,9 @@ async def _ladder(deps: AssistantDeps) -> dict[str, Any]:
     await _step_sites(deps, st)
     await _step_github_and_links(deps, st)
     await _step_company(deps, st)
-    return {**st.result, "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
+    await _step_store(deps, st)
+    return {**st.result, "providers": {fullenrich.PROVIDER: st.result["linkedin"]},
+            "text": _text(st, deps), "changes": [c.model_dump() for c in deps.changes],
             "skipped": deps.skipped}
 
 
@@ -130,14 +140,18 @@ _STEP_TEXT = {
     ("github", "matched"): "GitHub account summarised",
     ("company", "resolved"): "company website resolved and summarised",
     ("company", "unresolved"): "company not resolved",
+    ("storage", "stored"): "facts filed through the storage agent",
+    ("storage", "unchanged"): "the same facts were filed before",
+    ("storage", "error"): "the storage agent failed",
 }
 
 
 def _text(st: State, deps: AssistantDeps) -> str:
     """One sentence for the run table: what happened and what was written."""
-    parts = [_STEP_TEXT[(step, st.result[step])] for step in ("linkedin", "github", "company")
+    parts = [_STEP_TEXT[(step, st.result[step])]
+             for step in ("linkedin", "github", "company", "storage")
              if (step, st.result.get(step)) in _STEP_TEXT]
-    written = sorted(deps.written)
+    written = sorted(k for k in deps.written if k not in store_tool.AUDIT_KEYS)
     parts.append(f"wrote {', '.join(written)}" if written else "nothing new to write")
     return "; ".join(parts).capitalize() + "."
 
@@ -200,9 +214,14 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     if not li:
         deps.skip("linkedin", "no linkedin.com/in URL on the record")
         return
-    if not st.options.refresh and _recent(deps, "linkedin_headline", "linkedin_reader"):
-        deps.skip("linkedin", "already read within the TTL (an earlier attempt)")
+    if not st.options.refresh and _recent(deps, "linkedin_headline", "linkedin_reader") \
+            and _recent(deps, "enrichment_passage", "storage"):
+        # Both the headline and the filed passage are on the record: the earlier attempt ran the
+        # ladder to its end. (Interrupted between the two, the lookup is paid once more so the
+        # facts get filed.)
+        deps.skip("linkedin", "already read and filed within the TTL (an earlier attempt)")
         st.result["linkedin"] = "skipped"
+        st.redo = True
         return
     deps.emit("step", f"LinkedIn: asking the data provider about {li}")
     if "linkedin" in st.previously_missing:
@@ -226,6 +245,8 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
         st.github_urls.append(github_url)
     st.related.extend(profile.other_links)
     await deps.write("linkedin_reader", fullenrich.profile_values(profile, deps.person or {}))
+    st.passage.add(f"{fullenrich.PROVIDER}/people/match", "LinkedIn profile",
+                   fullenrich.profile_lines(profile))
 
 
 def _site_candidates(deps: AssistantDeps, st: State) -> list[str]:
@@ -273,6 +294,9 @@ async def _step_sites(deps: AssistantDeps, st: State) -> None:
             continue
         if not _has_url(deps, "website", site):
             await deps.write(site_tool.AGENT_NAME, {"website": site})
+        if findings.one_liner:
+            st.passage.add(site_tool.AGENT_NAME, f"Personal site {site}",
+                           [("one_liner", findings.one_liner)])
         st.github_urls += [g for g in map(github_profile, [*page.links, *findings.github_urls])
                            if g]
         st.related += [link.url for link in findings.related_links]
@@ -320,6 +344,8 @@ async def _github_facts(deps: AssistantDeps, st: State, github_url: str) -> None
     if found.blog and not is_social(found.blog) and is_html_candidate(found.blog) \
             and not _has_url(deps, "website", found.blog):
         values["website"] = found.blog       # the account's blog field is usually the personal site
+    if found.location and not deps.current("location"):
+        values["location"] = found.location
     await deps.write("github", values)
 
 
@@ -390,3 +416,49 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
     if not deps.current("company"):
         values["company"] = company
     await deps.write(company_tool.AGENT_NAME, values)
+
+
+async def _step_store(deps: AssistantDeps, st: State) -> None:
+    """Step 5: everything prose- or tag-like the sources returned goes to the storage agent in one
+    passage (labelled lines, one per property, a section per source), so it lands in the right
+    properties with restatements confirmed and conflicts marked; facts the catalog has no home
+    for are dropped unless the run allows new properties. The passage itself is then kept on the
+    record as `enrichment_passage`, so the facts and their source sit side by side in history;
+    a refresh whose passage equals the one on the record makes no model call."""
+    if st.redo:
+        deps.skip("storage", "filed by the earlier attempt")
+        return
+    if not st.passage:
+        deps.skip("storage", "nothing gathered that needs filing")
+        return
+    text = st.passage.render()
+    st.result["passage"], st.result["passage_hash"] = text, st.passage.digest()
+    for key, source in st.passage.dropped:
+        deps.skip("storage", f"{key}: a second value, from {source}, was not filed")
+    if deps.current("enrichment_passage") == text:
+        st.result["storage"] = "unchanged"
+        deps.skip("storage", "the same facts were filed before")
+        return
+    sources = dict.fromkeys(s for ss in st.passage.sources.values() for s in ss)
+    deps.emit("step", f"storage: filing {len(st.passage.keys)} facts from {', '.join(sources)}")
+    opts = store_tool.StoreOptions(max_new=st.options.max_new_properties, overflow="ignore")
+    try:
+        with logfire.span("storage"):
+            res = await deps.tool(store_tool.store, "storage", passage=text, opts=opts)
+    except Exception as e:  # the item stays done; the facts wait for `refresh`
+        log.exception("enrich: the storage agent failed for %s", deps.person_id)
+        st.result["storage"] = "error"
+        deps.skip("storage", f"the storage agent failed: {e}")
+        return
+    if res is None:
+        return
+    assert isinstance(res, store_tool.StoreResult)
+    st.result["storage"] = "stored"
+    st.result["stored"] = {key: {"provider": st.passage.source_of(key), "evidence": evidence}
+                           for key, evidence in res.evidence.items()}
+    st.result["confirmed"] = list(res.confirmed)
+    if res.dropped:
+        st.result["dropped"] = list(res.dropped)
+    if res.created_properties:
+        st.result["created_properties"] = list(res.created_properties)
+    await deps.write("storage", {"enrichment_passage": text})

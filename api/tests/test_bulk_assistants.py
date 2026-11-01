@@ -136,8 +136,9 @@ async def test_cli_drives_a_run_in_its_own_process(writer, tmp_path, monkeypatch
 
 
 async def test_enrich_does_not_pay_twice_for_a_step_already_on_the_record(writer, reader):
-    # the LinkedIn step ran (an entry by enrich/linkedin_reader is on the record) but the item
-    # never finished: a redo skips the paid step instead of spending 5 credits again
+    # the LinkedIn step ran and its facts were filed (entries by enrich/linkedin_reader and
+    # enrich/storage are on the record) but the item never finished: a redo skips the paid step
+    # instead of spending 5 credits again
     r = await writer.post("/api/people/import", data={"tier": "member"},
                           files={"file": ("p.csv", PEOPLE.encode(), "text/csv")})
     assert r.status_code == 201, r.text
@@ -145,6 +146,8 @@ async def test_enrich_does_not_pay_twice_for_a_step_already_on_the_record(writer
     ada = str((await db().people.find_one({"name.v": "Ada Okafor"}))["_id"])
     await people.update(None, ada, {"linkedin_headline": "CEO at PayRail"},
                         source=Source("agent", "enrich/linkedin_reader", "run:0/item:0"))
+    await people.update(None, ada, {"enrichment_passage": "# filed earlier"},
+                        source=Source("agent", "enrich/storage", "run:0/item:0"))
     FakeFirecrawl.calls.clear()
     r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": [ada]})
     run = await runner.wait(r.json()["id"])
