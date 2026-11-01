@@ -33,6 +33,7 @@ class Spec:
     values: tuple[str, ...] = ()      # seed canonical values (enum, enum_list)
     label: str | None = None          # overrides fields.label_for(key)
     description: str | None = None    # one sentence on what values it holds (agents read it)
+    embed: bool | None = None         # overrides the type's default (text/list are embedded)
 
 
 TEXT = Spec("text")
@@ -72,7 +73,24 @@ SPECS: dict[str, Spec] = {
     "related_links": Spec("url"),
     # who they are
     "role": Spec("keyword"),
-    "title_enriched": Spec("keyword", label="Title (enriched)"),
+    "title_enriched": Spec("keyword", label="Title (enriched)",
+                           description="Current job title as a data provider states it"),
+    # what the enrich assistant files from provider profiles through the storage agent
+    "about": Spec("text", description="The person's own profile summary (LinkedIn about text), "
+                                      "verbatim"),
+    "experience": Spec("text", description="Work history: title at company (years), one position "
+                                           "per clause, most recent first"),
+    "education": Spec("text", description="Education: degree, institution (years), one school "
+                                          "per clause"),
+    "skills": Spec("list", description="Skills listed on their profiles (payments, python, "
+                                       "go-to-market…)"),
+    "languages": Spec("list", description="Languages they speak"),
+    "interests": Spec("list", description="Interests listed on their profiles (topics, causes, "
+                                          "hobbies)"),
+    "enrichment_passage": Spec("text", label="Enrichment passage", embed=False,
+                               description="The facts the enrich assistant last handed to the "
+                                           "storage agent, as sent (one line per property, "
+                                           "sectioned by source); an audit record, not searched"),
     "seniority": Spec("enum", SENIORITY),
     "company": Spec("keyword"),
     "industry": Spec("keyword"),

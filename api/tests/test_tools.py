@@ -170,6 +170,42 @@ async def test_store_files_facts_under_properties(people_by_name, writer, reader
     assert (await writer.post(f"/api/people/{ada}/store/apply", json={})).status_code in (404, 405)
 
 
+async def test_store_overflow_ignore_and_evidence(people_by_name, writer, reader):
+    ada = people_by_name["Ada"]
+    # a labelled multi-line passage (what the enrich assistant sends): one fact per line, '#'
+    # headers ignored, facts without a home dropped instead of filed under notes
+    passage = ("# Facts from data providers; each line names the property it belongs to.\n"
+               "# LinkedIn profile (fullenrich people/match)\n"
+               "notes: met at the summit. follows up next week\n"
+               "mrr: 20k\n"
+               "new hat size: 7\n"
+               "new shoe size: 42\n")
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={
+        "passage": passage, "options": {"max_new": 0, "overflow": "ignore"}})
+    assert r.status_code == 200, r.text
+    res = r.json()
+    by = by_change(res)
+    assert by[("notes", "set")]["value"] == "met at the summit. follows up next week"   # one line, one write
+    assert by[("mrr", "set")]["value"] == "20k"
+    assert res["dropped"] == ["Hat size", "Shoe size"] and res["to_notes"] == []
+    assert res["created_properties"] == [] and await properties.get("hat_size") is None
+    assert res["evidence"]["mrr"] == "mrr: 20k"
+    assert res["evidence"]["notes"] == "notes: met at the summit. follows up next week"
+    assert res["ignored"][0].startswith("# Facts")
+    # the default still files the overflow under notes
+    r = await writer.post(f"/api/people/{ada}/store?wait=true", json={
+        "passage": "new eye colour: green", "options": {"max_new": 0}})
+    assert r.json()["to_notes"] == ["Eye colour"] and r.json()["dropped"] == []
+    # the audit passage is a property the agent never sees as a current value
+    from app.tools.store import render_person
+    assert "enrichment_passage" not in render_person({"id": "x", "name": "A", "enrichment_passage": "# …",
+                                                      "notes": "n", "norm": {}, "norm_flags": {}})
+    cat = {p["key"]: p for p in (await reader.get("/api/properties")).json()}
+    assert cat["enrichment_passage"]["type"] == "text" and not cat["enrichment_passage"]["embeddable"]
+    assert cat["skills"]["type"] == "list" and cat["skills"]["embeddable"]
+    assert cat["about"]["embeddable"] and cat["experience"]["type"] == "text"
+
+
 async def test_store_from_file(people_by_name, writer, reader):
     bo = people_by_name["Bo"]
     r = await writer.post(f"/api/people/{bo}/store/file?wait=true",

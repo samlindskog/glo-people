@@ -81,7 +81,8 @@ def _property(key: str, doc: dict | None) -> Property:
     return Property(key=key, label=(sp.label if sp else None) or fields.label_for(key),
                     type=ptype, description=(sp.description if sp else None)
                     or (doc or {}).get("description"),
-                    values=values, embeddable=ptype in EMBEDDABLE,
+                    values=values,
+                    embeddable=sp.embed if sp and sp.embed is not None else ptype in EMBEDDABLE,
                     normalisable=ptype in NORMALISABLE, filter_ops=list(filter_ops(ptype)),
                     source=(doc or {}).get("source") or ("import" if doc else "spec"),
                     created_at=(doc or {}).get("created_at"))

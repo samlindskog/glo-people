@@ -3,7 +3,7 @@ reads the passage, the person's current values and the catalog with its descript
 proposes one write per property: typed values in the type's form, list items appended, restated
 values confirmed, contradictions marked, new properties only for recurring kinds of fact. The
 tool resolves new properties (redirect near-duplicates, create up to `max_new`, send the rest to
-notes), stages everything on the context's transaction, then runs `tools.normalize` on the same
+notes or drop them per `overflow`), stages everything on the context's transaction, then runs `tools.normalize` on the same
 transaction so flagged values get their typed form: one commit for all of it. The result carries
 every change."""
 
@@ -27,6 +27,7 @@ REQUEST_LIMIT = 4
 OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
 MAX_PASSAGE_CHARS = fields.MAX_TEXT_CHARS
 LIST_TYPES = ("list", "enum_list")
+AUDIT_KEYS = frozenset({"enrichment_passage"})   # records of what was filed: not facts to re-file
 
 Value = str | list[str]
 
@@ -169,7 +170,7 @@ def render_person(person: dict) -> str:
     norm = person.get("norm") or {}
     lines = []
     for key, value in person.items():
-        if key in fields.SYSTEM_FIELDS or key in ("id", "tier", "name"):
+        if key in fields.SYSTEM_FIELDS or key in ("id", "tier", "name") or key in AUDIT_KEYS:
             continue
         text = "; ".join(map(str, value)) if isinstance(value, list) else str(value)
         text = re.sub(r"\s+", " ", text)[:fields.MAX_TEXT_CHARS]
@@ -195,13 +196,16 @@ NOTES = "notes"
 
 
 class StoreOptions(BaseModel):
-    """Caps on new properties."""
+    """Caps on new properties, and what happens to facts beyond them."""
 
     max_new: int = Field(2, ge=0, le=5, description="New properties one passage may create; "
                                                     "the rest of the new facts go to notes")
     near_duplicate: float = Field(0.8, ge=0, le=1,
                                   description="A proposed new property whose name is at least "
                                               "this similar to an existing one is redirected to it")
+    overflow: Literal["notes", "ignore"] = Field(
+        "notes", description="Where facts beyond max_new go: filed under notes as 'Label: value', "
+                             "or dropped and reported (for provider passages)")
 
 
 class StoreResult(ToolResult):
@@ -216,6 +220,10 @@ class StoreResult(ToolResult):
                                        description="Proposed property → existing one used instead")
     to_notes: list[str] = Field(default_factory=list,
                                 description="Facts filed under notes because max_new was reached")
+    dropped: list[str] = Field(default_factory=list,
+                               description="Facts dropped because max_new was reached (overflow ignore)")
+    evidence: dict[str, str] = Field(default_factory=dict,
+                                     description="Property → the passage words its write rests on")
     normalization: NormalizeResult | None = Field(None, description="The clean-up pass")
 
 
@@ -264,6 +272,8 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
 
     for w in proposal.writes:
         put(w.key, w.value, w.action == "append")
+        if w.evidence:
+            result.evidence[w.key] = w.evidence
 
     if proposal.new_properties:
         vectors = await embedder.embed_texts([f"{n.label}: {n.description}"
@@ -274,6 +284,8 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
             if best is not None and best[1] >= opts.near_duplicate:
                 result.redirected[n.key] = best[0]
                 put(best[0], n.value, append=True)
+                if n.evidence:
+                    result.evidence[best[0]] = n.evidence
             elif len(result.created_properties) < opts.max_new:
                 await properties.ensure([n.key], "agent", descriptions={n.key: n.description})
                 cat[n.key] = await properties.get(n.key)  # type: ignore[assignment]
@@ -282,6 +294,12 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
                                              value=n.description), tag="store")
                 ctx.emit("note", f"new property {n.key}: {n.description}", key=n.key)
                 put(n.key, n.value, append=False)
+                if n.evidence:
+                    result.evidence[n.key] = n.evidence
+            elif opts.overflow == "ignore":
+                result.dropped.append(n.label)
+                ctx.emit("note", f"dropped {n.label!r}: no property for it and none may be created",
+                         label=n.label)
             else:
                 result.to_notes.append(n.label)
                 put(NOTES, f"{n.label}: {_as_text(n.value)}", append=False)

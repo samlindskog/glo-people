@@ -270,7 +270,7 @@ async def store_about_person(
     agent: Annotated[str | None, Field(description="Name of the automated agent supplying the "
                                                    "passage, if any")] = None,
     options: Annotated[StoreOptions | None,
-                       Field(description="max_new, near_duplicate")] = None,
+                       Field(description="max_new, near_duplicate, overflow")] = None,
 ) -> dict:
     """Tool: store what a passage says about a person (requires people:write). An agent reads
     the passage against the person's current values and the property catalog and files one
