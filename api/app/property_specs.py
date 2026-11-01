@@ -15,7 +15,10 @@ PropertyType = Literal["text", "keyword", "url", "contact", "number", "boolean",
 # text: prose, compared by meaning. keyword: short identifying strings (names, titles, places),
 # matched literally. list: free-form items (tags). The other types hold one kind of value each.
 EMBEDDABLE: frozenset[str] = frozenset({"text", "list"})
-NORMALISABLE: frozenset[str] = frozenset({"number", "boolean", "date", "enum", "enum_list"})
+# Types whose normalised value is a canonical lookup key (folded name, URL key, lower-cased
+# email, bare phone digits) rather than a typed value: stored and indexed for matching, not shown.
+CANONICAL: frozenset[str] = frozenset({"keyword", "url", "contact"})
+NORMALISABLE: frozenset[str] = frozenset({"number", "boolean", "date", "enum", "enum_list"}) | CANONICAL
 
 # Filter operators by type. Text operators always run on the text as entered (`field.v`); eq/ne/in
 # and the range operators run on the normalised value of a normalisable property.

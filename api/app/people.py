@@ -25,7 +25,7 @@ from app.auth import Principal
 from app.history import Change, Source
 from app.mongo import db
 from app.normalize import Parsed
-from app.property_specs import NORMALISABLE
+from app.property_specs import CANONICAL, IDENTITY_KEYS, NORMALISABLE
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +69,19 @@ def public(doc: dict, include_history: bool = False) -> dict:
         if k in doc:
             out[k] = history.jsonable(doc[k])
     out.update(history.flatten(doc, fields.SYSTEM_FIELDS))
-    out["norm"] = history.jsonable(history.flatten_norm(doc, fields.SYSTEM_FIELDS))
-    out["norm_flags"] = history.norm_flags(doc, fields.SYSTEM_FIELDS)
+    # identity-like properties (name, emails, URLs) carry a lookup key as their normalised value;
+    # it serves matching and filters, not readers
+    hidden = {k for k in doc if k not in fields.SYSTEM_FIELDS
+              and (sp := properties.spec(k)) is not None and sp.type in CANONICAL}
+    norm = history.jsonable(history.flatten_norm(doc, fields.SYSTEM_FIELDS))
+    out["norm"] = {k: v for k, v in norm.items() if k not in hidden}
+    out["norm_flags"] = {k: v for k, v in history.norm_flags(doc, fields.SYSTEM_FIELDS).items()
+                         if k not in hidden}
     if include_history:
         props = {k: v for k, v in doc.items() if k not in fields.SYSTEM_FIELDS}
         out["history"] = {k: history.public_entries(v) for k, v in props.items()}
         out["history_norm"] = {k: history.public_norm_entries(v) for k, v in props.items()
-                               if history.norm_of(v)}
+                               if history.norm_of(v) and k not in hidden}
     return out
 
 
@@ -217,7 +223,11 @@ async def pending_normalization(doc: dict, force: bool = False) -> dict[str, Par
 
 
 def _norm_change(key: str, prop: Any, p: Parsed) -> Change | None:
-    """The Change a norm entry represents (None for clearing a removed value's norm)."""
+    """The Change a norm entry represents (None for clearing a removed value's norm, and for the
+    lookup key of an identity-like property: internal, not a change anyone reads)."""
+    sp = properties.spec(key)
+    if sp is not None and sp.type in CANONICAL:
+        return None
     previous = history.jsonable(history.norm_value(prop))
     if p.value is not None:
         return Change(key=key, action="normalized", value=history.jsonable(p.value),
@@ -542,6 +552,48 @@ async def drop_field(key: str) -> int:
     if res.modified_count:
         await activity.record("property.drop", None, key, {"documents": res.modified_count})
     return res.modified_count
+
+
+Candidate = tuple[dict, list[str]]
+
+
+async def find_candidates(values: dict[str, Any], source: dict | None = None) -> list[Candidate]:
+    """The people that share an identity key with `values` (an email or phone, the LinkedIn or
+    GitHub URL, the folded name) or the `(file, source_id)` of `source`, each with the keys that
+    matched, most matches first. The lookup behind matching an incoming record to a person; the
+    comparison runs on the canonical `norm.v` of each key (indexed)."""
+    wanted: dict[str, Any] = {}
+    for key in ("name", *IDENTITY_KEYS):
+        value = values.get(key)
+        sp = properties.spec(key)
+        if value in (None, "", []) or sp is None or sp.type not in CANONICAL:
+            continue
+        parsed = normalize.parse(value, sp.type)
+        if parsed.value is not None:
+            wanted[key] = parsed.value
+    ors: list[dict[str, Any]] = [{f"{k}.norm.v": {"$in": v} if isinstance(v, list) else v}
+                                 for k, v in wanted.items()]
+    src_file, src_id = (source or {}).get("file"), (source or {}).get("source_id")
+    if src_file and src_id:
+        ors.append({"source.file": src_file, "source.source_id": src_id})
+    if not ors:
+        return []
+    out: list[Candidate] = []
+    for doc in await find({"$or": ors}):
+        hits = []
+        for k, v in wanted.items():
+            have = history.norm_value(doc.get(k))
+            mine = set(v) if isinstance(v, list) else {v}
+            theirs = set(have) if isinstance(have, list) else ({have} if have is not None else set())
+            if mine & theirs:
+                hits.append(k)
+        doc_src = doc.get("source") or {}
+        if src_file and src_id and doc_src.get("file") == src_file \
+                and doc_src.get("source_id") == src_id:
+            hits.append("source_id")
+        out.append((doc, hits))
+    out.sort(key=lambda c: -len(c[1]))
+    return out
 
 
 async def reparse(ids: list[str], force: bool = True) -> int:

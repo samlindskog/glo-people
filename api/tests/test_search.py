@@ -177,3 +177,19 @@ async def test_requests_are_validated_against_the_catalog(reader):
     assert (await s({"semantic": {"mode": "max"}})).status_code == 422
     r = await s({"sort": {"field": "nonexistent", "dir": "asc"}})
     assert r.status_code == 422 and "sort" in r.text
+
+
+async def test_eq_on_a_url_or_email_matches_every_spelling(writer, reader):
+    r = await writer.post("/api/people", json={"tier": "member", "fields": {
+        "name": "Lin Ma", "linkedin": "https://www.linkedin.com/in/lin-ma/", "email": "Lin@Ma.io"}})
+    lin = r.json()["id"]
+
+    async def ids(field, value):
+        res = await reader.post("/api/search", json={"filters": [{"field": field, "op": "eq", "value": value}]})
+        assert res.status_code == 200, res.text
+        return [p["id"] for p in res.json()["results"]]
+    assert await ids("linkedin", "linkedin.com/in/lin-ma") == [lin]
+    assert await ids("linkedin", "https://LinkedIn.com/in/lin-ma?utm_source=share") == [lin]
+    assert await ids("email", "lin@ma.io") == [lin]
+    assert await ids("name", "lin ma") == [lin]
+    assert await ids("linkedin", "linkedin.com/in/someone-else") == []

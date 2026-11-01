@@ -231,7 +231,7 @@ async def _values(ctx: ToolContext, opts: NormalizeOptions, result: NormalizeRes
         if value is None or history.norm_flag(prop) != "unmapped":
             continue
         sp = properties.spec(key)
-        if sp is None:
+        if sp is None or sp.type in property_specs.CANONICAL:
             continue
         values = await properties.enum_values(key)
         if values:

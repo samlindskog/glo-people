@@ -82,6 +82,21 @@ def test_parse_numbers_booleans_dates():
         parse("x", "text")
 
 
+def test_parse_identity_types_to_lookup_keys():
+    assert parse("  Ada   OKAFOR ", "keyword").value == "ada okafor"
+    assert parse("Jordan | Cofounder", "keyword").value == "jordan cofounder"
+    assert parse("https://www.linkedin.com/in/ada/?utm_source=x", "url").value == \
+        parse("linkedin.com/in/ada", "url").value == "linkedin.com/in/ada"
+    assert parse(["github.com/adaok", "https://GitHub.com/adaok/"], "url").value == ["github.com/adaok"]
+    assert parse("not a url at all", "url").flag == "non_normalizable"
+    assert parse(" Ada.Okafor@Example.com ", "contact").value == "ada.okafor@example.com"
+    assert parse("mailto:a@b.co", "contact").value == "a@b.co"
+    assert parse("+1 (310) 430-2843", "contact").value == "+13104302843"
+    assert parse(["a@b.co", "c@d.io"], "contact").value == ["a@b.co", "c@d.io"]
+    assert parse("call me maybe", "contact").flag == "non_normalizable"
+    assert parse("", "keyword").value is None and parse([], "url").value is None
+
+
 def test_parse_enums_and_lists():
     assert parse("seed", "enum", STAGES) == Parsed("Seed")
     assert parse("Pre-Seed", "enum", STAGES) == Parsed("Pre-seed")
@@ -120,7 +135,8 @@ async def test_import_records_text_and_normalised_value(people_by_name):
     assert ada["joined"]["norm"]["v"] == datetime(2026, 6, 5, tzinfo=UTC)
     assert ada["needs_stated"]["v"] == ["capital", "partners"]
     assert ada["needs_stated"]["norm"]["v"] == ["Capital", "Partners"]
-    assert "norm" not in ada["bio"] and "norm" not in ada["name"]
+    assert "norm" not in ada["bio"]                       # free text: nothing to normalise
+    assert ada["name"]["norm"]["v"] == normalize.parse(ada["name"]["v"], "keyword").value  # lookup key
 
     assert bo["mrr"]["norm"]["v"] == 200000 and bo["stage"]["norm"]["v"] == "Series A"
     assert bo["in_whatsapp"]["norm"]["v"] is False
@@ -190,7 +206,7 @@ async def test_document_skips_up_to_date_properties(people_by_name):
     ada = people_by_name["Ada"]
     assert await people.pending_normalization(ada) == {}
     forced = await people.pending_normalization(ada, force=True)      # a parser upgrade redoes its own work
-    assert set(forced) == {"mrr", "stage", "joined", "in_whatsapp", "needs_stated"}
+    assert set(forced) == {"mrr", "stage", "joined", "in_whatsapp", "needs_stated", "name"}
     assert forced["mrr"] == Parsed(12000)                   # ...and append_norm then dedupes it
     assert history.append_norm(ada["mrr"], 12000, people.NORMALIZE_SRC, datetime.now(UTC),
                                normalize.text_hash("$12,000")) is None

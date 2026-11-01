@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app import fields
-from app.property_specs import NORMALISABLE
+from app import fields, urls
+from app.property_specs import CANONICAL, NORMALISABLE
 
 UNMAPPED = "unmapped"
 NON_NORMALIZABLE = "non_normalizable"
@@ -101,6 +101,40 @@ def parse_date(text: str) -> datetime | None:
     return d if d.tzinfo else d.replace(tzinfo=UTC)
 
 
+def _contact_key(text: str) -> str | None:
+    """An email lower-cased, a phone as its digits with a leading +, else None."""
+    s = text.strip()
+    if s.lower().startswith("mailto:"):
+        s = s[7:]
+    if "@" in s:
+        return s.lower() if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", s) else None
+    digits = re.sub(r"\D", "", s)
+    return f"+{digits}" if len(digits) >= 7 and re.fullmatch(r"[\d\s()+.\-]+", s) else None
+
+
+def canonical(value: Any, ptype: str) -> Parsed:
+    """The lookup key of an identity-like value: keyword → `fields.fold`, url → `urls.url_key`,
+    contact → the email lower-cased or the phone digits. A list gives a list of keys. Text that
+    is not such a value is `non_normalizable` (never a question for an agent)."""
+    items = value if isinstance(value, list) else [value]
+    keys: list[str] = []
+    for item in items:
+        text = fields.text_of(item).strip()
+        if ptype == "keyword":
+            key = fields.fold(text) or None
+        elif ptype == "url":
+            normalised = urls.normalize_url(text)
+            key = urls.url_key(normalised) if normalised else None
+        else:
+            key = _contact_key(text)
+        if key:
+            keys.append(key)
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        return Parsed(None, NON_NORMALIZABLE)
+    return Parsed(keys if isinstance(value, list) else keys[0])
+
+
 def parse(value: Any, ptype: str, lookup: dict[str, str] | None = None) -> Parsed:
     """The normalised value of one text for a property type. `lookup` (enum types) maps the folded
     canonical values and aliases to canonical values; see properties.enum_lookup."""
@@ -108,6 +142,8 @@ def parse(value: Any, ptype: str, lookup: dict[str, str] | None = None) -> Parse
         raise ValueError(f"type {ptype!r} is not normalisable")
     if value is None or value == [] or value == "":
         return Parsed()
+    if ptype in CANONICAL:
+        return canonical(value, ptype)
     lookup = lookup or {}
     if ptype == "enum_list":
         items = value if isinstance(value, list) else [value]

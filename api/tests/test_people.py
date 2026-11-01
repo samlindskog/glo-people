@@ -249,3 +249,26 @@ async def test_switching_embedder_reembeds(writer):
 
     embedder.set_embedder(Other(512))
     assert await embeddings.sync_people(ids) > 0
+
+
+async def test_find_candidates_by_identifier_and_name(writer):
+    from app import people
+    r = await writer.post("/api/people", json={"tier": "member", "fields": {
+        "name": "Ada Okafor", "email": "Ada@Example.com",
+        "linkedin": "https://www.linkedin.com/in/adaokafor/"}})
+    assert r.status_code == 201, r.text
+    ada = r.json()["id"]
+    r = await writer.post("/api/people", json={"tier": "member", "fields": {
+        "name": "ada okafor", "email": "other@example.com"}})
+    twin = r.json()["id"]
+    # an identifier matches whatever its spelling; the name alone finds both
+    found = await people.find_candidates({"email": "ADA@example.com", "name": "Ada Okafor"})
+    assert [(str(d["_id"]), hits) for d, hits in found] == [(ada, ["name", "email"]), (twin, ["name"])]
+    found = await people.find_candidates({"linkedin": "linkedin.com/in/adaokafor"})
+    assert [str(d["_id"]) for d, _ in found] == [ada]
+    assert await people.find_candidates({"email": "nobody@example.com"}) == []
+    assert await people.find_candidates({"bio": "irrelevant"}) == []
+    # the lookup keys are stored, indexed and hidden from the public view
+    person = (await writer.get(f"/api/people/{ada}")).json()
+    assert "name" not in person["norm"] and "email" not in person["norm"]
+    assert "linkedin" not in person["history_norm"]

@@ -2,7 +2,7 @@ from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.config import get_settings
-from app.property_specs import NORMALISABLE, SPECS
+from app.property_specs import CANONICAL, IDENTITY_KEYS, NORMALISABLE, SPECS
 
 _client: AsyncMongoClient | None = None
 
@@ -22,8 +22,10 @@ async def ensure_indexes() -> None:
     await people.create_index([("tier", ASCENDING)])
     await people.create_index([("name.v", ASCENDING)])
     for key, spec in SPECS.items():        # filters and sorts on typed properties use norm.v
-        if spec.type in NORMALISABLE:
+        if spec.type in NORMALISABLE and spec.type not in CANONICAL:
             await people.create_index([(f"{key}.norm.v", ASCENDING)])
+    for key in ("name", *IDENTITY_KEYS):   # identity lookups compare canonical keys
+        await people.create_index([(f"{key}.norm.v", ASCENDING)])
 
 
 async def close() -> None:
