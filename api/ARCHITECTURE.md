@@ -6,55 +6,72 @@ and `tests/test_architecture.py` enforces it.
 
 | Level | Name | Modules | Contract |
 |---|---|---|---|
-| 0 | Rules & adapters | `fields`, `history`, `normalize` (the parser), `property_specs`, `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions. `fields.MAX_TEXT_CHARS` (about 5000 words) is the only cap on a text value, stored or shown to an agent |
+| 0 | Rules & adapters | `fields` (text toolkit: `fold`, `clean`, `distinct`, `sentence`), `names` (what a human name looks like: `is_full_name`, `title_case`, `looks_broken`, the company/handle/URL patterns), `history`, `normalize` (the parser; canonical forms for keyword/url/contact lookups), `property_specs` (typed specs plus the shared constants `IDENTITY_KEYS`, `DESCRIBES_PERSON`, `AUDIT_KEYS`, `MAX_ENUM_VALUE_CHARS`), `embedder`, `urls`, `config`, `db`, `mongo`, `auth`, `permissions`, `activity`, `observability`, `jobs`, `integrations/` | pure functions, data shapes, provider calls; no app-level decisions. `fields.MAX_TEXT_CHARS` (about 5000 words) is the only cap on a text value, stored or shown to an agent |
 | 1 | Stores | `properties` (registry, enum sets, name vectors), `people` (documents; the only writer; `Transaction` stages one document's changes for one compare-and-set commit, replaying them on a concurrent write; `reparse` is the batch API the reparse assistant drives; `find_candidates` finds the people sharing an identity key or name with a record), `embeddings` (passage vectors; `sync_people` per batch), `importer` (incoming records: CSV parsing, the plan for one record, the match of a record to a person; writes nothing) | typed reads; writers return `WriteResult{person, changes}`; compare-and-set |
 | 2 | Tools | `tools/search`, `tools/plan`, `tools/record`, `tools/store`, `tools/normalize`, `tools/repair`, `tools/site`, `tools/company`; `tools/invoke` (running one); `agents/common`, `agents/fakes` (model plumbing) | **one record, one shot**: a writing tool takes a `ToolContext` and only *stages* on its transaction; `tools.invoke` commits once after it returns, so a stopped tool has written nothing; activity through `ctx.emit`, Firecrawl spend on the context's budget; a Pydantic result for programs built on `history.Change` with `credits` and `calls`; no prose for humans; each tool's model agent is defined inside the tool |
 | 3 | Assistants | per person: `assistants/enrich`, `assistants/normalize`; over batches: `assistants/merge`, `embed`, `reparse`; one item: `assistants/ask`; `assistants/base`, `runner`, `context`, `credits` | compose tools (per-person assistants change data only through `deps.tool`) or drive the level-1 batch APIs; return `text` for a human plus `changes`; every assistant is a run that persists its state, pauses, resumes, stops and survives a restart; the CLI executes its runs in its own process |
-| 4 | Surfaces | `routers/`, `mcp_server`, `cli`, `main`, `web/` | adapt tools (structured, non-blocking invocations with an event stream) and assistants (runs with an event stream; text + changes) to REST, MCP, CLI, UI; no logic. The web has five pages: People (search, Ask as a run, the import dialog), a person (tools run as invocations with live activity and a Stop), Properties, Assistants (start any assistant; running runs with live activity, credits, Pause / Resume / Stop; history), History (searches, activity) and Accounts (users, my API keys); the top bar shows the Firecrawl balance |
+| 4 | Surfaces | `routers/`, `mcp_server`, `cli`, `main`, `web/` | adapt tools (structured, non-blocking invocations with an event stream) and assistants (runs with an event stream; text + changes) to REST, MCP, CLI, UI; no logic. The web has five pages: People (search, Ask as a run, the import dialog: column plans, match sample, dry run or merge), a person (tools run as invocations with live activity and a Stop), Properties, Assistants (start any assistant; running runs with live activity, credits, Pause / Resume / Stop; history), History (searches, activity) and Accounts (users, my API keys); the top bar shows the Firecrawl balance |
 
 ## The shared vocabulary: `history.Change`
 
 ```
-Change{key, action: set | append | removed | normalized | flagged | property_created | enum_value_added,
+Change{key, action: set | append | removed | normalized | flagged | property_created | enum_value_added | note,
        value, previous, flag}
 ```
-Writers produce it (`people.update`, `create`, `update_norm`), tools return it (`ToolResult.changes`),
-assistants carry it beside their text (`AssistantResult.changes`), surfaces render it.
+Writers produce it (`people.Transaction`, through `update`, `create`, `update_norm`), tools return it
+(`ToolResult.changes`), assistants carry it beside their text (`AssistantResult.changes`), surfaces
+render it. `append` is a merge into the current value (list items unioned by `fields.fold`, a text
+line added unless already present). `note` is something that did *not* happen and why (a normalised
+value dropped on replay because its text changed concurrently); `assistants/review.describe` shows it.
 
 ## Tools (level 2)
 
 ### The invocation contract
 
 ```
-ctx = await invoke.make_context(person_id, source, principal, firecrawl=…, sink=…)   # None → 404
+ctx = await invoke.make_context(person_id | None, source, principal, tier=…, origin=…, firecrawl=…, sink=…)   # None → 404; person_id None = a person the first commit creates
 inv = invoke.invoke(tool, ctx, **kwargs)        # Invocation{id, status, events, result, credits, stop(), wait(), subscribe()}
 result = await inv.wait()                        # or invoke.run(tool, ctx, **kwargs)
 ```
 
 A writing tool is `tool(ctx: ToolContext, ...) -> ToolResult`. It reads `ctx.tx.view` (the record as
-it will be), stages with `ctx.tx.set_values` / `set_norm`, reports registry changes it made with
-`ctx.tx.record_catalog`, and narrates with `ctx.emit(kind, message, **data)` (`step`, `agent`,
-`provider`, `write`, `note`, `error`; the invocation adds the final `result`). It never writes:
-the invocation's driver commits `people.Transaction` once after the tool returns (rebasing on a
-concurrent write), so `stop()` before that point leaves the record untouched and removes the
+it will be), stages with `ctx.stage(values, append=…, tier=…, src=…)` / `ctx.stage_norm(parsed)` (the
+one write path: they stage on the transaction and emit the `write` events), reports registry changes
+it made with `ctx.tx.record_catalog`, and narrates with `ctx.emit(kind, message, **data)` (`step`,
+`agent`, `provider`, `write`, `note`, `error`; the invocation adds the final `result`). Attribution
+rule: an agent's verdict is written under the context's source (`agent <assistant>/<agent>`),
+deterministic code under `system/<tool>` (the parser `system/normalize`, mechanical fixes
+`system/repair`), a value copied from a file under its provenance (`import <file> row n`). It never
+writes: the invocation's driver commits `people.Transaction` once after the tool returns (rebasing on
+a concurrent write), so `stop()` before that point leaves the record untouched and removes the
 unused properties and enum values the tool created. A tool that calls another tool hands it
-`ctx.child(agent)`: same transaction, same budget, same activity — one commit for `store →
-normalize → repair`. The model agent's tool calls and retries become `agent` events
+`ctx.child(agent)`: same transaction, same budget, same activity, the assistant prefix kept
+(`enrich/storage` → `enrich/normalizer` → `enrich/repair`) — one commit for `store → normalize →
+repair`. The model agent's tool calls and retries become `agent` events
 (`run_agent(..., on_event)`), each paid Firecrawl call a `provider` event (`Budget.on_charge`).
 
 | Tool | Call | Result |
 |---|---|---|
 | search | `run_search(SearchRequest)` | `SearchResponse` (read-only; `record_search` keeps the history) |
 | plan | `plan_search(question, tier, filters, Tuning)` | `PlanResult{request: SearchRequest, rationale}` |
-| record | `write(ctx, values, tier)` | `ToolResult` — the smallest write; assistants write through it |
-| store | `store(ctx, passage, StoreOptions{max_new, near_duplicate, overflow})` | `StoreResult{changes, confirmed, ignored, conflicts, created_properties, redirected, to_notes, dropped, evidence, normalization}` — facts beyond `max_new` go to notes or, with `overflow="ignore"`, are dropped and reported; `evidence` quotes the passage words each write rests on; audit properties (`enrichment_passage`) are never shown to the agent as current values |
-| normalize | `normalize(ctx, NormalizeOptions)` | `NormalizeResult{changes, agent_called, unmapped, merged, allocated, rejected, repair}` — for enum properties the agent merges a text into an existing value (stored as an alias), allocates a new canonical value within `allocate` / `max_new_values`, or drops it |
-| repair | `repair(ctx, RepairOptions)` | `RepairResult{kind, name_source, signals, mechanical, agent_called, confidence, rejected, changes}` — mechanical fixes (mojibake, Title Case), then the agent: `record_kind` (Person / Company / Unidentifiable, allocatable), a full name only from the record's own evidence, misfiled values moved; never a data provider (the normalise assistant enriches a nameless person before repair); the kind is common sense (a human first name alone is a Person; Unidentifiable only with nothing identifying) |
-| site | `read_site(deps, name, url, markdown, links, follow_cap)` | `SiteFindings` (read-only) |
-| company | `research_company(deps, company, candidate, context, allow_search, pages_cap)` | `CompanySummary` (read-only) |
+| record | `write(ctx, values, tier, append)` | `ToolResult` — the smallest write (keys in `append` merge into the current value); assistants and the merge's verbatim copies write through it |
+| store | `store(ctx, passage, StoreOptions{max_new, near_duplicate, overflow, locked, audit_key})` | `StoreResult{changes, confirmed, ignored, conflicts, created_properties, redirected, to_notes, dropped, evidence, normalization}` — the agent's proposal is checked before anything is staged (evidence quoted from the passage, fold-compared; `locked` keys may only be confirmed; a confirmation needs a current value; every labelled line accounted for; a new-property proposal naming an existing key is redirected); list and `notes` writes append; facts beyond `max_new` are appended to notes or, with `overflow="ignore"`, dropped and reported; `audit_key` stages the passage itself in the same commit when anything was filed or confirmed; audit properties (`property_specs.AUDIT_KEYS`) are never shown to the agent as current values |
+| normalize | `normalize(ctx, NormalizeOptions{allocate, max_new_values, agent, repair, force})` | `NormalizeResult{changes, agent_called, unmapped, merged, allocated, rejected, repair}` — the parser first (`system/normalize`; keyword, url and contact properties get their canonical lookup form here and are never asked of the agent), then, with `agent`, the normaliser for number / boolean / date / enum values the parser could not map (an enum text is merged into an existing value, stored as an alias, allocated as a new canonical value within `allocate` / `max_new_values`, or dropped), then, with `repair`, the repair tool when the record has no kind (or `force`) |
+| repair | `repair(ctx, RepairOptions)` | `RepairResult{kind, name_source, signals, mechanical, agent_called, confidence, note, rejected, changes}` — mechanical fixes (`names.looks_broken`: mojibake, Title Case; `system/repair`), then the agent: `record_kind` (Person / Company / Unidentifiable, allocatable), a full name only from the record's own evidence (`property_specs.DESCRIBES_PERSON`, clipped by `DESCRIBE_CLIP`), misfiled values moved (an append on the target); never a data provider (the normalise assistant enriches a nameless person before repair); the kind is common sense (a human first name alone is a Person; a full name with a LinkedIn profile URL is a Person whatever the agent says; Unidentifiable only with nothing identifying) |
+| site | `read_site(deps, name, url, markdown, links, follow_cap)` | `SiteFindings` (read-only; takes the agent plumbing's `AgentDeps`, not a `ToolContext`, because it stages nothing) |
+| company | `research_company(deps, company, candidate, context, allow_search, pages_cap)` | `CompanySummary` (read-only; `AgentDeps` likewise) |
 
 Tools may use other tools (`store → normalize`, `normalize → repair`, `plan → search`) and the agent plumbing; never
 assistants or surfaces.
+
+### The closing review (level 3, shared)
+
+`assistants/review.review(deps, repair, force, allocate, max_new_values)` is the one closing step of
+every per-record item: the normalize tool with repair on, under the agent name `normalizer` (so the
+entries read `<assistant>/normalizer` and `<assistant>/repair`), returning the dict every item
+carries as `result["review"]` (`kind, name, name_source, mechanical, note, rejected, repaired,
+unmapped, merged, allocated, rejected_values, agent_called`); `describe(review, changes)` is its one
+line for a human. Enrich, normalise and merge all end with it; nothing else re-judges a record.
 
 ## Assistants (level 3)
 
@@ -65,13 +82,13 @@ the details in a "How it works" toggle on the card.
 | Assistant | Scope | Items | Item result |
 |---|---|---|---|
 | ask | single (`people:read`) | the question (`options.question`, tuning, tier, filters) | `{text, citations, request, rationale, total, results, search_id}`; MCP `ask_people` calls `ask()` directly for a synchronous answer |
-| enrich | people (selector `linkedin`) | one per person | `{text, changes, skipped, not_found, storage, passage, passage_hash, stored, confirmed, providers, credits, …}`; the data providers (`enrich/providers.py`: FullEnrich, People Data Labs opt-in; `options.providers`) are asked in order and `budget.worst_case` must fit the item cap; identifiers are written directly, everything prose- or tag-like from the providers and the site reader is one labelled passage the last step files through the store tool (`max_new` = the run's `max_new_properties`, default 0; `overflow="ignore"`) and keeps on the record as `enrichment_passage`, then a closing review through the repair tool (kind, a name the record now states); a redo skips a paid step whose entry is already on the record (TTL), a refresh whose passage is unchanged makes no storage call |
-| normalize | people (selector `name`) | one per person | `{text, changes, skipped, enrich, agent_called, unmapped, merged, allocated, rejected, repair}`; the free stages run first (parser, normaliser agent), then a person-looking record with a LinkedIn URL and still no full name is enriched (the enrich ladder on the same item and budget, `refresh` on), then repair judges the completed record (or the enrichment's own closing review does); a record enriched within the TTL without gaining a full name is not enriched again |
+| enrich | people (selector `linkedin`) | one per person | `{text, changes, skipped, not_found, storage, passage, passage_hash, stored, confirmed, providers, review, credits, …}`; the data providers (`enrich/providers.py`: People Data Labs then FullEnrich by default, `options.providers`, `provider_policy="gaps"` asks the next one only for what is still missing) are asked in order and `budget.worst_case` must fit the item cap; identifiers are written directly (the employer's site as `company_website`, the person's own as `website`), everything prose- or tag-like from the providers and the site reader is one labelled passage the storage step files through the store tool (`max_new` = the run's `max_new_properties`, default 0; `overflow="ignore"`; `locked` = every key the ladder wrote itself; `audit_key="enrichment_passage"` keeps the passage in the same commit), then the shared closing review; a redo skips a paid step whose entry is already on the record (TTL), a refresh whose passage is unchanged makes no storage call |
+| normalize | people (selector `name`) | one per person | `{text, changes, skipped, enrich, review, agent_called, unmapped, merged, allocated, rejected}`; the parser runs first (free, `agent=False`), then a person-looking record with a LinkedIn profile URL and still no full name is enriched (the enrich ladder on the same item and budget, `refresh` on; not again within the enrich TTL), then the shared closing review judges the completed record (forced when the record was Unidentifiable; the enrichment's own review counts when it settled a kind) |
 | merge | batches | `MergeOptions{tier (created people only), max_new_properties, agent, review, dry_run}`; one item per incoming record: the surface parses a CSV (`importer.parse_csv`), creates its columns (`properties.ensure`) and groups the rows of one person (`merge.items_for_csv`), or `prepare` takes `records` (dicts; MCP `merge_person` merges one synchronously via `merge_one`) | `{text, changes, skipped, person_id, created, match{decision, tier, keys, candidates}, plan{direct, agent, unknown}, written, filed, review}`; `importer.match_record` decides by a shared identifier (email, phone, LinkedIn, GitHub, the file's ID, on canonical forms), else a unique or corroborated name, else `new`; several plausible people → item `skipped` with the candidates, nothing written; known values that are not long prose go verbatim through the record tool (`Source("import", file, "row n")` or the surface's), long prose and unknown keys to the store tool as labelled lines (`overflow="notes"`, `locked` = the verbatim keys), then the review; a dry run reports match and plan only. The runner takes `person_id` from the item result when the item had none |
 | embed | batches | `EmbedOptions{fields, batch}`; everyone or `person_ids`; property-name vectors synced in `prepare` | `{text, vectors}` per batch |
 | reparse | batches | `ReparseOptions{force, batch}` | `{text, written}` per batch (`people.reparse`) |
 
-`python -m app.cli import|embed|normalize --all` create these runs and execute them in the CLI
+`python -m app.cli import [--dry-run --no-agent --no-review]|embed|normalize --all` create these runs (import = a merge run) and execute them in the CLI
 process (`worker = cli:<pid>`), printing the events; the API's scheduler leaves a run alone while
 its owner heartbeats. Other CLI commands: `properties` (the catalog with coverage), `drop-property
 <key>… [--yes]` (removes test leftovers: documents, vectors, registry; refuses spec keys),
@@ -117,6 +134,8 @@ blocks for the result), `GET /api/invocations/{id}` has its state and result, `G
 `Last-Event-ID`), `POST /api/invocations/{id}/stop` stops it before the commit (409 when too late).
 MCP mirrors them: `search_people`, `plan_search`, `store_about_person`, `normalize_person` return
 tool results and forward the activity as progress notifications while they run; `ask_people`
-returns text; `list_assistants`, `start_assistant`, `get_run`, `pause_run`, `resume_run`,
-`stop_run` drive runs.
+returns text; `merge_person` merges one record (a one-item merge run, waited for); `list_assistants`,
+`start_assistant` (people, a selector, or `records` for merge), `get_run`, `pause_run`, `resume_run`,
+`stop_run` drive runs. `POST /api/assistants/{key}/runs` ignores empty ids in `person_ids` and
+answers 422 when none is left.
 Every REST handler and MCP tool docstring starts with its kind ("Tool:" / "Assistant:").
