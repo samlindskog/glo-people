@@ -1,9 +1,9 @@
-"""Assistant (level 3): normalise and repair records for many people. Per person: when the record
-looks like a person, has a LinkedIn URL and no full name that the record itself can settle, the
-enrich ladder runs first (same item, same budget), so the paid profile supplies the name and
-everything else it knows; then the normalize tool (the parser, the normaliser agent for what
-stayed unmapped, and the repair of identity data for records without a record_kind) and one line
-on what changed. The enrich ladder is the only paid part; the run cap bounds it."""
+"""Assistant (level 3): normalise and repair records for many people. Per person, in this order:
+the normalize tool's free stages (the parser, the normaliser agent for what stayed unmapped);
+then, only when the record looks like a person, has a LinkedIn URL and still has no full name,
+the enrich ladder on the same item and budget, so the paid profile supplies the name and
+everything else it knows; then the repair of identity data (record kind, misfiled values) on the
+completed record. The enrich ladder is the only paid part; the run cap bounds it."""
 
 from typing import Any
 
@@ -16,7 +16,6 @@ from app.assistants.enrich import budget as enrich_budget
 from app.assistants.enrich.models import EnrichOptions
 from app.auth import Principal
 from app.integrations.firecrawl import AsyncFirecrawl, Budget
-from app.integrations.fullenrich import MATCH_CREDITS
 from app.integrations.profile import is_full_name
 from app.tools import normalize as normalize_tool
 from app.tools.normalize import NormalizeOptions
@@ -27,9 +26,10 @@ NOT_PEOPLE = {"Company"}        # record kinds the enrich ladder is not for
 
 
 class NormalizeRunOptions(NormalizeOptions):
-    enrich: bool = Field(True, description="Run the enrich assistant first for a record that looks "
-                                           "like a person, has a LinkedIn URL and no full name: "
-                                           "the paid profile fills the name and the rest")
+    enrich: bool = Field(True, description="After parsing, run the enrich assistant for a record "
+                                           "that looks like a person, has a LinkedIn URL and still "
+                                           "has no full name: the paid profile fills the name and "
+                                           "the rest")
     max_credits: int = Field(1500, ge=0, le=100_000,
                              description="Firecrawl credit cap for the whole run (an enrichment "
                                          "is 3 credits on average, 17 at most)")
@@ -43,19 +43,16 @@ async def make_deps(run_id: int, item: dict, options: NormalizeRunOptions,
                     principal: Principal | None) -> AssistantDeps:
     if options.enrich:
         budget = enrich_budget.budget_for(_enrich_options())
+        client: AsyncFirecrawl | None = AsyncFirecrawl(budget=budget)
     else:
-        budget = Budget(max_scrapes=1, max_searches=0, max_credits=MATCH_CREDITS)
-    paid = options.enrich or (options.repair and options.provider)
-    client = AsyncFirecrawl(budget=budget) if paid else None
+        budget, client = Budget(max_scrapes=0, max_searches=0, max_credits=0), None
     return AssistantDeps(firecrawl=client, assistant=ASSISTANT, run_id=run_id, item_id=item["id"],
                          person=item["person"], label=item.get("label"), principal=principal,
                          budget=budget, options=options)
 
 
 def item_cap(options: NormalizeRunOptions) -> int:
-    if options.enrich:
-        return enrich_budget.item_cap(_enrich_options())
-    return MATCH_CREDITS if options.repair and options.provider else 0
+    return enrich_budget.item_cap(_enrich_options()) if options.enrich else 0
 
 
 def wants_enrich(deps: AssistantDeps, options: NormalizeRunOptions) -> bool:
@@ -70,10 +67,10 @@ def wants_enrich(deps: AssistantDeps, options: NormalizeRunOptions) -> bool:
     return bool(linkedin_profile(deps.current("linkedin")))
 
 
-async def _enrich_first(deps: AssistantDeps) -> dict[str, Any]:
+async def _enrich(deps: AssistantDeps) -> dict[str, Any]:
     """The enrich ladder for this item's person, on this item's budget and event stream; its
     changes and skipped steps join the item's."""
-    deps.emit("step", "no full name on the record: enriching it first")
+    deps.emit("step", "no full name on the record: enriching it")
     edeps = AssistantDeps(firecrawl=deps.firecrawl, assistant=enrich_assistant.ASSISTANT,
                           run_id=deps.run_id, item_id=deps.item_id, person=deps.person,
                           label=deps.label, principal=deps.principal, budget=deps.budget,
@@ -116,23 +113,39 @@ def describe(result: normalize_tool.NormalizeResult) -> str:
     return text + "."
 
 
+FAILED = {"status": "failed", "error": "person not found", "text": "Person not found.",
+          "changes": []}
+
+
 async def run_item(deps: AssistantDeps) -> dict[str, Any]:
     options: NormalizeRunOptions = deps.options
-    enriched = await _enrich_first(deps) if wants_enrich(deps, options) else None
-    opts = options
-    if deps.current("record_kind") == "Unidentifiable" \
-            and is_full_name(str(deps.current("name") or "")):
-        # marked while the name was incomplete (by an earlier run or before this item's
-        # enrichment); the name is complete now, so the kind is judged afresh
-        opts = options.model_copy(update={"force": True})
-    result = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME, opts=opts)
-    if result is None:
-        return {"status": "failed", "error": "person not found", "text": "Person not found.",
-                "changes": []}
-    assert isinstance(result, normalize_tool.NormalizeResult)
+    # 1. the free stages: the parser and the normaliser agent
+    first = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME,
+                            opts=options.model_copy(update={"repair": False}))
+    if first is None:
+        return dict(FAILED)
+    assert isinstance(first, normalize_tool.NormalizeResult)
+    # 2. enrichment, only when the record still cannot settle its own name
+    enriched = await _enrich(deps) if wants_enrich(deps, options) else None
+    # 3. repair on the completed record (the parser only confirms on this pass)
+    result = first
+    if options.repair:
+        force = options.force or (deps.current("record_kind") == "Unidentifiable"
+                                  and is_full_name(str(deps.current("name") or "")))
+        second = await deps.tool(normalize_tool.normalize, normalize_tool.AGENT_NAME,
+                                 opts=options.model_copy(update={"force": force}))
+        if second is None:
+            return dict(FAILED)
+        assert isinstance(second, normalize_tool.NormalizeResult)
+        result = second.model_copy(update={
+            "changes": first.changes + second.changes,
+            "agent_called": first.agent_called or second.agent_called,
+            "merged": {**first.merged, **second.merged},
+            "allocated": {**first.allocated, **second.allocated},
+            "rejected": {**first.rejected, **second.rejected}})
     text = describe(result)
     if enriched:
-        text = f"Enriched first: {(enriched.get('text') or '').rstrip('.')}. {text}"
+        text += f" Enriched: {enriched.get('text') or ''}"
     return {"text": text, "changes": [c.model_dump() for c in deps.changes],
             "skipped": deps.skipped, "enrich": enriched,
             "agent_called": result.agent_called, "unmapped": result.unmapped,
@@ -141,21 +154,21 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
 
 
 DETAILS = """\
-**What it does.** Brings one record's typed values up to date and, once per record, repairs its identity data and classifies it. When the record looks like a person, has a LinkedIn URL and no first-and-last name, the enrich assistant runs first on the same item and budget, so the paid profile supplies the name along with everything else it knows (see the enrich assistant's spec). Then three stages, one write: the parser, the normaliser agent for what the parser cannot read, and the repair tool. Everything is staged on the record's transaction and lands in a single compare-and-set write; stopping before that writes nothing.
+**What it does.** Brings one record's typed values up to date and, once per record, repairs its identity data and classifies it. In order: the free stages (the parser, then the normaliser agent for what the parser cannot read); then, only when the record looks like a person, has a LinkedIn URL and still has no first-and-last name, the enrich assistant on the same item and budget, so the paid profile supplies the name along with everything else it knows (see the enrich assistant's spec); then the repair tool on the completed record. Each stage lands in its own compare-and-set write; stopping mid-way loses nothing already written.
 
-**Starting it.** One person, or everyone with a property (the Properties page's Normalise buttons do that per property). Options: `enrich` (true: enrich first a person-looking record with a LinkedIn URL and no full name), `allocate` (true: agents may add canonical values to enum properties), `max_new_values` (3 new enum values per record per call), `repair` (true), `provider` (false: let the repair tool itself ask FullEnrich for a missing full name, 5 credits; the enrichment covers this), `force` (false: repair even when the record kind is set), `max_credits` (1500 for the run). Each item reserves the enrichment's worst case while it runs; the run pauses at the cap and Resume with a higher cap continues it.
+**Starting it.** One person, or everyone with a property (the Properties page's Normalise buttons do that per property). Options: `enrich` (true: enrich a person-looking record with a LinkedIn URL whose name is still incomplete after parsing), `allocate` (true: agents may add canonical values to enum properties), `max_new_values` (3 new enum values per record per call), `repair` (true), `force` (false: repair even when the record kind is set), `max_credits` (1500 for the run). Each item reserves the enrichment's worst case while it runs; the run pauses at the cap and Resume with a higher cap continues it.
 
 **Stage 1, the parser (free).** For every typed property (number, date, boolean, enum, enum list) whose current text has not been normalised yet, the deterministic parser gives the typed value, or flags the text: `unmapped` when it cannot read it, `non_normalizable` when it says there is no value. Enum texts match canonical values and their aliases case-insensitively. Decisions an agent made earlier for the same text are kept.
 
 **Stage 2, the normaliser agent (one model call, only when something stayed unmapped).** It sees each unmapped text with the property's type and canonical values, and who the person is (name, company, role, one-liner, bio, sectors, company description). Per item it merges the text into an existing value (the text becomes an alias, so the parser handles it next time), allocates a new canonical value when the text names a category the list lacks and fits the person (enum types only, within `max_new_values`, one new value per property per call), or drops it as non-normalisable. A validator fixes spellings and rejects unusable answers; what the caps refuse is reported as rejected.
 
-**Stage 3, repair (when the record has no record kind yet, or with `force`).** Mechanical fixes first: mojibake re-decoded, an all-lowercase name title-cased (never a handle, email or URL). Then the repair agent judges the record from its own facts (name history, LinkedIn slug, emails, website, company, role, headline, bio, intro, notes, source file): the kind (Person, Company, Unidentifiable, or a new kind it allocates), a first-and-last name only when the current one is broken and the evidence gives it verbatim, and values filed under the wrong property (moved to the property it names, usually notes, and tombstoned where they were; at most 3). A Person whose name stays partial after the enrichment is marked Unidentifiable; a record the earlier runs marked Unidentifiable is re-judged when the enrichment completes its name. (With `provider`, the repair tool itself asks FullEnrich for the name instead, 5 credits.)
+**Stage 3, repair (when the record has no record kind yet, or with `force`).** Mechanical fixes first: mojibake re-decoded, an all-lowercase name title-cased (never a handle, email or URL). Then the repair agent judges the record from its own facts (name history, LinkedIn slug, emails, website, company, role, headline, bio, intro, notes, source file): the kind (Person, Company, Unidentifiable, or a new kind it allocates), a first-and-last name only when the current one is broken and the evidence gives it verbatim, and values filed under the wrong property (moved to the property it names, usually notes, and tombstoned where they were; at most 3). The repair tool never calls a data provider. A Person whose name stays partial after the enrichment is marked Unidentifiable; a record marked Unidentifiable earlier is re-judged, free, once its name is complete. A full name behind a LinkedIn profile URL always counts as a Person.
 
-**The write.** One commit carries the norm entries, any new values and the record kind, each history entry attributed to its author: the parser as system/normalize, the agent as normalize/normalizer with the run and item reference, the repair agent as repair, mechanical fixes as system/repair, provider data as repair/fullenrich.
+**The write.** One commit carries the norm entries, any new values and the record kind, each history entry attributed to its author: the parser as system/normalize, the agent as normalize/normalizer with the run and item reference, the repair agent as repair, mechanical fixes as system/repair, the enrichment's writes as enrich/<step>.
 
 **Cost profile.** Model calls only for records with unmapped texts or without a record kind, plus the enrichment's storage call; Firecrawl credits only for the enrichment of persons lacking a full name with a LinkedIn URL (about 3 credits each). A second run over everyone is nearly free: the parser confirms, the agents are not consulted, repair is skipped.
 
-**Result.** One line per person ("Enriched first: LinkedIn profile matched; …; wrote name, about, … stage → Seed; record kind: Person (agent consulted)"), every change (the enrichment's and the normalisation's), the skipped steps, the enrichment's outcome, the merges, allocations and rejections, what is still unmapped, and the repair's kind, name source, signals, mechanical fixes and credits.
+**Result.** One line per person ("stage → Seed; record kind: Person (agent consulted). Enriched: LinkedIn profile matched; …; wrote name, about, …"), every change (the enrichment's and the normalisation's), the skipped steps, the enrichment's outcome, the merges, allocations and rejections, what is still unmapped, and the repair's kind, name source, signals, mechanical fixes and credits.
 """
 
 SPEC = register(AssistantSpec(

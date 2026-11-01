@@ -45,8 +45,7 @@ class Gate:
 async def _start(writer, ids, **options):
     r = await writer.post("/api/assistants/normalize/runs",
                           # the runner is under test, not the paid steps: no provider, no enrichment
-                          json={"person_ids": ids, "options": {"provider": False, "enrich": False,
-                                                               **options}})
+                          json={"person_ids": ids, "options": {"enrich": False, **options}})
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -229,7 +228,7 @@ async def test_mcp_run_tools(people_by_name, writer, reader, client_factory):
     assert err                                                      # reader: no write tools
     await init(c, w)
     err, run = await call(c, w, "start_assistant", {
-        "key": "normalize", "person_ids": [people_by_name["Cy"]], "options": {"provider": False},
+        "key": "normalize", "person_ids": [people_by_name["Cy"]], "options": {"enrich": False},
         "label": "cy only"})
     assert not err, run
     assert run["status"] == "running" and run["label"] == "cy only" and run["total"] == 1

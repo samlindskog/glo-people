@@ -12,13 +12,11 @@ from app.agents.fakes import _retried
 from app.assistants import runner
 from app.config import get_settings
 from app.history import Source
-from app.integrations.firecrawl import Budget
 from app.mongo import db
 from app.tools import invoke
 from app.tools import plan as plan_tool
 from app.tools import repair as repair_tool
 from tests.conftest import import_people
-from tests.test_assistants import FakeFirecrawl
 from tests.test_mcp import call, init
 
 CSV = """ID,Name,Bio,MRR,Stage,Notes
@@ -353,14 +351,10 @@ async def test_normalize_merges_allocates_and_drops_enum_values(people_by_name, 
 
 # --- repair -----------------------------------------------------------------------------------------
 
-def fake_firecrawl() -> FakeFirecrawl:
-    return FakeFirecrawl(api_key="fake", budget=Budget(max_scrapes=1, max_searches=0, max_credits=5))
-
-
-async def repair(pid: str, src: Source, opts: repair_tool.RepairOptions | None = None,
-                 firecrawl: FakeFirecrawl | None = None) -> repair_tool.RepairResult:
+async def repair(pid: str, src: Source,
+                 opts: repair_tool.RepairOptions | None = None) -> repair_tool.RepairResult:
     """The repair tool on one record, as any caller runs a tool: through an invocation."""
-    ctx = await invoke.make_context(pid, src, None, firecrawl=firecrawl)
+    ctx = await invoke.make_context(pid, src, None)
     assert ctx is not None
     result = await invoke.run(repair_tool.repair, ctx, opts=opts)
     assert isinstance(result, repair_tool.RepairResult)
@@ -398,20 +392,20 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     src = Source("agent", "repair", "test")
     # mojibake and casing are fixed mechanically; a two-token name is complete: Person
     pid = await make(writer, {"name": "andrÃ© niÃ±o", "bio": "Founder of a fintech."})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src)
     assert res.mechanical == ["name"] and res.kind == "Person" and res.name_source == "unchanged"
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "André Niño" and person["record_kind"] == "Person"
     assert [e["v"] for e in person["history"]["name"]] == ["andrÃ© niÃ±o", "André Niño"]
     assert person["history"]["name"][-1]["src"] == {"kind": "system", "by": "repair"}
-    assert not res.provider_called and res.credits == 0
+    assert res.credits == 0
     # a company recorded as a person
     pid = await make(writer, {"name": "Light Node Ventures", "website": "https://lightnode.vc"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src)
     assert res.kind == "Company" and (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Company"
     # an email as the name: the local part gives the full name (evidence), nothing invented
     pid = await make(writer, {"name": "polly.israni@gmail.com", "email": "polly.israni@gmail.com"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src)
     assert res.name_source == "evidence" and res.kind == "Person"
     person = (await reader.get(f"/api/people/{pid}")).json()
     assert person["name"] == "Polly Israni" and person["history"]["name"][0]["v"] == "polly.israni@gmail.com"
@@ -419,7 +413,7 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     # a misfiled value moves to notes and is tombstoned where it was
     pid = await make(writer, {"name": "Dana Whitfield", "website": "previously marketing manager at Gap Inc.",
                               "notes": "met in June"})
-    res = await repair(pid, src, firecrawl=fake_firecrawl())
+    res = await repair(pid, src)
     by = {(c.key, c.action): c for c in res.changes}
     assert by[("website", "removed")].previous == "previously marketing manager at Gap Inc."
     assert by[("notes", "set")].value == "met in June\npreviously marketing manager at Gap Inc."
@@ -427,48 +421,23 @@ async def test_repair_fixes_names_classifies_and_moves_misfiled(writer, reader):
     assert "website" not in person and person["history"]["website"][-1]["v"] is None
 
 
-async def test_repair_resolves_partial_names_through_linkedin_or_marks_unidentifiable(writer, reader):
+async def test_repair_marks_partial_names_unidentifiable_without_asking_anyone(writer, reader):
+    """The repair tool never calls a data provider: a bare first name with a LinkedIn URL is the
+    normalise assistant's cue to enrich; left alone, the record is Unidentifiable."""
     src = Source("agent", "repair", "test")
-    # a first name with a LinkedIn profile the provider knows: the name comes from the profile
     pid = await make(writer, {"name": "Ada", "linkedin": "https://www.linkedin.com/in/adaokafor"})
-    fc = fake_firecrawl()
-    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fc)
-    assert res.provider_called and res.credits == 5 and res.name_source == "provider"
-    assert res.kind == "Person"
+    res = await repair(pid, src)
+    assert res.kind == "Unidentifiable" and res.credits == 0 and res.calls == []
     person = (await reader.get(f"/api/people/{pid}")).json()
-    assert person["name"] == "Ada Okafor"
-    assert person["history"]["name"][-1]["src"] == {"kind": "agent", "by": "repair/fullenrich", "ref": "test"}
-    # the lookup was paid for: what the profile says about her is written too, attributed to it
-    assert res.profile_written == ["company", "github", "linkedin_headline", "location"]
-    assert person["linkedin_headline"] == "Building payments infrastructure for African merchants · CEO at PayRail"
-    assert person["github"] == "https://github.com/adaok" and person["location"] == "Lagos, Nigeria"
-    assert person["company"] == "PayRail"
-    assert {person["history"][k][-1]["src"]["by"] for k in res.profile_written} == {"repair/fullenrich"}
-    assert set(person) - {"id", "tier", "created_at", "updated_at", "schema_version", "norm", "norm_flags",
-                          "history", "history_norm", "name", "linkedin", "record_kind",
-                          *res.profile_written} == set()                        # and nothing beyond it
-    # a profile the provider does not know: Unidentifiable, no credits spent, nothing written
-    pid = await make(writer, {"name": "Bo", "linkedin": "https://www.linkedin.com/in/nobody-here"})
-    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
-    assert res.provider_called and res.credits == 0 and res.kind == "Unidentifiable"
-    assert res.profile_written == [] and "linkedin_headline" not in (await reader.get(f"/api/people/{pid}")).json()
-    # a matched profile without a full name: still Unidentifiable, but the paid profile lands
-    pid = await make(writer, {"name": "Nam", "linkedin": "https://www.linkedin.com/in/nameless"})
-    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
-    assert res.provider_called and res.credits == 5 and res.kind == "Unidentifiable"
-    assert res.name_source == "unchanged" and res.profile_written == ["company", "github", "linkedin_headline", "location"]
-    person = (await reader.get(f"/api/people/{pid}")).json()
-    assert person["name"] == "Nam" and person["company"] == "PayRail"
-    # no LinkedIn: no provider call, Unidentifiable
+    assert person["name"] == "Ada" and "linkedin_headline" not in person
+    assert set(person) - {"id", "tier", "created_at", "updated_at", "schema_version", "norm",
+                          "norm_flags", "history", "history_norm", "name", "linkedin",
+                          "record_kind"} == set()
+    # no LinkedIn: Unidentifiable as well
     pid = await make(writer, {"name": "Vlad", "email": "vlad@example.com"})
-    res = await repair(pid, src, repair_tool.RepairOptions(provider=True), firecrawl=fake_firecrawl())
-    assert not res.provider_called and res.kind == "Unidentifiable"
+    res = await repair(pid, src)
+    assert res.kind == "Unidentifiable"
     assert (await reader.get(f"/api/people/{pid}")).json()["record_kind"] == "Unidentifiable"
-    # provider switched off: no call either
-    pid = await make(writer, {"name": "Cy", "linkedin": "https://www.linkedin.com/in/adaokafor"})
-    res = await repair(pid, src, repair_tool.RepairOptions(provider=False), firecrawl=fake_firecrawl())
-    assert not res.provider_called and res.kind == "Unidentifiable"
-
 
 async def test_repair_validator_refuses_invented_names_and_allocates_kinds(writer, reader):
     src = Source("agent", "repair", "test")
@@ -511,7 +480,6 @@ async def test_normalize_repairs_once_unless_forced(people_by_name, writer, read
     cy = people_by_name["Cy"]
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert res["repair"]["kind"] == "Unidentifiable"           # "Cy": one token, no LinkedIn
-    assert res["repair"]["provider_called"] is False           # no FIRECRAWL_API_KEY in tests
     assert (await reader.get(f"/api/people/{cy}")).json()["record_kind"] == "Unidentifiable"
     res = (await writer.post(f"/api/people/{cy}/normalize?wait=true")).json()
     assert res["repair"] is None                               # already classified
@@ -524,7 +492,7 @@ async def test_normalize_repairs_once_unless_forced(people_by_name, writer, read
 async def test_normalize_assistant_run(people_by_name, writer, reader):
     r = await writer.post("/api/assistants/normalize/runs",
                           json={"person_ids": [people_by_name["Cy"], people_by_name["Ada"]],
-                                "options": {"provider": False}})
+                                "options": {"enrich": False}})
     assert r.status_code == 201, r.text
     await runner.drain()
     run = (await reader.get(f"/api/assistants/runs/{r.json()['id']}")).json()

@@ -18,7 +18,6 @@ from app.assistants import REGISTRY, runner
 from app.assistants.ask import ask
 from app.auth import Principal
 from app.history import Source
-from app.routers.people import provider_client
 from app.tools import invoke
 from app.tools import normalize as normalize_tool
 from app.tools import store as store_tool
@@ -309,7 +308,7 @@ async def normalize_person(
     options = options or NormalizeOptions()
     result = await _run_tool(ctx, normalize_tool.normalize, id,
                              Source("agent", "normalizer", f"key:{principal.api_key_id}"),
-                             principal, firecrawl=provider_client(options), opts=options)
+                             principal, opts=options)
     return json.loads(result.model_dump_json())
 
 

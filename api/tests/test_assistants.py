@@ -568,8 +568,8 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     assert res["enrich"]["linkedin"] == "matched" and res["enrich"]["storage"] == "stored"
     assert res["enrich"]["linkedin_provider"] == "people-data-labs"
     assert written(res)["name"] == "Ada Okafor" and written(res)["about"]
-    assert res["repair"]["kind"] == "Person" and not res["repair"]["provider_called"]
-    assert res["text"].startswith("Enriched first: Linkedin profile matched")
+    assert res["repair"]["kind"] == "Person"
+    assert "Enriched: Linkedin profile matched" in res["text"]
     # PDL, the GitHub tool and one company page (PDL carries no employer description)
     assert ada["credits"] == PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
     person = (await reader.get(f"/api/people/{ids['Ada']}")).json()
@@ -585,10 +585,10 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
     assert item["result"]["repair"]["kind"] == "Person" and item["credits"] == 0
     assert (await reader.get(f"/api/people/{ids['Cy Diaz']}")).json()["record_kind"] == "Person"
-    assert not cy["result"]["text"].startswith("Enriched first")
+    assert "Enriched" not in cy["result"]["text"]
     specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
     assert specs["normalize"]["options_schema"]["properties"]["enrich"]["default"] is True
-    assert specs["normalize"]["options_schema"]["properties"]["provider"]["default"] is False
+    assert "provider" not in specs["normalize"]["options_schema"]["properties"]
 
 
 def test_profile_lines_clean_provider_text():

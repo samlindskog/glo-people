@@ -248,11 +248,10 @@ export interface RepairResult {
   person_id: string | null
   changes: Change[]
   kind: string | null
-  name_source: 'evidence' | 'provider' | 'unchanged' | null
+  name_source: 'evidence' | 'unchanged' | null
   signals: string[]
   mechanical: string[]
   agent_called: boolean
-  provider_called: boolean
   credits: number
   confidence: string | null
   note: string

@@ -12,10 +12,8 @@ from app import people as people_svc
 from app.assistants import import_csv, runner
 from app.assistants.import_csv import ImportOptions
 from app.auth import Principal, require
-from app.config import get_settings
 from app.history import Source
-from app.integrations.firecrawl import AsyncFirecrawl, Budget
-from app.integrations.fullenrich import MATCH_CREDITS
+from app.integrations.firecrawl import AsyncFirecrawl
 from app.routers.search import agent_error
 from app.tools import invoke
 from app.tools import normalize as normalize_tool
@@ -215,14 +213,6 @@ class NormalizeBody(BaseModel):
     options: NormalizeOptions = Field(default_factory=NormalizeOptions)
 
 
-def provider_client(options: NormalizeOptions) -> AsyncFirecrawl | None:
-    """A Firecrawl client with room for one FullEnrich name lookup, when the options ask for the
-    provider and a key is configured; the invocation closes it."""
-    if not (options.repair and options.provider and get_settings().firecrawl_api_key):
-        return None
-    return AsyncFirecrawl(budget=Budget(max_scrapes=1, max_searches=0, max_credits=MATCH_CREDITS))
-
-
 @router.post("/people/{person_id}/normalize", status_code=202, response_model=None)
 async def normalize_one(person_id: str, principal: Writer, body: NormalizeBody | None = None,
                         wait: Wait = False):
@@ -231,8 +221,7 @@ async def normalize_one(person_id: str, principal: Writer, body: NormalizeBody |
     data and classify it. Returns the invocation (202); with `wait=true`, the NormalizeResult."""
     options = (body or NormalizeBody()).options
     return await _invoke(normalize_tool.normalize, person_id, principal,
-                         Source("agent", "normalizer", f"user:{principal.username}"), wait,
-                         firecrawl=provider_client(options), action="person.normalize.tool",
+                         Source("agent", "normalizer", f"user:{principal.username}"), wait, action="person.normalize.tool",
                          meta={"options": options.model_dump()}, opts=options)
 
 

@@ -40,9 +40,6 @@ class NormalizeOptions(BaseModel):
     max_new_values: int = Field(3, ge=0, le=10, description="New enum values per call, in total")
     repair: bool = Field(True, description="Repair identity data and set record_kind for records "
                                            "that have none yet")
-    provider: bool = Field(False, description="During repair, ask FullEnrich (5 credits) for the "
-                                             "full name when the record has a LinkedIn URL and "
-                                             "no full name")
     force: bool = Field(False, description="Repair even when record_kind is already set")
 
 
@@ -206,7 +203,7 @@ async def normalize(ctx: ToolContext, opts: NormalizeOptions | None = None) -> N
     if opts.repair and (opts.force or history.current(doc.get(repair_tool.KIND)) is None):
         result.repair = await repair_tool.repair(
             ctx.child(repair_tool.AGENT_NAME),
-            RepairOptions(provider=opts.provider, allocate=opts.allocate))
+            RepairOptions(allocate=opts.allocate))
     result.changes = ctx.tx.changes("normalize", "repair")
     return result
 

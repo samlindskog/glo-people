@@ -179,7 +179,7 @@ export function describeNormalization(result: NormalizeResult): string {
     if (c.action === 'normalized') return [`${c.key} → ${formatValue(c.value)}`]
     if (c.action === 'enum_value_added') return [`${c.key}: new value “${formatValue(c.value)}”`]
     if (c.action === 'flagged') return [`${c.key}: ${c.flag === 'non_normalizable' ? 'no value' : 'not recognised'}`]
-    if (c.action === 'set' && c.key === 'name') return [`name → ${formatValue(c.value)}${result.repair?.name_source === 'provider' ? ' (LinkedIn)' : ''}`]
+    if (c.action === 'set' && c.key === 'name') return [`name → ${formatValue(c.value)}`]
     if (c.action === 'removed') return [`${c.key} removed`]
     return []
   })
