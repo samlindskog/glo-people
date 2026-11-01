@@ -520,6 +520,10 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
     st.result["stored"] = {key: {"provider": st.passage.source_of(key), "evidence": evidence}
                            for key, evidence in res.evidence.items()}
     st.result["confirmed"] = list(res.confirmed)
+    if res.ignored:
+        st.result["ignored"] = list(res.ignored)      # what the agent set aside, for review
+    if res.conflicts:
+        st.result["conflicts"] = list(res.conflicts)
     if res.dropped:
         st.result["dropped"] = list(res.dropped)
     if res.created_properties:

@@ -191,6 +191,14 @@ def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None 
         elif current is not None and current.get(key) in (None, "", []) and key not in locked:
             problems.append(f"{key} has no current value, so the passage cannot confirm it: write "
                             "the value instead")
+    # every labelled line is accounted for: written, confirmed, or set aside under ignored (the
+    # model once filed one line of seven and said nothing about the rest)
+    mentioned = ({w.key for w in proposal.writes} | set(proposal.confirmed) | locked
+                 | {k for k in labelled if any(k in part for part in proposal.ignored)})
+    if unaccounted := sorted((labelled & set(catalog)) - mentioned):
+        problems.append("these labelled lines were neither filed, confirmed nor ignored: "
+                        + ", ".join(unaccounted) + " (write each, confirm it, or list its label "
+                        "under ignored with the reason)")
     return problems
 
 

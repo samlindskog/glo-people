@@ -223,7 +223,7 @@ def test_storage_check_evidence_locked_and_confirmations():
                                 evidence="title_enriched: Research Assistant")])
     assert check(ok, cat, passage) == []
     made_up = Proposal(writes=[Write(key="notes", value="x", evidence="Studied at Oxford")])
-    assert check(made_up, cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
+    assert check(made_up, cat, passage)[0] == "notes: evidence must be copied verbatim from the passage"
     # locked keys may be confirmed, never written; confirmations need a current value
     locked = frozenset({"company"})
     bad = Proposal(writes=[Write(key="company", value="ICLUB", evidence="title_enriched: Research")],
@@ -236,7 +236,8 @@ def test_storage_check_evidence_locked_and_confirmations():
     fine = Proposal(confirmed=["company", "about"])
     assert check(fine, cat, passage, current={"about": "old"}, locked=locked) == []
     # a labelled line anchors its fact: its evidence is not re-checked word by word
-    anchored = Proposal(writes=[Write(key="about", value="x", evidence="about: a paraphrase")])
+    anchored = Proposal(writes=[Write(key="about", value="x", evidence="about: a paraphrase")],
+                        ignored=["title_enriched: not a title"])
     assert check(anchored, cat, passage) == []
     assert check(Proposal(writes=[Write(key="notes", value="x", evidence="a paraphrase")]),
                  cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
@@ -247,6 +248,14 @@ def test_storage_check_evidence_locked_and_confirmations():
                                          embeddable=True, normalisable=False, filter_ops=[], source="spec")}
     assert check(dup, cat2, None) == [("new property 'professional_interests': 'interests' exists "
                                        "for this kind of fact; write to it instead")]
+    # every labelled line must be filed, confirmed or set aside
+    partial = Proposal(writes=[Write(key="about", value="x", evidence="about")])
+    assert check(partial, cat, passage) == [("these labelled lines were neither filed, confirmed nor "
+                                             "ignored: title_enriched (write each, confirm it, or list "
+                                             "its label under ignored with the reason)")]
+    accounted = Proposal(writes=[Write(key="about", value="x", evidence="about")],
+                         ignored=["title_enriched: not a job title"])
+    assert check(accounted, cat, passage) == []
     # an empty answer to a non-empty passage is not an answer
     assert check(Proposal(), cat, passage)[0].startswith("the proposal is empty")
     assert check(Proposal(ignored=["hi there"]), cat, "hi there") == []
