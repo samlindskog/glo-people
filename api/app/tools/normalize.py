@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import fields, history, people, properties
+from app import fields, history, people, properties, property_specs
 from app import normalize as parser
 from app.agents.common import run_agent
 from app.history import Change
@@ -27,8 +27,8 @@ from app.tools.repair import RepairOptions, RepairResult
 AGENT_NAME = "normalizer"
 REQUEST_LIMIT = 3
 ENUM_TYPES = ("enum", "enum_list")
-MAX_VALUE_CHARS = 40
-CONTEXT_KEYS = ("company", "role", "one_liner", "bio", "sectors", "company_description")
+MAX_VALUE_CHARS = property_specs.MAX_ENUM_VALUE_CHARS
+CONTEXT_KEYS = property_specs.DESCRIBES_PERSON
 
 
 class NormalizeOptions(BaseModel):
@@ -118,7 +118,7 @@ Never invent a value the text does not support; one answer per item, in the same
 
 
 def _clean_value(text: str) -> str:
-    return " ".join(str(text).split())
+    return fields.clean(text)
 
 
 @agent.output_validator
@@ -176,7 +176,7 @@ def person_context(doc: dict) -> str:
         value = history.current(doc.get(key))
         if value not in (None, "", []):
             text = fields.text_of(value)
-            lines.append(f"{key}: {text[:fields.MAX_TEXT_CHARS]}")
+            lines.append(f"{key}: {text[:property_specs.DESCRIBE_CLIP.get(key, 400)]}")
     return "\n".join(lines) or "(nothing else known)"
 
 

@@ -3,14 +3,12 @@ and how one is turned into record values: `profile_values` for the deterministic
 (identifiers), `profile_lines` for the labelled lines the enrich assistant hands to the storage
 agent. Pure data: no provider calls, no app-level decisions."""
 
-import html
-import re
-from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app import fields
+from app import fields, names
+from app.names import is_full_name
 from app.urls import github_profile
 
 
@@ -59,23 +57,6 @@ class LinkedInProfile(BaseModel):
     skills: list[str] = Field(default_factory=list)
     languages: list[str] = Field(default_factory=list)
     interests: list[str] = Field(default_factory=list)
-
-
-_NOT_A_NAME = re.compile(r"[|@/#&_(){}\[\]<>\d]|\bhttp")   # handles, titles, taglines, addresses
-
-
-def _tokens(name: str) -> list[str]:
-    return fields.fold(name).split()
-
-
-def is_full_name(name: str) -> bool:
-    """A first and a last name: two or more tokens, the last one a word of two or more letters,
-    and none of the marks of a handle or tagline ("Polly I.", "Ada O", "Jordan | Cofounder | UXUY"
-    and "Lena@Cohere" do not count)."""
-    if _NOT_A_NAME.search(name or ""):
-        return False
-    toks = _tokens(name)
-    return len(toks) >= 2 and len(toks[-1]) >= 2 and not toks[-1].isdigit()
 
 
 def full_name(profile: LinkedInProfile | None) -> str | None:
@@ -136,18 +117,7 @@ def _years(start: str | None, end: str | None, current: bool) -> str:
     return f"{a}–{b}" if a and b else a or b
 
 
-_INVISIBLE = str.maketrans({"\u2800": " ", "\u200b": "", "\u00a0": " ", "\ufeff": ""})
-
-
-def _clean(text: str | None) -> str:
-    """One line: HTML entities decoded ("&amp;"), braille blanks and zero-width characters (used
-    as spacers on profiles) removed, whitespace collapsed."""
-    return " ".join(html.unescape(str(text or "")).translate(_INVISIBLE).split())
-
-
-def _language(name: str) -> str:
-    """Language names as proper nouns: providers return "english" and "English" alike."""
-    return name.capitalize() if name == name.lower() else name
+_clean = fields.clean
 
 
 def position_text(p: Position) -> str:
@@ -163,11 +133,6 @@ def education_text(e: Education) -> str:
     return f"{head} ({years})" if head and years else head
 
 
-def _distinct(texts: Iterable[str]) -> list[str]:
-    """Non-empty texts, first occurrence kept (providers repeat an entry now and then)."""
-    return [t for t in dict.fromkeys(texts) if t]
-
-
 def profile_lines(profile: LinkedInProfile) -> list[Line]:
     """The profile's facts as `(property key, value)` lines for the storage agent: the about text,
     the current title, the work history and education as one clause per entry, and the list
@@ -177,11 +142,11 @@ def profile_lines(profile: LinkedInProfile) -> list[Line]:
         lines.append(("about", about))
     if title := _clean(profile.current_title):
         lines.append(("title_enriched", title))
-    if positions := _distinct(map(position_text, profile.experience)):
+    if positions := fields.distinct(map(position_text, profile.experience)):
         lines.append(("experience", "; ".join(positions)))
-    if schools := _distinct(map(education_text, profile.education)):
+    if schools := fields.distinct(map(education_text, profile.education)):
         lines.append(("education", "; ".join(schools)))
     for key in LIST_KEYS:
         if items := [_clean(v) for v in getattr(profile, key) if _clean(v)]:
-            lines.append((key, [_language(v) for v in items] if key == "languages" else items))
+            lines.append((key, [names.title_case(v) for v in items] if key == "languages" else items))
     return lines

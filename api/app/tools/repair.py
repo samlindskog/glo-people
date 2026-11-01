@@ -16,10 +16,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import fields, history, properties
+from app import fields, history, names, properties, property_specs
 from app.agents.common import run_agent
 from app.history import Change, Source
-from app.integrations.profile import _tokens, is_full_name
+from app.names import demojibake, is_full_name, title_case
 from app.tools import Emit, ToolContext, ToolResult, silent
 from app.urls import linkedin_profile
 
@@ -28,18 +28,8 @@ REQUEST_LIMIT = 4
 KIND = "record_kind"
 PERSON, COMPANY, UNIDENTIFIABLE = "Person", "Company", "Unidentifiable"
 TEXT_LIKE = ("text", "keyword", "url", "contact", "list")
-EVIDENCE_KEYS = ("linkedin", "email", "emails", "github", "website", "company", "role",
-                 "linkedin_headline", "title_enriched", "one_liner", "bio", "intro_bio", "about",
-                 "experience", "notes", "entity_type", "location")
-EVIDENCE_CLIP = {"about": 600, "experience": 400, "notes": 800}   # long texts: their opening
-_COMPANY_WORDS = re.compile(r"\b(inc|llc|ltd|ventures?|capital|labs?|studio|partners|holdings|"
-                            r"group|technologies|fund|gmbh|corp|company|co)\b", re.IGNORECASE)
-_HANDLE = re.compile(r"@\w")
-_URLISH = re.compile(r"https?:|www\.|\.(com|io|ai|co|org|net)\b", re.IGNORECASE)
-_EMAILISH = re.compile(r"^[^@\s]+@[^@\s]+\.\w+$")
-# UTF-8 bytes read as Latin-1 show up as A-tilde / A-circumflex followed by a C1/Latin-1 char.
-_MOJIBAKE = re.compile(r"[\u00c3\u00c2][\u0080-\u00bf]")   # regex escapes, kept raw on purpose
-_SYMBOLS = re.compile(r"[^\w\s.'’\-(),&/]", re.UNICODE)
+EVIDENCE_KEYS = property_specs.DESCRIBES_PERSON
+EVIDENCE_CLIP = property_specs.DESCRIBE_CLIP
 
 
 class RepairOptions(BaseModel):
@@ -87,12 +77,12 @@ def signals(doc: dict) -> list[str]:
     tokens = name.split()
     checks = [
         ("digits in name", re.search(r"\d", name)),
-        ("handle in name", _HANDLE.search(name)),
-        ("email as name", _EMAILISH.match(name.strip())),
-        ("url in name", _URLISH.search(name)),
-        ("company words in name", _COMPANY_WORDS.search(name)),
-        ("mojibake", _MOJIBAKE.search(name)),
-        ("symbols in name", _SYMBOLS.search(name)),
+        ("handle in name", names.HANDLE.search(name)),
+        ("email as name", names.EMAILISH.match(name.strip())),
+        ("url in name", names.URLISH.search(name)),
+        ("company words in name", names.COMPANY_WORDS.search(name)),
+        ("mojibake", names.MOJIBAKE.search(name)),
+        ("symbols in name", names.SYMBOLS.search(name)),
         ("five or more tokens", len(tokens) >= 5),
         ("single token", len(tokens) == 1),
         ("very short", len(name.strip()) <= 2),
@@ -104,30 +94,9 @@ def signals(doc: dict) -> list[str]:
         flat = re.sub(r"[^a-z0-9]", "", slug.lower())
         if not any(t in flat for t in fields.fold(name).split() if len(t) >= 3):
             out.append("name absent from linkedin slug")
-    identifying = ("linkedin", "email", "emails", "bio", "one_liner", "intro_bio", "website",
-                   "company", "linkedin_headline")
-    if not any(_cur(doc, k) for k in identifying):
+    if not any(_cur(doc, k) for k in property_specs.DESCRIBES_PERSON if k != "notes"):
         out.append("nothing identifying besides the name")
     return out
-
-
-def demojibake(text: str) -> str:
-    """UTF-8 that was read as Latin-1 back to what it was (Nin~o -> Niño style damage)."""
-    if not _MOJIBAKE.search(text):
-        return text
-    try:
-        fixed = text.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return text
-    return fixed if len(_MOJIBAKE.findall(fixed)) < len(_MOJIBAKE.findall(text)) else text
-
-
-def title_case(name: str) -> str:
-    """"elizabeth hsu" -> "Elizabeth Hsu"; only for names that are entirely lowercase and look
-    like names (no handle, email, URL or digits: those are for the agent)."""
-    if not name.islower() or _HANDLE.search(name) or _URLISH.search(name) or re.search(r"\d", name):
-        return name
-    return re.sub(r"(^|[\s\-'’])(\w)", lambda m: m.group(1) + m.group(2).upper(), name)
 
 
 def mechanical_fixes(doc: dict) -> dict[str, str]:
@@ -138,7 +107,8 @@ def mechanical_fixes(doc: dict) -> dict[str, str]:
         if isinstance(value, str) and value != (fixed := demojibake(value)):
             out[key] = fixed
     name = out.get("name", _cur(doc, "name"))
-    if isinstance(name, str) and name.strip() and name != (cased := title_case(name)):
+    if isinstance(name, str) and name.strip() and not names.looks_broken(name) \
+            and name != (cased := title_case(name)):
         out["name"] = cased
     return out
 
@@ -218,7 +188,7 @@ async def _grounded(ctx: RunContext[RepairDeps], v: Verdict) -> Verdict:
         problems.append("kind must be a short label")
     if v.name is not None:
         name = " ".join(v.name.split())
-        toks = _tokens(name)
+        toks = names.tokens(name)
         evidence_tokens = set(ctx.deps.evidence.split())
         if not is_full_name(name):
             problems.append("a proposed name needs a first and a last name (or null)")
@@ -336,7 +306,7 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         KIND, kind_proposed, opts.allocate, src=f"agent:{AGENT_NAME} {ctx.source.ref or ''}".strip())
     if kind is None:
         result.rejected.append(f"kind {kind_proposed!r} (allocation off)")
-        kind = PERSON if _tokens(current_name) else UNIDENTIFIABLE
+        kind = PERSON if names.tokens(current_name) else UNIDENTIFIABLE
     if allocated:
         ctx.tx.record_catalog(Change(key=KIND, action="enum_value_added", value=kind), tag="repair")
         ctx.emit("note", f"new record kind {kind!r}", value=kind)

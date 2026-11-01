@@ -18,7 +18,7 @@ from pymongo import UpdateOne
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 
-from app import db, embedder, fields, mongo
+from app import db, embedder, fields, mongo, property_specs
 from app.property_specs import EMBEDDABLE, NORMALISABLE, SPECS, PropertyType, Spec, filter_ops
 
 log = logging.getLogger(__name__)
@@ -208,7 +208,7 @@ async def add_enum_value(key: str, value: str, aliases: Sequence[str] = (),
     return bool(res.modified_count)
 
 
-MAX_ENUM_VALUE_CHARS = 40
+MAX_ENUM_VALUE_CHARS = property_specs.MAX_ENUM_VALUE_CHARS
 
 
 async def resolve_enum_value(key: str, proposed: str, allocate: bool,
@@ -216,7 +216,7 @@ async def resolve_enum_value(key: str, proposed: str, allocate: bool,
     """The canonical value a proposed enum value stands for: an existing value or alias (by
     `fields.fold`), or, when `allocate`, a new canonical value added to the property's set with
     `src`. Returns (value, allocated); (None, False) when it is neither known nor allocatable."""
-    value = " ".join(str(proposed).split())
+    value = fields.clean(proposed)
     canon = (await enum_lookup(key)).get(fields.fold(value))
     if canon:
         return canon, False

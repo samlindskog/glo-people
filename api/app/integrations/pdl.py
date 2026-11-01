@@ -7,6 +7,7 @@ entitled to (contact data, some social URLs) arrive as booleans and are ignored.
 
 from typing import Any
 
+from app import fields, names
 from app.integrations.firecrawl import AsyncFirecrawl
 from app.integrations.profile import Company, Education, LinkedInProfile, Position
 from app.urls import github_profile, linkedin_profile, normalize_url
@@ -16,27 +17,13 @@ CAPABILITY = "person/enrich"
 ENRICH_CREDITS = 1       # listed price per record found
 MIN_LIKELIHOOD = 8       # a profile-URL match scores 10; anything weaker is not this person
 
-_SMALL = {"of", "and", "the", "at", "in", "for", "on", "de", "da", "du", "von", "van", "der", "y"}
-_SHORT_WORDS = {"go", "do", "my", "so", "to", "we", "no", "is", "if", "or", "up"}   # not acronyms
-
-
-def _word(word: str, first: bool) -> str:
-    if not first and word in _SMALL:
-        return word
-    if len(word) <= 2 and word.isalpha() and word not in _SHORT_WORDS:   # td, it, hr, ai, vp
-        return word.upper()
-    return word.capitalize()
-
-
 def _title(value: Any) -> str | None:
-    """PDL's all-lowercase names and titles in Title Case ("it service desk manager at td" →
+    """PDL's all-lowercase names and titles in Title Case ("it service desk manager at td" ->
     "IT Service Desk Manager at TD"); mixed-case text is left alone."""
     if isinstance(value, dict):
         value = value.get("name")
-    text = " ".join(str(value).split()) if value not in (None, "") else ""
-    if not text or text != text.lower():
-        return text or None
-    return " ".join(_word(w, i == 0) for i, w in enumerate(text.split(" ")))
+    text = fields.clean(value) if value not in (None, "") else ""
+    return names.title_case(text, acronyms=True) or None
 
 
 def _names(values: Any) -> list[str]:

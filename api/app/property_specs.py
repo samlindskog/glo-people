@@ -27,6 +27,20 @@ def filter_ops(ptype: str) -> tuple[str, ...]:
     return TEXT_OPS + (RANGE_OPS if ptype in ("number", "date") else ())
 
 
+MAX_ENUM_VALUE_CHARS = 40          # a canonical enum value is a short label
+
+# The keys that describe who a person is, for an agent's judgement (the repair agent's evidence,
+# the normaliser's context); long texts are shown by their opening.
+DESCRIBES_PERSON = ("linkedin", "email", "emails", "github", "website", "company", "role",
+                    "linkedin_headline", "title_enriched", "one_liner", "bio", "intro_bio", "about",
+                    "experience", "sectors", "company_description", "notes", "entity_type",
+                    "location")
+DESCRIBE_CLIP = {"about": 600, "experience": 400, "notes": 800, "bio": 800,
+                 "company_description": 400}
+AUDIT_KEYS = frozenset({"enrichment_passage"})    # records of what was filed: never a fact to re-file
+IDENTITY_KEYS = ("email", "emails", "phone_number", "phones", "linkedin", "github")
+
+
 @dataclass(frozen=True)
 class Spec:
     type: PropertyType

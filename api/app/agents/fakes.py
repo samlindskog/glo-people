@@ -14,7 +14,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from app import fields
+from app import fields, names, property_specs
 
 
 def _prompt(messages: list[ModelMessage]) -> str:
@@ -85,6 +85,8 @@ def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     passage = _section(prompt, "Passage")
     props = dict(re.findall(r"^- ([a-z0-9_]+) \((\w+)", _section(prompt, "Properties"), re.MULTILINE))
     current = dict(re.findall(r"^([a-z0-9_]+): (.*?)(?:  \[|$)", _section(prompt, "Current values"), re.MULTILINE))
+    m = re.search(r"^Not yours to write .*?: (.*)$", prompt, re.MULTILINE)
+    locked = {k.strip() for k in m.group(1).split(",")} if m else set()
     out: dict = {"writes": [], "new_properties": [], "confirmed": [], "ignored": []}
     # a multi-line passage is one fact per line (the enrich assistant's labelled lines); a single
     # line is split into sentences
@@ -110,8 +112,11 @@ def storage(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         key, value = (s.strip() for s in line.split(":", 1)) if ":" in line else ("notes", line)
         if key not in props:
             key, value = "notes", line
-        if current.get(key, "").strip() == value:
-            out["confirmed"].append(key)
+        if current.get(key, "").strip() == value or (key in locked and current.get(key)):
+            out["confirmed"].append(key)                 # restated, or the caller's to write
+            continue
+        if key in locked:
+            out["ignored"].append(line)
             continue
         if props[key] in ("list", "enum_list"):
             out["writes"].append({"key": key, "value": [v.strip() for v in value.split(";")],
@@ -139,8 +144,8 @@ def normalizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if choice:
             items.append({"field": field, "value": [choice] if ptype == "enum_list" else choice,
                           "note": "fake match"})
-        elif ptype in ("enum", "enum_list") and re.fullmatch(r"[A-Z][\w/&' -]{0,30}", text) \
-                and "," not in text:
+        elif ptype in ("enum", "enum_list") and re.fullmatch(r"[A-Z][\w/&' -]*", text) \
+                and len(text) <= property_specs.MAX_ENUM_VALUE_CHARS and "," not in text:
             items.append({"field": field, "value": [text] if ptype == "enum_list" else text,
                           "note": "fake: new value"})
         else:
@@ -174,7 +179,7 @@ def repair(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     prompt = _prompt(messages)
     name = re.search(r"^Name: (.*)$", prompt, re.MULTILINE).group(1).strip()
     evidence = prompt.split("Evidence:", 1)[-1]
-    if re.search(r"\b(inc|llc|ltd|ventures?|capital|labs?|fund)\b", name, re.IGNORECASE):
+    if names.COMPANY_WORDS.search(name):
         kind = "Company"
     elif not re.search(r"[A-Za-z]{2,}", name):
         kind = "Unidentifiable"                      # a code or an initial: nothing that names anyone

@@ -294,14 +294,14 @@ async def normalize_person(
     ctx: Context,
     id: str,
     options: Annotated[NormalizeOptions | None,
-                       Field(description="allocate, max_new_values, repair, provider, force")] = None,
+                       Field(description="allocate, max_new_values, repair, force")] = None,
 ) -> dict:
     """Tool: re-parse a person's typed properties and have an agent decide the values the parser
     could not map (requires people:write). For enum properties the agent merges a text into an
     existing value (recorded as an alias), allocates a new canonical value when the text names a
     category the list lacks and fits the person (within options), or drops it. For a record
     without a record_kind (or with force) the repair step fixes broken identity data from the
-    record's own facts (full name from FullEnrich via the LinkedIn URL when needed, 5 credits)
+    record's own facts
     and classifies it as Person, Company or Unidentifiable. Returns every change, the merges,
     allocations and rejections, what is still unmapped, and the repair result."""
     principal = await _principal(ctx, "people:write")

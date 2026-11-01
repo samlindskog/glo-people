@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
 
-from app import embedder, fields, people, properties
+from app import embedder, fields, people, properties, property_specs
 from app.agents.common import catalog_prompt, run_agent
 from app.history import Change
 from app.properties import Property
@@ -27,7 +27,7 @@ REQUEST_LIMIT = 4
 OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
 MAX_PASSAGE_CHARS = fields.MAX_TEXT_CHARS
 LIST_TYPES = ("list", "enum_list")
-AUDIT_KEYS = frozenset({"enrichment_passage"})   # records of what was filed: not facts to re-file
+AUDIT_KEYS = property_specs.AUDIT_KEYS           # records of what was filed: not facts to re-file
 
 Value = str | list[str]
 
@@ -105,16 +105,7 @@ Rules:
 )
 
 
-_TYPOGRAPHIC = str.maketrans({"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
-                              "\u2013": "-", "\u2014": "-", "\u00a0": " ", "\u200b": "",
-                              "\u2800": " "})
 LONG_QUOTE = 40     # a quote this long is located by its start or end, not matched whole
-
-
-def _normalise_ws(text: str) -> str:
-    """Lower-case, one space between words, typographic quotes and dashes folded to ASCII (models
-    copy "I’ve" as "I've"), invisible spacers removed."""
-    return " ".join(text.translate(_TYPOGRAPHIC).split()).lower()
 
 
 def _evidence_ok(evidence: str, flat_passage: str) -> bool:
@@ -122,7 +113,7 @@ def _evidence_ok(evidence: str, flat_passage: str) -> bool:
     the passage. A long fragment counts when its first or last `LONG_QUOTE` characters do: the
     model copies the start of a long about text and then shortens it, which still locates the
     words the write rests on. Fragments under four characters are ignored."""
-    fragments = [f.strip() for f in re.split(r"[;…]|\.\.\.", _normalise_ws(evidence))]
+    fragments = [fields.fold(f) for f in re.split(r"[;\u2026]|\.\.\.", evidence)]
 
     def found(f: str) -> bool:
         return f in flat_passage or (len(f) >= LONG_QUOTE
@@ -138,7 +129,7 @@ def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None 
     `locked` keys are the caller's to write (confirm them, or leave them alone)."""
     problems: list[str] = []
     seen: set[str] = set()
-    flat = _normalise_ws(passage) if passage is not None else None
+    flat = fields.fold(passage) if passage is not None else None
     # a labelled line ("skills: …") already anchors the fact to the passage: its evidence is the
     # line itself and is not re-checked word by word (long lines were rejected for small slips)
     labelled = set(re.findall(r"^([a-z][a-z0-9_]*):", passage, re.MULTILINE)) if passage else set()
@@ -281,12 +272,7 @@ class StoreResult(ToolResult):
 
 def _merge_list(current: Any, items: list[str]) -> list[str]:
     base = list(current) if isinstance(current, list) else ([current] if current else [])
-    seen = {fields.fold(str(v)) for v in base}
-    for item in items:
-        if fields.fold(item) not in seen:
-            base.append(item)
-            seen.add(fields.fold(item))
-    return base
+    return fields.distinct([*base, *items])
 
 
 def _as_text(value: Value) -> str:

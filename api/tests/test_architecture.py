@@ -9,7 +9,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 # Level by module (a package name covers every file in it).
 LEVELS: dict[str, int] = {
     # 0 — rules and adapters
-    **dict.fromkeys(["fields", "history", "normalize", "property_specs", "embedder", "urls",
+    **dict.fromkeys(["fields", "names", "history", "normalize", "property_specs", "embedder", "urls",
                      "config", "db", "mongo", "auth", "permissions", "activity", "observability",
                      "integrations", "hub"], 0),
     # 1 — stores

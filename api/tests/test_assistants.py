@@ -580,7 +580,7 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     assert res["enrich"]["linkedin_provider"] == "people-data-labs"
     assert written(res)["name"] == "Ada Okafor" and written(res)["about"]
     assert res["repair"]["kind"] == "Person"
-    assert "Enriched: Linkedin profile matched" in res["text"]
+    assert "Enriched: LinkedIn profile matched" in res["text"]
     # PDL, the GitHub tool and one company page (PDL carries no employer description)
     assert ada["credits"] == PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
     person = (await reader.get(f"/api/people/{ids['Ada']}")).json()

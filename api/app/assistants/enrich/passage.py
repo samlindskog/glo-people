@@ -16,14 +16,8 @@ Value = str | list[str]
 
 def _clean(value: Value) -> Value:
     if isinstance(value, list):
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in (" ".join(str(v).split()) for v in value):
-            if item and fields.fold(item) not in seen:
-                out.append(item)
-                seen.add(fields.fold(item))
-        return out
-    return " ".join(str(value).split())
+        return fields.distinct(fields.clean(v) for v in value)
+    return fields.clean(value)
 
 
 def _text(value: Value) -> str:

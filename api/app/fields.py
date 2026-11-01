@@ -5,7 +5,9 @@ are embedded is the business of `app.properties`; this module only knows what a 
 like, which keys are reserved, and how a value is rendered as text.
 """
 
+import html
 import re
+from collections.abc import Callable, Iterable
 from typing import Any
 
 SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated_at",
@@ -42,6 +44,36 @@ def fold(text: str) -> str:
     """Case-, whitespace- and punctuation-insensitive form of a short text, for matching enum
     values and their aliases: fold("Yes-future events") == fold("yes, future events")."""
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+_INVISIBLE = str.maketrans({"\u2800": " ", "\u200b": "", "\u00a0": " ", "\ufeff": ""})
+
+
+def clean(text: Any) -> str:
+    """One line of plain text: HTML entities decoded ("&amp;"), braille blanks and zero-width
+    characters (used as spacers on profiles) removed, whitespace collapsed. The storage form of
+    any text we did not write ourselves."""
+    raw = str(text if text is not None else "")
+    return " ".join(html.unescape(raw).translate(_INVISIBLE).split())
+
+
+def distinct(items: Iterable[Any], key: Callable[[Any], Any] = fold) -> list:
+    """The items with duplicates by `key` removed, first occurrence kept, empties dropped."""
+    out: list = []
+    seen: set = set()
+    for item in items:
+        if item in (None, ""):
+            continue
+        k = key(item)
+        if k not in seen:
+            out.append(item)
+            seen.add(k)
+    return out
+
+
+def sentence(text: str) -> str:
+    """First letter upper-cased, the rest untouched (str.capitalize lower-cases the rest)."""
+    return text[:1].upper() + text[1:] if text else text
 
 
 def text_of(value: Any) -> str:

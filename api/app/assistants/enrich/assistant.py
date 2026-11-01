@@ -110,13 +110,6 @@ def _has_url(deps: AssistantDeps, key: str, url: str) -> bool:
     return any(url_key(v) == wanted for v in deps.history_values(key) if isinstance(v, str))
 
 
-def _clip(text: str | None, limit: int = fields.MAX_TEXT_CHARS) -> str | None:
-    if not text:
-        return None
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
-
-
 def split_urls(value: Any) -> list[str]:
     """A field may hold several URLs in one string ("a.com , b.com"), a list, or one URL."""
     if isinstance(value, list):
@@ -176,7 +169,7 @@ def _text(st: State, deps: AssistantDeps) -> str:
             parts.append("review: " + ", ".join(bits))
     written = sorted(k for k in deps.written if k not in store_tool.AUDIT_KEYS)
     parts.append(f"wrote {', '.join(written)}" if written else "nothing new to write")
-    return "; ".join(parts).capitalize() + "."
+    return fields.sentence("; ".join(parts)) + "."
 
 
 def _recent(deps: AssistantDeps, key: str, agent: str) -> bool:
@@ -370,7 +363,7 @@ async def _step_sites(deps: AssistantDeps, st: State) -> None:
 async def _step_github_and_links(deps: AssistantDeps, st: State) -> None:
     """Step 3: GitHub and related links come only from what the record and pages gave us (no
     searching); a known GitHub account is summarised through the github-com data tool."""
-    github_urls = list(dict.fromkeys(g for g in st.github_urls if g))
+    github_urls = fields.distinct(st.github_urls, key=url_key)
     current_github = github_profile(deps.current("github")) if isinstance(
         deps.current("github"), str) else None
     if not github_urls and current_github:
@@ -389,7 +382,7 @@ async def _step_github_and_links(deps: AssistantDeps, st: State) -> None:
         return
     current = deps.current("related_links")
     current = current if isinstance(current, list) else []
-    merged = list(dict.fromkeys([*current, *links]))[:MAX_RELATED_LINKS]
+    merged = fields.distinct([*current, *links], key=url_key)[:MAX_RELATED_LINKS]
     if len(merged) > len(current):
         await deps.write(site_tool.AGENT_NAME, {"related_links": merged})
 
@@ -409,7 +402,7 @@ async def _github_facts(deps: AssistantDeps, st: State, github_url: str) -> None
             st.result["not_found"].append("github")
         return
     st.result["github"] = "matched"
-    values: dict[str, Any] = {"github_summary": _clip(found.summary())}
+    values: dict[str, Any] = {"github_summary": fields.clean(found.summary()) or None}
     if found.blog and not is_social(found.blog) and is_html_candidate(found.blog) \
             and not _has_url(deps, "website", found.blog):
         values["website"] = found.blog       # the account's blog field is usually the personal site
@@ -452,7 +445,7 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
         if website and not _has_url(deps, "website", website):
             values["website"] = website
         if "website" in values or not deps.current("company_description"):
-            values["company_description"] = _clip(provider_co.description)
+            values["company_description"] = fields.clean(provider_co.description) or None
         if not deps.current("company"):
             values["company"] = company
         st.result["company"] = "resolved"
@@ -497,7 +490,7 @@ async def _step_company(deps: AssistantDeps, st: State) -> None:
     # stay in its history. A reworded summary of the same website is not new information: only
     # write one when the record has no description yet or the company website is new.
     if "website" in values or not deps.current("company_description"):
-        values["company_description"] = _clip(summary.summary)
+        values["company_description"] = fields.clean(summary.summary) or None
     else:
         deps.skip("company", "summary kept: same website as before")
     if not deps.current("company"):

@@ -550,14 +550,13 @@ def test_text_values_are_stored_and_read_whole():
     """One lax cap (about 5000 words) on a text value; nothing below it clips or rejects text."""
     from app import fields
     from app.assistants.ask import Citation
-    from app.assistants.enrich.assistant import _clip
     from app.routers.people import StoreBody
     from app.tools.store import Proposal, Write
 
     long_text = " ".join(f"word{i}" for i in range(4000))        # ~36k chars, under the cap
     assert fields.MAX_TEXT_CHARS >= len(long_text) > 30_000
     assert StoreBody(passage=long_text).passage == long_text
-    assert _clip("  a   b  " + long_text) == "a b " + long_text   # whitespace folded, nothing cut
+    assert fields.clean("  a   b  " + long_text) == "a b " + long_text   # whitespace folded, nothing cut
     assert Write(key="bio", value=long_text, evidence=long_text).evidence == long_text
     assert Proposal(writes=[Write(key="bio", value=long_text)]).writes[0].value == long_text
     assert Citation(person_id="x", field="bio", value=long_text).value == long_text
