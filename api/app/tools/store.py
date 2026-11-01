@@ -138,6 +138,13 @@ def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None 
     problems: list[str] = []
     seen: set[str] = set()
     flat = _normalise_ws(passage) if passage is not None else None
+    # a labelled line ("skills: …") already anchors the fact to the passage: its evidence is the
+    # line itself and is not re-checked word by word (long lines were rejected for small slips)
+    labelled = set(re.findall(r"^([a-z][a-z0-9_]*):", passage, re.MULTILINE)) if passage else set()
+    if passage is not None and passage.strip() and not (proposal.writes or proposal.new_properties
+                                                        or proposal.confirmed or proposal.ignored):
+        problems.append("the proposal is empty: file each fact of the passage, confirm what the "
+                        "record already has, and list under ignored what is not about the person")
     for w in proposal.writes:
         prop = catalog.get(w.key)
         if prop is None:
@@ -157,7 +164,8 @@ def check(proposal: Proposal, catalog: dict[str, Property], passage: str | None 
                 problems.append(f"{w.key}: a list value needs non-empty items")
         elif not w.value.strip():
             problems.append(f"{w.key}: empty value")
-        if flat is not None and w.evidence and not _evidence_ok(w.evidence, flat):
+        if flat is not None and w.evidence and w.key not in labelled \
+                and not _evidence_ok(w.evidence, flat):
             problems.append(f"{w.key}: evidence must be copied verbatim from the passage")
     for n in proposal.new_properties:
         if not fields.valid_key(n.key):

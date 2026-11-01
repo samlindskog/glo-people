@@ -147,6 +147,7 @@ _STEP_TEXT = {
     ("company", "unresolved"): "company not resolved",
     ("storage", "stored"): "facts filed through the storage agent",
     ("storage", "unchanged"): "the same facts were filed before",
+    ("storage", "nothing"): "the storage agent filed nothing",
     ("storage", "error"): "the storage agent failed",
 }
 
@@ -478,6 +479,11 @@ async def _step_store(deps: AssistantDeps, st: State) -> None:
     if res is None:
         return
     assert isinstance(res, store_tool.StoreResult)
+    if not (res.evidence or res.confirmed or res.changes):
+        # nothing filed and nothing confirmed: do not record the passage, so a refresh tries again
+        st.result["storage"] = "nothing"
+        deps.skip("storage", "the storage agent filed nothing from the passage")
+        return
     st.result["storage"] = "stored"
     st.result["stored"] = {key: {"provider": st.passage.source_of(key), "evidence": evidence}
                            for key, evidence in res.evidence.items()}

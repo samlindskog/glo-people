@@ -222,8 +222,8 @@ def test_storage_check_evidence_locked_and_confirmations():
                           Write(key="title_enriched", value="Research Assistant",
                                 evidence="title_enriched: Research Assistant")])
     assert check(ok, cat, passage) == []
-    made_up = Proposal(writes=[Write(key="about", value="x", evidence="Studied at Oxford")])
-    assert check(made_up, cat, passage) == ["about: evidence must be copied verbatim from the passage"]
+    made_up = Proposal(writes=[Write(key="notes", value="x", evidence="Studied at Oxford")])
+    assert check(made_up, cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
     # locked keys may be confirmed, never written; confirmations need a current value
     locked = frozenset({"company"})
     bad = Proposal(writes=[Write(key="company", value="ICLUB", evidence="title_enriched: Research")],
@@ -235,6 +235,15 @@ def test_storage_check_evidence_locked_and_confirmations():
     assert "title_enriched has no current value" in problems[1]
     fine = Proposal(confirmed=["company", "about"])
     assert check(fine, cat, passage, current={"about": "old"}, locked=locked) == []
+    # a labelled line anchors its fact: its evidence is not re-checked word by word
+    anchored = Proposal(writes=[Write(key="about", value="x", evidence="about: a paraphrase")])
+    assert check(anchored, cat, passage) == []
+    assert check(Proposal(writes=[Write(key="notes", value="x", evidence="a paraphrase")]),
+                 cat, passage) == ["notes: evidence must be copied verbatim from the passage"]
+    # an empty answer to a non-empty passage is not an answer
+    assert check(Proposal(), cat, passage)[0].startswith("the proposal is empty")
+    assert check(Proposal(ignored=["hi there"]), cat, "hi there") == []
+    assert check(Proposal(), cat, "   ") == []
 
 
 async def test_store_from_file(people_by_name, writer, reader):
