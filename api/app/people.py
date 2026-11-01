@@ -3,7 +3,7 @@
 Field values are never overwritten: every write appends a time-stamped, source-tagged entry to the
 field's history (see app.history) and refreshes the cached current value; typed properties get
 their normalised value (app.normalize) in the same write. Writes accept only properties that exist
-(app.properties); the importer creates properties before it calls `upsert_imported`. Every write is
+(app.properties); the merge assistant creates a CSV's columns before its items write. Every write is
 compare-and-set on the document's `rev`, so concurrent writers never lose each other's entries.
 Other systems read through the helpers here (`fetch`, `find`, `count`, `find_ids`, `coverage`,
 `value_counts`) and react to value writes through `on_write` hooks that the composition root
@@ -17,8 +17,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from bson import ObjectId
-from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError, DuplicateKeyError
 
 from app import activity, fields, history, mongo, normalize, properties
 from app.auth import Principal
@@ -30,7 +28,6 @@ from app.property_specs import CANONICAL, IDENTITY_KEYS, NORMALISABLE
 log = logging.getLogger(__name__)
 
 Scalar = str | int | float | bool
-WRITE_BATCH = 1000
 CAS_RETRIES = 8      # a compare-and-set attempt fails only because another writer succeeded
 NORMALIZE_SRC = Source("system", "normalize")
 
@@ -347,13 +344,17 @@ class Transaction:
         return cls(doc) if doc else None
 
     @classmethod
-    def new(cls, tier: str) -> "Transaction":
+    def new(cls, tier: str, origin: dict[str, Any] | None = None) -> "Transaction":
         """A person that does not exist yet: staged like any other, inserted by `commit` (which
-        refuses a document without a name). Its id is known from the start."""
+        refuses a document without a name). Its id is known from the start. `origin` is the
+        document's `source` (`{file, source_id, row}`) when a file's row creates the person."""
         _check_tier(tier)
         now = datetime.now(UTC)
-        return cls({"_id": ObjectId(), "tier": tier, "created_at": now, "updated_at": now,
-                    "schema_version": history.SCHEMA_VERSION}, new=True)
+        doc: dict[str, Any] = {"_id": ObjectId(), "tier": tier, "created_at": now,
+                               "updated_at": now, "schema_version": history.SCHEMA_VERSION}
+        if origin:
+            doc["source"] = {k: v for k, v in origin.items() if v is not None}
+        return cls(doc, new=True)
 
     @property
     def person_id(self) -> str:
@@ -470,7 +471,8 @@ class Transaction:
                 break
             to_set = {**self._to_set, "schema_version": history.SCHEMA_VERSION}
             if self.is_new:
-                to_set.update({k: self.doc[k] for k in ("tier", "created_at", "updated_at")})
+                to_set.update({k: self.doc[k] for k in ("tier", "created_at", "updated_at",
+                                                        "source") if k in self.doc})
             if await _cas_write(oid, self.doc, to_set, upsert=self.is_new):
                 break
             fresh = await db().people.find_one({"_id": oid})
@@ -638,97 +640,6 @@ async def delete(principal: Principal, person_id: str) -> bool:
             log.exception("write hook failed after deleting person %s", person_id)
     await activity.record("person.delete", principal, person_id)
     return True
-
-
-# --- import -----------------------------------------------------------------------------------------
-
-async def _import_set(cur: dict | None, sid: str, rows: list[tuple[int, dict[str, Any]]],
-                      source_file: str, tier: str, now: datetime) -> dict[str, Any]:
-    """The `$set` that applies a source_id's rows (in file order) to its current document."""
-    set_doc: dict[str, Any] = {}
-    for row_no, values in rows:
-        src = Source("import", source_file, f"row {row_no}")
-        base = {**(cur or {}), **set_doc}
-        to_set, changed, _, _ = history.apply(base, values, src, now, fields.SYSTEM_FIELDS)
-        set_doc.update(to_set)
-        set_doc["source"] = {"file": source_file, "source_id": sid, "row": row_no}
-        if changed or cur is None:
-            set_doc["updated_at"] = now
-    set_doc.update({"tier": tier, "schema_version": history.SCHEMA_VERSION})
-    await _normalize_into(cur or {}, set_doc, now)
-    return set_doc
-
-
-async def upsert_imported(rows: list[tuple[str, int, dict[str, Any]]], source_file: str,
-                          tier: str, now: datetime) -> tuple[int, int, list[str]]:
-    """Bulk upsert of imported rows `(source_id, row_no, values)` keyed by (file, source_id).
-    The caller has created the properties the rows use (`properties.ensure`).
-
-    Rows sharing a source_id fold into one update applied in file order, so no row's entry is lost
-    to a later $set of the same property. Each write is compare-and-set on the document's `rev`
-    (a concurrent edit makes the upsert collide on the unique source index, and that row is
-    redone on its own). Returns (inserted, updated, ids of the documents touched). Values are
-    appended to the field histories like any other write; unchanged values append nothing and
-    leave `updated_at`. Write hooks do not run: the caller embeds the ids itself.
-    """
-    inserted = updated = 0
-    ids: list[str] = []
-    for start in range(0, len(rows), WRITE_BATCH):
-        chunk = rows[start:start + WRITE_BATCH]
-        groups: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-        for source_id, row_no, values in chunk:
-            groups.setdefault(source_id, []).append((row_no, values))
-        existing = {d["source"]["source_id"]: d for d in await find(
-            {"source.file": source_file, "source.source_id": {"$in": list(groups)}})}
-
-        ops, sids = [], []
-        for sid, group in groups.items():
-            cur = existing.get(sid)
-            set_doc = await _import_set(cur, sid, group, source_file, tier, now)
-            ops.append(UpdateOne({"source.file": source_file, "source.source_id": sid,
-                                  **_rev_filter(cur)},
-                                 {"$set": set_doc, "$setOnInsert": {"created_at": now},
-                                  "$inc": {"rev": 1}}, upsert=True))
-            sids.append(sid)
-        try:
-            res = await db().people.bulk_write(ops, ordered=False)
-            inserted += res.upserted_count
-            updated += res.matched_count
-            failed: list[str] = []
-        except BulkWriteError as e:
-            errors = e.details.get("writeErrors", [])
-            if any(we.get("code") != 11000 for we in errors):
-                raise
-            inserted += e.details.get("nUpserted", 0)
-            updated += e.details.get("nMatched", 0)
-            failed = [sids[we["index"]] for we in errors]
-        for sid in failed:   # lost the race with another writer: redo this source_id alone
-            inserted_now, updated_now = await _reimport_one(sid, groups[sid], source_file, tier,
-                                                            now)
-            inserted += inserted_now
-            updated += updated_now
-        ids += await find_ids({"source.file": source_file, "source.source_id": {"$in": sids}})
-    return inserted, updated, ids
-
-
-async def _reimport_one(sid: str, group: list[tuple[int, dict[str, Any]]], source_file: str,
-                        tier: str, now: datetime) -> tuple[int, int]:
-    key = {"source.file": source_file, "source.source_id": sid}
-    for _ in range(CAS_RETRIES):
-        cur = await db().people.find_one(key)
-        set_doc = await _import_set(cur, sid, group, source_file, tier, now)
-        try:
-            res = await db().people.update_one(
-                {**key, **_rev_filter(cur)},
-                {"$set": set_doc, "$setOnInsert": {"created_at": now}, "$inc": {"rev": 1}},
-                upsert=True)
-        except DuplicateKeyError:   # the document changed or appeared meanwhile: read again
-            continue
-        if res.upserted_id is not None:
-            return 1, 0
-        if res.matched_count:
-            return 0, 1
-    raise ConflictError(f"row {sid!r} of {source_file} is being modified concurrently; retry")
 
 
 async def _after_write(person_id: str) -> None:

@@ -81,10 +81,11 @@ export const api = {
     fd.append('file', file)
     return request<ImportPreview>('POST', '/api/people/import/preview', fd)
   },
-  importCsv: (file: File, tier: Tier) => {
+  importCsv: (file: File, tier: Tier, dryRun = false) => {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('tier', tier)
+    fd.append('dry_run', String(dryRun))
     return request<ImportStarted>('POST', '/api/people/import', fd)
   },
 

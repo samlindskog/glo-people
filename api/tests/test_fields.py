@@ -8,6 +8,8 @@ def test_clean_decodes_entities_and_strips_invisible_spacers():
     assert fields.clean("  two\n lines\t here ") == "two lines here"
     assert fields.clean(None) == "" and fields.clean(42) == "42"
     assert fields.clean("﻿bom nbsp") == "bom nbsp"
+    assert fields.clean(" Met at demo day;  \n\n follow  up \n", keep_lines=True) == \
+        "Met at demo day;\nfollow up"
 
 
 def test_distinct_keeps_first_occurrence_by_key_and_drops_empties():

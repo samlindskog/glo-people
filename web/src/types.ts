@@ -135,14 +135,32 @@ export interface ImportColumn {
   key: string
   role: 'field' | 'source_id'
   new?: boolean
+  /** How the merge treats the column: the file's identifier, written as entered, read by the
+   * storage agent (long prose), or a property to create. */
+  plan?: 'identifier' | 'verbatim' | 'agent' | 'new'
+}
+
+/** The match decision for one of the first rows, against the database as it is now. */
+export interface ImportMatch {
+  row: number
+  name: string | null
+  decision: 'matched' | 'ambiguous' | 'new'
+  tier: 'identifier' | 'name' | 'name+context' | null
+  person_id: string | null
+  candidates: string[]
 }
 
 export interface ImportPreview {
   rows: number
+  skipped: number
   columns: ImportColumn[]
+  matches: ImportMatch[]
+  /** People the file describes (rows sharing an ID, or a name and email, fold into one). */
+  groups: number
 }
 
-/** What POST /api/people/import answers: the import runs as an assistant run of row batches. */
+/** What POST /api/people/import answers: the file is merged as an assistant run, one item per
+ * person it describes. */
 export interface ImportStarted {
   file: string
   tier: Tier
@@ -151,6 +169,7 @@ export interface ImportStarted {
   new_properties: string[]
   run_id: number
   items: number
+  dry_run: boolean
 }
 
 // --- tool invocations (level 2): one tool on one record, non-blocking -------------------------------

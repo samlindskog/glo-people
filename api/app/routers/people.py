@@ -7,10 +7,10 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
-from app import activity, db, fields, importer
+from app import activity, db, fields, importer, properties
 from app import people as people_svc
-from app.assistants import import_csv, runner
-from app.assistants.import_csv import ImportOptions
+from app.assistants import merge, runner
+from app.assistants.merge import MergeOptions
 from app.auth import Principal, require
 from app.history import Source
 from app.integrations.firecrawl import AsyncFirecrawl
@@ -102,30 +102,62 @@ async def _read_upload(file: UploadFile) -> str:
 
 @router.post("/people/import/preview")
 async def import_preview(file: Annotated[UploadFile, File()], _: Writer) -> dict:
-    return await importer.preview((await _read_upload(file)).lstrip("﻿"))
+    """Each column's plan (identifier, verbatim, agent, new property), the row count, and the
+    match decisions of the first rows against the database. Nothing is written."""
+    try:
+        return await importer.preview(await _read_upload(file), file.filename or "upload.csv")
+    except ValueError as e:
+        raise _bad_request(e) from e
 
 
 @router.post("/people/import", status_code=201)
 async def import_people(file: Annotated[UploadFile, File()],
                         tier: Annotated[Literal["member", "plus_one"], Form()],
-                        principal: Writer) -> dict:
-    """Assistant: import the CSV as a run of row batches (follow it on /api/assistants/runs)."""
+                        principal: Writer,
+                        dry_run: Annotated[bool, Form()] = False,
+                        agent: Annotated[bool, Form()] = True,
+                        review: Annotated[bool, Form()] = True) -> dict:
+    """Assistant: merge the CSV's rows into the people database as a run, one item per person
+    the file describes (follow it on /api/assistants/runs). Columns the catalog lacks are created
+    first (except on a dry run); `tier` is for the people the run creates."""
     text = await _read_upload(file)
     name = file.filename or "upload.csv"
-    options = ImportOptions(tier=tier)
+    options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
     try:
-        parsed, created, items = await import_csv.prepare_csv(text, name, options)
-    except ValueError as e:
+        parsed = importer.parse_csv(text, name)
+        created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
+    except (ValueError, properties.PropertyError) as e:
         raise _bad_request(e) from e
+    items = merge.items_for_csv(parsed)
     if not items:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no rows with a name")
-    run = await runner.create_run(import_csv.SPEC, principal, items, {
-        "options": options.model_dump(), "file": parsed.file}, label=parsed.file)
+    run = await runner.create_run(merge.SPEC, principal, items, {
+        "options": options.model_dump(), "file": parsed.file},
+        label=f"{'dry run of ' if dry_run else ''}{parsed.file}")
     await runner.start(run["id"], principal)
     summary = {"file": parsed.file, "tier": tier, "rows": parsed.total, "skipped": parsed.skipped,
-               "new_properties": created, "run_id": run["id"], "items": len(items)}
+               "new_properties": created, "run_id": run["id"], "items": len(items),
+               "dry_run": dry_run}
     await activity.record("people.import", principal, parsed.file, summary)
     return summary
+
+
+class MergeBody(BaseModel):
+    record: dict[str, Any] = Field(description="Property key → value; a `person_id` names the "
+                                               "person, otherwise the record is matched by "
+                                               "identifier or name")
+    options: MergeOptions = Field(default_factory=MergeOptions)
+
+
+@router.post("/people/merge")
+async def merge_person(body: MergeBody, principal: Writer) -> dict:
+    """Assistant: merge one record now (a one-item merge run, waited for). Returns the item's
+    result: matched (by what) or created, what was written verbatim and filed by the storage
+    agent, the review, every change; an ambiguous record is skipped with its candidates."""
+    try:
+        return await merge.merge_one(body.record, body.options, principal)
+    except (ValueError, TypeError) as e:
+        raise _bad_request(e) from e
 
 
 # --- tools on one person: invocations ------------------------------------------------------------------

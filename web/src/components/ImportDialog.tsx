@@ -2,11 +2,12 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api'
-import type { ImportPreview, ImportStarted, Tier } from '../types'
+import type { ImportColumn, ImportMatch, ImportPreview, ImportStarted, Tier } from '../types'
 import { ErrorNote } from './Layout'
 
-/** Pick a CSV, preview its columns, start the import run. The import is an assistant run of row
- * batches; `onStarted` gets the run so the caller can follow it. */
+/** Pick a CSV, preview what the merge would do (each column's plan, the match decisions of the
+ * first rows), then merge it or dry-run it. Either is an assistant run, one item per person the
+ * file describes; `onStarted` gets the run so the caller can follow it. */
 export default function ImportDialog({ onStarted }: { onStarted?: (started: ImportStarted) => void }) {
   const qc = useQueryClient()
   const [file, setFile] = useState<File | null>(null)
@@ -15,8 +16,8 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
   const [started, setStarted] = useState<ImportStarted | null>(null)
 
   const previewM = useMutation({ mutationFn: (f: File) => api.importPreview(f), onSuccess: setPreview })
-  const importM = useMutation({
-    mutationFn: () => api.importCsv(file!, tier),
+  const mergeM = useMutation({
+    mutationFn: (dryRun: boolean) => api.importCsv(file!, tier, dryRun),
     onSuccess: (r) => {
       setStarted(r)
       qc.invalidateQueries({ queryKey: ['properties'] })
@@ -28,8 +29,9 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
   return (
     <div className="space-y-3" data-testid="import-dialog">
       <p className="text-xs text-slate-500">
-        Any columns are accepted: each header becomes a property (new ones are created). Rows are matched on the <code>ID</code> column if present
-        (otherwise name + email), so re-importing updates people instead of duplicating them.
+        Any columns are accepted: each header becomes a property (new ones are created). Each row is matched to a person by a shared email, phone,
+        LinkedIn or GitHub URL, the <code>ID</code> column, or a unique name; otherwise a person is created in the chosen tier. Known values are
+        written as entered; long prose goes to the storage agent. A dry run shows the decisions without writing.
       </p>
       <div className="flex flex-wrap items-end gap-3">
         <label className="space-y-1">
@@ -49,20 +51,24 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
           />
         </label>
         <label className="space-y-1">
-          <span className="label">Tier</span>
+          <span className="label">Tier for new people</span>
           <select className="input w-36" aria-label="Import tier" value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
             <option value="member">Members</option>
             <option value="plus_one">Plus ones</option>
           </select>
         </label>
-        <button type="button" className="btn-primary" disabled={!file || !preview || importM.isPending} onClick={() => importM.mutate()}>
-          {importM.isPending ? 'Starting…' : `Import ${preview?.rows ?? ''} rows`}
+        <button type="button" className="btn-secondary" disabled={!file || !preview || mergeM.isPending} onClick={() => mergeM.mutate(true)}>
+          Dry run
+        </button>
+        <button type="button" className="btn-primary" disabled={!file || !preview || mergeM.isPending} onClick={() => mergeM.mutate(false)}>
+          {mergeM.isPending ? 'Starting…' : `Merge ${preview?.rows ?? ''} rows`}
         </button>
       </div>
-      <ErrorNote error={previewM.error ?? importM.error} />
+      <ErrorNote error={previewM.error ?? mergeM.error} />
       {started && (
         <p className="rounded-md bg-brand-50 px-3 py-2 text-sm text-brand-800" data-testid="import-result">
-          Importing {started.file}: {started.rows} rows in {started.items} {started.items === 1 ? 'batch' : 'batches'}
+          {started.dry_run ? 'Dry run of' : 'Merging'} {started.file}: {started.rows} rows as {started.items} {started.items === 1 ? 'record' : 'records'}
+          {started.dry_run && ', nothing is written'}
           {started.skipped > 0 && `, ${started.skipped} skipped (no name)`}
           {started.new_properties.length > 0 && ` · new properties: ${started.new_properties.join(', ')}`} ·{' '}
           <Link to={`/assistants/${started.run_id}`} className="underline">
@@ -71,33 +77,82 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
         </p>
       )}
       {preview && !started && (
-        <div className="card max-h-60 overflow-auto">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>CSV header</th>
-                <th>Field key</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {preview.columns.map((c) => (
-                <tr key={c.header + c.key}>
-                  <td>{c.header}</td>
-                  <td className="font-mono text-xs">{c.key}</td>
-                  <td>
-                    {c.role === 'source_id' ? (
-                      <span className="badge bg-slate-100 text-slate-600">match key</span>
-                    ) : c.new ? (
-                      <span className="badge bg-amber-50 text-amber-700">new property</span>
-                    ) : null}
-                  </td>
+        <div className="grid gap-3 md:grid-cols-2">
+          <div className="card max-h-60 overflow-auto">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>CSV header</th>
+                  <th>Property</th>
+                  <th>Plan</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {preview.columns.map((c) => (
+                  <tr key={c.header + c.key}>
+                    <td>{c.header}</td>
+                    <td className="font-mono text-xs">{c.key}</td>
+                    <td>
+                      <PlanBadge column={c} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="card max-h-60 overflow-auto" data-testid="import-matches">
+            <p className="px-2 pt-1 text-xs text-slate-500">
+              {preview.rows} rows, {preview.groups} people{preview.skipped > 0 && `, ${preview.skipped} without a name`}. The first{' '}
+              {preview.matches.length} rows against the database now:
+            </p>
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Row</th>
+                  <th>Name</th>
+                  <th>Decision</th>
+                </tr>
+              </thead>
+              <tbody>
+                {preview.matches.map((m) => (
+                  <tr key={m.row}>
+                    <td className="text-xs text-slate-500">{m.row}</td>
+                    <td>{m.name}</td>
+                    <td>
+                      <MatchBadge match={m} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
   )
+}
+
+function PlanBadge({ column: c }: { column: ImportColumn }) {
+  if (c.role === 'source_id' || c.plan === 'identifier') return <span className="badge bg-slate-100 text-slate-600">identifier</span>
+  if (c.new || c.plan === 'new') return <span className="badge bg-amber-50 text-amber-700">new property</span>
+  if (c.plan === 'agent') return <span className="badge bg-violet-50 text-violet-700">storage agent</span>
+  return <span className="badge bg-emerald-50 text-emerald-700">as entered</span>
+}
+
+function MatchBadge({ match: m }: { match: ImportMatch }) {
+  if (m.decision === 'matched') {
+    return (
+      <span className="badge bg-emerald-50 text-emerald-700" title={m.person_id ?? undefined}>
+        matched by {m.tier === 'identifier' ? 'identifier' : m.tier === 'name' ? 'name' : 'name and context'}
+      </span>
+    )
+  }
+  if (m.decision === 'ambiguous') {
+    return (
+      <span className="badge bg-amber-50 text-amber-700" title={m.candidates.join(', ')}>
+        ambiguous: {m.candidates.length} people
+      </span>
+    )
+  }
+  return <span className="badge bg-slate-100 text-slate-600">new person</span>
 }

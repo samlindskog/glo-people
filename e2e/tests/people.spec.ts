@@ -27,13 +27,14 @@ test('writer imports a CSV with a new column, filters and searches semantically'
   await page.getByRole('button', { name: 'Import CSV' }).click()
   await page.getByLabel('CSV file').setInputFiles({ name: `e2e-${tag}.csv`, mimeType: 'text/csv', buffer: Buffer.from(csv) })
   await expect(page.getByRole('row', { name: new RegExp(col) })).toContainText('new property')
-  await page.getByRole('button', { name: /Import 3 rows/ }).click()
-  // the import is an assistant run of row batches: follow it on Assistants
-  await expect(page.getByTestId('import-result')).toContainText('3 rows in 1 batch')
+  await expect(page.getByTestId('import-matches')).toContainText('new person')
+  await page.getByRole('button', { name: /Merge 3 rows/ }).click()
+  // the file is merged as an assistant run, one item per person: follow it on Assistants
+  await expect(page.getByTestId('import-result')).toContainText('3 rows as 3 records')
   await expect(page.getByTestId('import-result')).toContainText(col)
   await page.getByRole('link', { name: /follow run #\d+/ }).click()
-  await expect(page.getByTestId('run-detail').getByTestId('run-items')).toContainText(/3 inserted, 0 updated, \d+ vectors/, { timeout: 30_000 })
-  await expect(page.getByTestId('runs-table')).toContainText('import')
+  await expect(page.getByTestId('run-detail').getByTestId('run-items')).toContainText(new RegExp(`Created Ada ${tag}`), { timeout: 30_000 })
+  await expect(page.getByTestId('runs-table')).toContainText('merge')
 
   // the new column is now a (free text, embeddable) property
   await page.getByRole('link', { name: 'Properties' }).click()

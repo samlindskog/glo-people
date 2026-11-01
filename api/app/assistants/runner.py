@@ -481,10 +481,12 @@ class _Scheduler:
     async def _mark(self, st: _RunState, item: dict, status: str, result: dict | None = None,
                     error: str | None = None, credits: int = 0, trace_id: str | None = None) -> None:
         i, r = db.workflow_run_items, db.workflow_runs
+        values: dict[str, Any] = {"status": status, "result": result or {}, "error": error,
+                                  "credits": credits, "trace_id": trace_id, "finished_at": _now()}
+        if not item.get("person_id") and isinstance((result or {}).get("person_id"), str):
+            values["person_id"] = result["person_id"]      # an item that found or created its person
         async with db.engine().begin() as conn:
-            await conn.execute(update(i).where(i.c.id == item["id"]).values(
-                status=status, result=result or {}, error=error, credits=credits,
-                trace_id=trace_id, finished_at=_now()))
+            await conn.execute(update(i).where(i.c.id == item["id"]).values(**values))
             counter = r.c.failed if status == "failed" else r.c.done
             await conn.execute(update(r).where(r.c.id == st.run_id).values(
                 **{counter.name: counter + 1}, credits_used=r.c.credits_used + credits))

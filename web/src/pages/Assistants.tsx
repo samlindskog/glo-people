@@ -143,8 +143,8 @@ function AssistantCard({ spec, canRun, onStarted }: { spec: AssistantSpec; canRu
           </details>
         )}
       </div>
-      {canRun && spec.key === 'import' && <ImportDialog onStarted={(r) => onStarted(r.run_id)} />}
-      {canRun && spec.key !== 'import' && (
+      {canRun && spec.key === 'merge' && <ImportDialog onStarted={(r) => onStarted(r.run_id)} />}
+      {canRun && spec.key !== 'merge' && (
         <form
           className="space-y-3"
           aria-label={`Run ${spec.label}`}

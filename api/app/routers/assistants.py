@@ -27,6 +27,9 @@ PING_SECONDS = 15
 class RunRequest(BaseModel):
     person_ids: list[str] | None = Field(None, max_length=MAX_BULK)
     all_with_field: str | None = Field(None, description="Run for everyone whose field is set")
+    records: list[dict[str, Any]] | None = Field(None, max_length=MAX_BULK,
+                                                 description="Incoming records for the merge "
+                                                             "assistant (property key → value)")
     tier: Literal["member", "plus_one"] | None = None
     options: dict[str, Any] = Field(default_factory=dict)
     label: str | None = Field(None, max_length=200)
@@ -45,7 +48,7 @@ async def list_assistants(_: Reader) -> list[dict]:
 
 async def _people_items(body: RunRequest) -> list[ItemSpec]:
     if body.person_ids:
-        ids = list(dict.fromkeys(body.person_ids))
+        ids = list(dict.fromkeys(pid for pid in body.person_ids if pid))
     elif body.all_with_field:
         req = SearchRequest(tier=body.tier, filters=[
             FieldFilter(field=body.all_with_field, op="exists", value=True)], limit=1)

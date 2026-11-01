@@ -49,12 +49,16 @@ def fold(text: str) -> str:
 _INVISIBLE = str.maketrans({"\u2800": " ", "\u200b": "", "\u00a0": " ", "\ufeff": ""})
 
 
-def clean(text: Any) -> str:
+def clean(text: Any, *, keep_lines: bool = False) -> str:
     """One line of plain text: HTML entities decoded ("&amp;"), braille blanks and zero-width
     characters (used as spacers on profiles) removed, whitespace collapsed. The storage form of
-    any text we did not write ourselves."""
-    raw = str(text if text is not None else "")
-    return " ".join(html.unescape(raw).translate(_INVISIBLE).split())
+    any text we did not write ourselves. With `keep_lines` the line breaks stay (a value entered
+    as several lines, such as a note) and each line is cleaned on its own."""
+    raw = html.unescape(str(text if text is not None else "")).translate(_INVISIBLE)
+    if keep_lines:
+        lines = [" ".join(line.split()) for line in raw.splitlines()]
+        return "\n".join(line for line in lines if line).strip()
+    return " ".join(raw.split())
 
 
 def distinct(items: Iterable[Any], key: Callable[[Any], Any] = fold) -> list:

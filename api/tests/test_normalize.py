@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app import embedder, history, importer, normalize, people, properties
+from app import embedder, history, normalize, people, properties
 from app.auth import Principal
 from app.history import Source
 from app.mongo import db
@@ -296,15 +296,15 @@ async def test_concurrent_updates_all_land(writer):
     assert doc["mrr"]["norm"]["flag"] == "unmapped"
 
 
-async def test_import_concurrent_with_an_edit_loses_nothing(writer):
+async def test_concurrent_writes_from_two_sources_lose_nothing(writer):
     await import_people(writer, "ID,Name,Bio\n1,Ada,first\n", "c.csv", "member")
     pid = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
     principal = Principal(user_id=1, username="wendy", role="writer",
                           permissions=frozenset({"people:write"}))
     for i in range(5):
-        parsed = importer.parse_csv(f"ID,Name,Bio\n1,Ada,import {i}\n", "c.csv")
         await asyncio.gather(
-            people.upsert_imported(parsed.rows, "c.csv", "member", datetime.now(UTC)),
+            people.update(principal, pid, {"bio": f"import {i}"},
+                          source=Source("import", "c.csv", "row 2")),
             people.update(principal, pid, {"notes": f"note {i}"}))
     doc = await db().people.find_one({"_id": people._oid(pid)})
     assert [e["v"] for e in doc["bio"]["h"]] == ["first", *(f"import {i}" for i in range(5))]

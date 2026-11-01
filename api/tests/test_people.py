@@ -18,16 +18,24 @@ Ed Fox,ed@y.io,Gaming,
 """
 
 
-async def _import(client, text, name, tier):
-    return await import_people(client, text, name, tier)
+async def _import(client, text, name, tier, **options):
+    return await import_people(client, text, name, tier, **options)
+
+
+async def _items(client, run_id):
+    run = (await client.get(f"/api/assistants/runs/{run_id}")).json()
+    assert run["status"] == "done", run
+    return run["items"]
 
 
 async def test_import_registry_and_coercion(writer):
     res = await _import(writer, MEMBERS, "members.csv", "member")
-    assert (res["rows"], res["skipped"], res["items"]) == (4, 1, 1)
-    assert res["new_properties"] == ["brand_new_column"]
-    run = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()
-    assert run["status"] == "done" and run["items"][0]["result"]["inserted"] == 3
+    assert (res["rows"], res["skipped"], res["items"]) == (4, 1, 3)   # one item per person
+    assert res["new_properties"] == ["brand_new_column"] and res["dry_run"] is False
+    items = await _items(writer, res["run_id"])
+    assert all(it["result"]["created"] and it["result"]["match"]["decision"] == "new"
+               for it in items)
+    assert all(it["person_id"] for it in items)            # the item learnt who it created
 
     fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
     assert fl["sectors"]["type"] == "list" and fl["mrr"]["type"] == "number"
@@ -41,21 +49,25 @@ async def test_import_registry_and_coercion(writer):
     assert ada["mrr"]["norm"]["v"] == 12000 and ada["rev"] == 1
     assert ada["sectors"]["v"] == ["fintech", "payments"]
     assert ada["emails"]["v"] == ["ada@x.io", "ada2@x.io"]
-    assert ada["source"]["source_id"] == "m1" and ada["schema_version"] == 2
-    assert len(ada["bio"]["h"]) == 1
+    assert ada["source"] == {"file": "members.csv", "source_id": "m1", "row": 2}
+    assert ada["schema_version"] == 2 and len(ada["bio"]["h"]) == 1
     assert ada["bio"]["h"][0]["src"] == {"kind": "import", "by": "members.csv", "ref": "row 2"}
     cy = await db().people.find_one({"name.v": "Cy Diaz"})
-    assert "company" not in cy  # sparse: empty cells omitted
+    assert "company" not in cy and "source" in cy      # sparse: empty cells omitted
 
 
-async def test_reimport_upserts_and_adds_columns(writer):
+async def test_reimport_matches_by_id_and_adds_columns(writer):
     await _import(writer, MEMBERS, "members.csv", "member")
     v2 = MEMBERS.replace("Brand New Column", "Brand New Column,Twitter").replace(
         "alpha\n", "alpha,@ada\n")
     res = await _import(writer, v2, "members.csv", "member")
     assert res["new_properties"] == ["twitter"]
-    item = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()["items"][0]
-    assert item["result"]["inserted"] == 0 and item["result"]["updated"] == 3
+    items = await _items(writer, res["run_id"])
+    assert all(not it["result"]["created"] for it in items)
+    ada_item = next(it for it in items if it["label"] == "Ada Okafor")
+    assert ada_item["result"]["match"]["tier"] == "identifier"
+    assert set(ada_item["result"]["match"]["keys"]) >= {"emails", "source_id"}
+    assert ada_item["result"]["written"] == ["twitter"]
     assert await db().people.count_documents({}) == 3
     ada = await db().people.find_one({"name.v": "Ada Okafor"})
     assert ada["twitter"]["v"] == "@ada"
@@ -68,6 +80,7 @@ async def test_reimport_appends_history_for_changed_cells(writer):
     await _import(writer, MEMBERS, "members.csv", "member")
     same = await db().people.find_one({"name.v": "Ada Okafor"})
     assert same["updated_at"] == before["updated_at"] and len(same["bio"]["h"]) == 1
+    assert same["rev"] == before["rev"]                    # nothing to write, no commit
     v2 = MEMBERS.replace("Builds payments infrastructure", "Runs payments infrastructure")
     await _import(writer, v2, "members.csv", "member")
     ada = await db().people.find_one({"name.v": "Ada Okafor"})
@@ -76,21 +89,46 @@ async def test_reimport_appends_history_for_changed_cells(writer):
     assert ada["updated_at"] > before["updated_at"]
 
 
-async def test_crm_without_ids_is_idempotent(writer):
+async def test_crm_without_ids_matches_by_email(writer):
     await _import(writer, CRM, "crm.csv", "plus_one")
-    await _import(writer, CRM, "crm.csv", "plus_one")
+    res = await _import(writer, CRM, "crm.csv", "plus_one")
     assert await db().people.count_documents({"tier": "plus_one"}) == 2
+    items = await _items(writer, res["run_id"])
+    assert {it["result"]["match"]["tier"] for it in items} == {"identifier"}
+    assert all(set(it["result"]["match"]["keys"]) == {"name", "email"} for it in items)
+    dee = await db().people.find_one({"name.v": "Dee Evans"})
+    assert dee["source"] == {"file": "crm.csv", "row": 2}   # no ID column: provenance, no id
 
 
 async def test_import_preview(writer):
     await _import(writer, CRM, "crm.csv", "plus_one")
     r = await writer.post("/api/people/import/preview",
                           files={"file": ("m.csv", MEMBERS.encode(), "text/csv")})
-    cols = {c["key"]: c for c in r.json()["columns"]}
-    assert r.json()["rows"] == 4
-    assert cols["id"]["role"] == "source_id"
+    body = r.json()
+    cols = {c["key"]: c for c in body["columns"]}
+    assert (body["rows"], body["skipped"], body["groups"]) == (4, 1, 3)
+    assert cols["id"]["role"] == "source_id" and cols["id"]["plan"] == "identifier"
     assert cols["name"]["new"] is False and cols["bio"]["new"] is False   # typed in code
-    assert cols["brand_new_column"]["new"] is True
+    assert cols["bio"]["plan"] == "verbatim" and cols["sectors"]["plan"] == "verbatim"
+    assert cols["brand_new_column"]["new"] is True and cols["brand_new_column"]["plan"] == "new"
+    assert [m["decision"] for m in body["matches"]] == ["new", "new", "new"]
+    assert body["matches"][0]["row"] == 2 and body["matches"][0]["name"] == "Ada Okafor"
+
+    r = await writer.post("/api/people/import/preview",
+                          files={"file": ("crm.csv", CRM.encode(), "text/csv")})
+    assert [(m["decision"], m["tier"]) for m in r.json()["matches"]] == \
+        [("matched", "identifier")] * 2
+
+
+async def test_dry_run_writes_nothing(writer):
+    res = await _import(writer, MEMBERS, "members.csv", "member", dry_run=True)
+    assert res["dry_run"] is True and res["new_properties"] == []
+    assert await db().people.count_documents({}) == 0
+    items = await _items(writer, res["run_id"])
+    ada = next(it["result"] for it in items if it["label"] == "Ada Okafor")
+    assert ada["dry_run"] and ada["match"]["decision"] == "new" and ada["person_id"] is None
+    assert "brand_new_column" in ada["plan"]["unknown"]     # not created on a dry run
+    assert "name" in ada["plan"]["direct"] and "would create" in ada["text"]
 
 
 async def test_embeddings_created_per_field(writer):
@@ -197,16 +235,18 @@ async def test_legacy_documents_are_migrated(writer, reader):
     assert three["schema_version"] == 2 and three["name"]["v"] == "Old Three"
 
 
-async def test_duplicate_rows_in_one_import_keep_every_entry(writer):
+async def test_duplicate_rows_in_one_import_fold_into_one_person(writer):
     csv = "ID,Name,Bio\nd1,Dup Person,first bio\nd1,Dup Person,second bio\n"
     res = await _import(writer, csv, "dups.csv", "member")
-    item = (await writer.get(f"/api/assistants/runs/{res['run_id']}")).json()["items"][0]
-    assert item["result"]["inserted"] == 1 and await db().people.count_documents({}) == 1
+    assert res["items"] == 1
+    item = (await _items(writer, res["run_id"]))[0]
+    assert item["result"]["created"] and item["label"] == "Dup Person (rows 2–3)"
+    assert await db().people.count_documents({}) == 1
     doc = await db().people.find_one({"source.source_id": "d1"})
     assert doc["bio"]["v"] == "second bio"
     assert [e["v"] for e in doc["bio"]["h"]] == ["first bio", "second bio"]
     assert [e["src"]["ref"] for e in doc["bio"]["h"]] == ["row 2", "row 3"]
-    assert doc["source"]["row"] == 3
+    assert doc["source"]["row"] == 2                       # the row that created the person
 
 
 async def test_reserved_history_header_is_renamed(writer):

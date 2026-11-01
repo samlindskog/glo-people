@@ -1,5 +1,5 @@
-"""The assistants that run over the database or answer in one item: import (CSV rows in batches),
-embed, reparse and ask as runs; the CLI driving a run in its own process; enrich steps that are
+"""The assistants that run over the database or answer in one item: merge (a CSV's rows, one item
+per person), embed, reparse and ask as runs; the CLI driving a run in its own process; enrich steps that are
 not paid twice after an interruption."""
 
 import pytest
@@ -33,26 +33,30 @@ async def _vectors(field: str = "bio") -> int:
     return rows.count(field)
 
 
-async def test_import_is_a_run_of_row_batches_that_embeds(writer, reader, monkeypatch):
+async def test_import_is_a_merge_run_with_one_item_per_person(writer, reader, monkeypatch):
     monkeypatch.setattr(get_settings(), "fake_agents", True)
     res = await _import(writer, CSV, "a.csv")
     assert res["rows"] == 3 and res["skipped"] == 0 and res["new_properties"] == []
     run = res["run"]
-    assert run["workflow"] == "import" and run["total"] == 1 and run["done"] == 1
+    assert run["workflow"] == "merge" and run["total"] == 3 and run["done"] == 3
     assert run["label"] == "a.csv"
-    item = (await reader.get(f"/api/assistants/runs/{run['id']}")).json()["items"][0]
-    assert item["person_id"] is None and item["label"] == "rows 2–4"
-    assert item["result"]["inserted"] == 3 and item["result"]["updated"] == 0
-    assert item["result"]["embedded"] == 4 and await _vectors("bio") == 3   # 3 bios + 1 note
-    assert "3 inserted" in item["result"]["text"]
-    assert await db().people.count_documents({}) == 3
-    # a second import of the same file updates, nothing duplicated; small batches make more items
+    items = (await reader.get(f"/api/assistants/runs/{run['id']}")).json()["items"]
+    ada = next(it for it in items if it["label"] == "Ada")
+    assert ada["person_id"] and ada["result"]["created"] and ada["result"]["match"]["decision"] == "new"
+    assert ada["result"]["written"] == ["bio", "mrr", "name", "notes", "stage"]
+    assert ada["result"]["review"]["kind"] == "Person"          # the closing review ran (fakes)
+    assert ada["result"]["text"].startswith("Created Ada (member); wrote bio, mrr, name, notes, stage")
+    assert await db().people.count_documents({}) == 3 and await _vectors("bio") == 3   # write hooks
+    # a second import of the same file matches by the file's ids, nothing duplicated
     res = await _import(writer, CSV.replace("met at demo day", "met at the summit"), "a.csv")
-    assert res["run"]["done"] == 1
-    item = (await reader.get(f"/api/assistants/runs/{res['run']['id']}")).json()["items"][0]
-    assert item["result"]["inserted"] == 0 and item["result"]["updated"] == 3
-    ada = await db().people.find_one({"name.v": "Ada"})
-    assert [e["v"] for e in ada["notes"]["h"]] == ["met at demo day", "met at the summit"]
+    assert res["run"]["done"] == 3
+    items = (await reader.get(f"/api/assistants/runs/{res['run']['id']}")).json()["items"]
+    ada = next(it for it in items if it["label"] == "Ada")
+    assert not ada["result"]["created"] and ada["result"]["match"]["tier"] == "identifier"
+    assert ada["result"]["written"] == ["notes"]
+    assert await db().people.count_documents({}) == 3
+    doc = await db().people.find_one({"name.v": "Ada"})
+    assert [e["v"] for e in doc["notes"]["h"]] == ["met at demo day", "met at the summit"]
     acts = (await writer.get("/api/activity?action=people.import")).json()["items"]
     assert acts[0]["meta"]["rows"] == 3 and acts[0]["meta"]["run_id"] == res["run"]["id"]
     assert (await writer.get("/api/jobs")).status_code == 404        # the jobs list is gone
@@ -90,7 +94,7 @@ async def test_embed_and_reparse_run_in_batches(writer, reader, monkeypatch):
                (await reader.get(f"/api/assistants/runs/{run['id']}")).json()["items"]) == 0
     specs = {s["key"]: s for s in (await reader.get("/api/assistants")).json()}
     assert specs["embed"]["scope"] == "batches" and specs["reparse"]["scope"] == "batches"
-    assert specs["import"]["scope"] == "batches" and specs["ask"]["scope"] == "single"
+    assert specs["merge"]["scope"] == "batches" and specs["ask"]["scope"] == "single"
 
 
 async def test_ask_is_a_run_with_the_answer_as_its_item(writer, reader, monkeypatch):
@@ -122,16 +126,16 @@ async def test_cli_drives_a_run_in_its_own_process(writer, tmp_path, monkeypatch
     from app import cli
     path = tmp_path / "people.csv"
     path.write_text(CSV)
-    await cli.import_file(str(path), "member", embed=True)
+    await cli.import_file(str(path), "member", dry_run=False, agent=True, review=False)
     out = capsys.readouterr().out
-    assert "3 inserted" in out and "run " in out and "done" in out
+    assert "3 created, 0 matched" in out and "run " in out and "done" in out
     assert await db().people.count_documents({}) == 3 and await _vectors("bio") == 3
     await cli.normalize_people()
     assert "reparse" in capsys.readouterr().out
     await cli.embed(None)
     assert "embed" in capsys.readouterr().out
     runs = (await writer.get("/api/assistants/runs")).json()["items"]
-    assert [r["workflow"] for r in runs] == ["embed", "reparse", "import"]
+    assert [r["workflow"] for r in runs] == ["embed", "reparse", "merge"]
     assert all(r["status"] == "done" for r in runs)
 
 
@@ -174,8 +178,14 @@ async def test_mcp_starts_a_batch_assistant_and_ask(writer, reader, client_facto
     assert (await runner.wait(run["id"]))["status"] == "done"
     err, got = await call(c, w, "get_run", {"run_id": run["id"]})
     assert not err and got["items"][0]["status"] == "done"
-    err, _ = await call(c, w, "start_assistant", {"key": "import"})
-    assert err                                                    # a CSV needs the upload surface
+    err, _ = await call(c, w, "start_assistant", {"key": "merge"})
+    assert err                                                    # records (or the CSV upload) needed
+    err, run = await call(c, w, "start_assistant", {"key": "merge", "options": {"review": False},
+                                                    "records": [{"name": "Ada", "stage": "seed"}]})
+    assert not err, run
+    assert (await runner.wait(run["id"]))["status"] == "done"
+    err, got = await call(c, w, "get_run", {"run_id": run["id"]})
+    assert not err and got["items"][0]["status"] == "done" and got["items"][0]["person_id"]
 
 
 @pytest.mark.parametrize("key", ["embed", "reparse"])

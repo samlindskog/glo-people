@@ -14,12 +14,23 @@ from typing import Any
 
 from sqlalchemy import select, update
 
-from app import assistants, auth, db, embeddings, fields, mongo, observability, people, properties
+from app import (
+    assistants,
+    auth,
+    db,
+    embeddings,
+    fields,
+    importer,
+    mongo,
+    observability,
+    people,
+    properties,
+)
 from app.assistants import embed as embed_assistant
-from app.assistants import import_csv, reparse, runner
+from app.assistants import merge, reparse, runner
 from app.assistants.base import REGISTRY
 from app.assistants.embed import EmbedOptions
-from app.assistants.import_csv import ImportOptions
+from app.assistants.merge import MergeOptions
 from app.assistants.reparse import ReparseOptions
 from app.permissions import is_role, roles
 
@@ -73,24 +84,35 @@ async def _run(spec_key: str, items: list, params: dict, label: str) -> dict:
     return run
 
 
-async def import_file(path: str, tier: str, embed: bool) -> None:
+async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, review: bool) -> None:
+    """Merge a CSV's rows into the people database (a merge run executed here)."""
     await mongo.ensure_indexes()
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
-    options = ImportOptions(tier=tier, embed=embed)
-    parsed, created, items = await import_csv.prepare_csv(text, Path(path).name, options)
+    options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
+    parsed = importer.parse_csv(text, Path(path).name)
     print(f"{path}: {parsed.total} rows, {len(parsed.rows)} with a name, {parsed.skipped} skipped")
+    created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
     if created:
         print(f"new properties: {', '.join(created)}")
+    items = merge.items_for_csv(parsed)
     if not items:
-        sys.exit("nothing to import")
-    run = await _run("import", items, {"options": options.model_dump(), "file": parsed.file},
+        sys.exit("nothing to merge")
+    run = await _run("merge", items, {"options": options.model_dump(), "file": parsed.file},
                      parsed.file)
-    totals = {"inserted": 0, "updated": 0, "embedded": 0}
+    totals = {"created": 0, "matched": 0, "skipped": 0, "failed": 0}
     for it in await runner.get_items(run["id"], limit=10_000):
-        for k in totals:
-            totals[k] += int((it.get("result") or {}).get(k) or 0)
-    print(f"{totals['inserted']} inserted, {totals['updated']} updated, "
-          f"{totals['embedded']} vectors")
+        res = it.get("result") or {}
+        if it["status"] == "failed":
+            totals["failed"] += 1
+        elif it["status"] == "skipped":
+            totals["skipped"] += 1
+        elif res.get("created"):
+            totals["created"] += 1
+        else:
+            totals["matched"] += 1
+    verb = "would be " if dry_run else ""
+    print(f"{totals['created']} {verb}created, {totals['matched']} {verb}matched, "
+          f"{totals['skipped']} skipped (ambiguous or no name), {totals['failed']} failed")
 
 
 async def embed(only: list[str] | None) -> None:
@@ -341,10 +363,15 @@ def main() -> None:
     sp = sub.add_parser("set-password")
     sp.add_argument("username")
     sp.add_argument("--password")
-    im = sub.add_parser("import")
+    im = sub.add_parser("import", help="merge a CSV's rows into the people database (the merge "
+                                       "assistant: matched by identifier or name, else created)")
     im.add_argument("file")
-    im.add_argument("--tier", required=True, choices=fields.TIERS)
-    im.add_argument("--no-embed", action="store_true")
+    im.add_argument("--tier", required=True, choices=fields.TIERS,
+                    help="for the people the file creates; a matched person keeps theirs")
+    im.add_argument("--dry-run", action="store_true", help="match and plan only, write nothing")
+    im.add_argument("--no-agent", action="store_true",
+                    help="write every known value as entered; nothing goes to the storage agent")
+    im.add_argument("--no-review", action="store_true", help="skip the closing review")
     em = sub.add_parser("embed", help="sync property-name vectors and backfill passage vectors")
     em.add_argument("--field", action="append", help="only these fields (repeatable)")
     sub.add_parser("properties", help="the property catalog with coverage")
@@ -380,7 +407,8 @@ def main() -> None:
                 case "set-password":
                     await set_password(args.username.lower(), args.password)
                 case "import":
-                    await import_file(args.file, args.tier, not args.no_embed)
+                    await import_file(args.file, args.tier, dry_run=args.dry_run,
+                                      agent=not args.no_agent, review=not args.no_review)
                 case "embed":
                     await embed(args.field)
                 case "properties":

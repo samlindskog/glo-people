@@ -14,8 +14,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import activity, auth, fields, properties
 from app import people as people_svc
-from app.assistants import REGISTRY, runner
+from app.assistants import REGISTRY, merge, runner
 from app.assistants.ask import ask
+from app.assistants.merge import MergeOptions
 from app.auth import Principal
 from app.history import Source
 from app.tools import invoke
@@ -173,7 +174,9 @@ async def create_person(
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
                                                    "change, if any; noted in the entry source")] = None,
 ) -> dict:
-    """Create a person (requires people:write). Only existing properties can be set."""
+    """Create a person (requires people:write). Only existing properties can be set. To add a
+    record that may already be in the database (matched by email, phone, LinkedIn, GitHub or
+    name), use merge_person instead."""
     principal = await _principal(ctx, "people:write")
     try:
         res = await people_svc.create(principal, tier, fields,
@@ -181,6 +184,40 @@ async def create_person(
     except people_svc.PersonError as e:
         raise ToolError(str(e)) from e
     return res.person
+
+
+@mcp.tool()
+async def merge_person(
+    ctx: Context,
+    record: Annotated[dict[str, Any], Field(description="Property key → value of the incoming "
+                                                        "record; 'name' required for a person "
+                                                        "that may not exist yet; a 'person_id' "
+                                                        "names the person outright")],
+    tier: Annotated[Literal["member", "plus_one"],
+                    Field(description="Tier if the record creates a person; a matched person "
+                                      "keeps theirs")] = "member",
+    dry_run: Annotated[bool, Field(description="Match and plan only, write nothing")] = False,
+    agent: Annotated[bool, Field(description="Hand long prose and unknown keys to the storage "
+                                             "agent (it may create up to max_new_properties); "
+                                             "off, unknown keys are left out")] = True,
+    max_new_properties: Annotated[int, Field(ge=0, le=5)] = 3,
+    review: Annotated[bool, Field(description="Close with the review (normaliser, repair)")] = True,
+) -> dict:
+    """Assistant: merge one incoming record into the people database (requires people:write).
+    The record is matched to a person by a shared identifier (email, phone, LinkedIn or GitHub
+    URL, compared on canonical forms) or by a unique or corroborated name, else a person is
+    created. Values for known properties that are not long prose are written as entered (list
+    items appended, typed values normalised); long prose and unknown keys go to the storage
+    agent. Several plausible people: nothing is written and the candidates are returned
+    (status 'skipped'). Returns the match, what was written and filed, the review and every
+    change; a dry run returns the match and the plan."""
+    principal = await _principal(ctx, "people:write")
+    options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent,
+                           max_new_properties=max_new_properties, review=review)
+    try:
+        return await merge.merge_one(record, options, principal, Source.for_mcp(principal))
+    except (ValueError, TypeError) as e:
+        raise ToolError(str(e)) from e
 
 
 @mcp.tool()
@@ -352,6 +389,9 @@ async def start_assistant(
     key: Annotated[str, Field(description="The assistant key (see list_assistants)")],
     person_ids: Annotated[list[str] | None, Field(description="The people to run it for")] = None,
     all_with_field: Annotated[str | None, Field(description="Or: everyone whose property is set")] = None,
+    records: Annotated[list[dict[str, Any]] | None,
+                       Field(description="Or, for merge: the incoming records (property key → "
+                                         "value each)")] = None,
     tier: Literal["member", "plus_one"] | None = None,
     options: Annotated[dict[str, Any] | None, Field(description="Per the options schema")] = None,
     label: Annotated[str | None, Field(description="A name for the run")] = None,
@@ -365,8 +405,8 @@ async def start_assistant(
         raise ToolError(f"unknown assistant {key!r}")
     principal = await _principal(ctx, spec.permission)
     try:
-        body = RunRequest(person_ids=person_ids, all_with_field=all_with_field, tier=tier,
-                          options=options or {}, label=label)
+        body = RunRequest(person_ids=person_ids, all_with_field=all_with_field, records=records,
+                          tier=tier, options=options or {}, label=label)
         opts = spec.options_model.model_validate(body.options)
         if spec.scope == "people":
             items = await _people_items(body)
