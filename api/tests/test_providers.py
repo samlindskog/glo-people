@@ -20,6 +20,7 @@ def test_provider_table_matches_the_option_and_fits_the_item_cap():
     assert EnrichOptions().provider_policy == "gaps"
     # every provider matched + GitHub + every page + the search: within the per-item cap
     assert budget.worst_case(EnrichOptions()) == 1 + 5 + 5 + 4 + 2 <= budget.CAPS["max_credits"]
+    assert budget.item_cap(EnrichOptions()) == 17           # what a run reserves per item in flight
     assert budget.worst_case(EnrichOptions(providers=[])) == 11
     assert budget.worst_case(EnrichOptions(providers=["fullenrich", "fullenrich"])) == 16
     every = EnrichOptions(providers=list(PROVIDERS))

@@ -81,7 +81,9 @@ async def test_plan_run_estimates_an_enrichment_from_history(writer, client_fact
     assert plan["eligible"] == 1                                        # Bo: a site, not yet enriched
     assert plan["averages"]["credits_per_item"] == 6 and plan["averages"]["tokens_per_item"] == 3500
     assert plan["estimate"]["credits"] == 6 and plan["estimate"]["tokens"] == 3500
-    assert plan["fits_balance"] is True and plan["recommended_options"]["max_credits"] == 8
+    assert plan["fits_balance"] is True and plan["reserved_per_item"] == 17
+    assert plan["minimum_cap"] == 17 * plan["estimate"]["concurrency"]
+    assert plan["recommended_options"]["max_credits"] == plan["minimum_cap"]   # 8 would throttle
     assert plan["balance"]["remaining"] == 100_000
 
     err, plan = await call(c, key, "plan_run", {"key": "enrich", "all_with_field": "name",
@@ -110,6 +112,7 @@ async def test_get_credits_and_list_runs(writer, client_factory, monkeypatch):
     assert not err and res["runs"] == []
     err, run = await call(c, key, "get_run", {"run_id": res and (await writer.get("/api/assistants/runs")).json()["items"][0]["id"]})
     assert not err and run["progress"]["percent"] == 100 and "items_per_min" in run["progress"]
+    assert run["progress"]["reserved"] == 0 and run["progress"]["in_flight"] == 0
 
 
 async def test_enrichment_on_the_record_counts_as_recent_even_without_run_history(writer, client_factory):

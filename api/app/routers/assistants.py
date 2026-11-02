@@ -153,14 +153,19 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
     if balance and balance.get("remaining") is not None:
         available = int(balance["remaining"]) - int(balance.get("reserved") or 0)
     recommended = {}
+    reserved_per_item = spec.item_cap(spec.options_model.model_validate(body.options))
+    concurrency = get_settings().assistant_concurrency
     if spec.key == "enrich":
-        cap = round(est_credits * 1.25) or 1
+        # the runner reserves the worst case per item in flight: a cap below that for every slot
+        # throttles the run (and below one reservation it cannot start)
+        cap = max(round(est_credits * 1.25) or 1, reserved_per_item * concurrency)
         if available is not None:
             cap = min(cap, max(1, available))
         recommended["max_credits"] = cap
     out.update({"estimate": {"credits": est_credits, "tokens": est_tokens, "minutes": est_minutes,
-                             "concurrency": get_settings().assistant_concurrency,
-                             "truncated": len(ids) >= MAX_SELECT},
+                             "concurrency": concurrency, "truncated": len(ids) >= MAX_SELECT},
+                "reserved_per_item": reserved_per_item,
+                "minimum_cap": reserved_per_item * concurrency,
                 "balance": balance and {k: balance.get(k) for k in ("remaining", "reserved", "plan", "period_end")},
                 "fits_balance": None if available is None else est_credits <= available,
                 "recommended_options": recommended})

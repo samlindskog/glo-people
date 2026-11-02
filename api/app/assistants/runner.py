@@ -124,7 +124,11 @@ async def progress(run: dict) -> dict[str, Any]:
     remaining = max(0, run["total"] - finished)
     eta = remaining / rate if rate and remaining and run["status"] in LIVE else None
     done_n = by_status.get("done", 0)
-    return {"finished": finished, "remaining": remaining,
+    st = _scheduler.runs.get(run["id"]) if _scheduler is not None else None
+    cap = int((run.get("params") or {}).get("options", {}).get("max_credits") or 0) or None
+    return {"finished": finished, "remaining": remaining, "credit_cap": cap,
+            "reserved": len(st.inflight) * st.per_item_cap if st else 0,
+            "in_flight": len(st.inflight) if st else 0,
             "percent": round(100 * finished / run["total"]) if run["total"] else 100,
             "by_status": by_status, "credits_used": run["credits_used"],
             "credits_per_done": round(run["credits_used"] / done_n, 2) if done_n else None,

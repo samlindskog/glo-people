@@ -20,7 +20,10 @@ def budget_for(options: EnrichOptions) -> Budget:
 
 
 def item_cap(options: EnrichOptions) -> int:
-    return CAPS["max_credits"]
+    """What the runner reserves per item in flight against the run's credit cap: the worst case
+    these options can spend (17 with the default providers), not the per-item safety ceiling
+    `CAPS["max_credits"]`, so a modest cap still lets several items run at once."""
+    return worst_case(options)
 
 
 def worst_case(options: EnrichOptions) -> int:
