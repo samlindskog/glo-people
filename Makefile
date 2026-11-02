@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -96,6 +96,34 @@ prod-import:
 
 prod-embed:
 	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
+
+# The dev stack holds the primary copy of the people data (the live imports land there first).
+# prod-push-data replaces prod's `people` and `fields` collections with dev's — after taking a
+# backup of prod into ./backups — and then runs prod-migrate so vectors, lookup keys and shown
+# values follow. Runs, users, keys and the activity log stay prod's own (Postgres is untouched).
+BACKUPS ?= backups
+
+prod-backup:    ## dump prod's Mongo database (people + properties) into ./backups
+	mkdir -p $(BACKUPS)
+	ssh -t $(PROD_SSH) 'sudo docker exec glo-people-mongo-1 mongodump --quiet -d glo --gzip --archive=/tmp/glo-prod.archive.gz && sudo docker cp glo-people-mongo-1:/tmp/glo-prod.archive.gz /tmp/glo-prod.archive.gz && sudo chown $$(id -un) /tmp/glo-prod.archive.gz'
+	scp -q $(PROD_SSH):/tmp/glo-prod.archive.gz "$(BACKUPS)/prod-glo-$$(date -u +%Y%m%dT%H%M%SZ).archive.gz"
+	ssh $(PROD_SSH) rm -f /tmp/glo-prod.archive.gz
+	@ls -la $(BACKUPS) | tail -1
+
+prod-push-data: prod-backup   ## replace prod's people and properties with dev's, then prod-migrate
+	$(DEV) exec -T mongo mongodump --quiet -d glo --gzip --archive=/tmp/glo-dev.archive.gz
+	docker cp glo-people-mongo-1:/tmp/glo-dev.archive.gz /tmp/glo-dev.archive.gz
+	scp -q /tmp/glo-dev.archive.gz $(PROD_SSH):/tmp/glo-dev.archive.gz && rm /tmp/glo-dev.archive.gz
+	ssh -t $(PROD_SSH) 'sudo docker cp /tmp/glo-dev.archive.gz glo-people-mongo-1:/tmp/glo-dev.archive.gz && sudo docker exec glo-people-mongo-1 mongorestore --quiet --drop --gzip --archive=/tmp/glo-dev.archive.gz && sudo docker exec glo-people-mongo-1 rm /tmp/glo-dev.archive.gz && rm /tmp/glo-dev.archive.gz'
+	$(MAKE) prod-migrate
+
+# make prod-env            copies these keys from the local .env to /opt/glo-people/.env (add or
+#                          replace; values are never printed) and restarts the api to pick them up
+PROD_ENV_KEYS ?= OPENAI_API_KEY FIRECRAWL_API_KEY LOGFIRE_TOKEN LOGFIRE_PROJECT_URL AGENT_MODEL EMBEDDING_PROVIDER
+prod-env:
+	@umask 077; for k in $(PROD_ENV_KEYS); do grep -E "^$$k=.+" .env || echo "warning: $$k is not set locally" >&2; done | grep -E "^[A-Z_]+=" > /tmp/glo-env-sync
+	scp -pq /tmp/glo-env-sync deploy/env-merge.sh $(PROD_SSH):/tmp/ && rm /tmp/glo-env-sync
+	ssh -t $(PROD_SSH) 'sudo sh /tmp/env-merge.sh /tmp/glo-env-sync /opt/glo-people/.env && rm /tmp/glo-env-sync /tmp/env-merge.sh && cd /opt/glo-people && sudo docker compose -f compose.yaml -f compose.prod.yaml up -d api'
 
 # Prod never runs alembic on its own: run this after deploying a release that adds a migration.
 # Applies the schema, wraps legacy values into histories, syncs property-name and passage vectors,

@@ -10,3 +10,4 @@ playwright-report/
 test-results/
 certs/
 .DS_Store
+backups/
