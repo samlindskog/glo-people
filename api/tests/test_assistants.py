@@ -5,6 +5,7 @@ The fakes count every call, so these tests pin down the credit discipline: what 
 skipped and why, and that nothing is ever overwritten.
 """
 
+import dataclasses
 import json
 from contextlib import ExitStack
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.assistants import normalize as normalize_assistant
 from app.assistants import runner
 from app.assistants.enrich import assistant as enrich_workflow
 from app.assistants.enrich import budget as enrich_budget
+from app.assistants.enrich.providers import PROVIDERS
 from app.history import Source
 from app.integrations.firecrawl import (
     SCRAPE_CREDITS,
@@ -408,14 +410,15 @@ async def test_redo_pays_linkedin_again_only_when_the_facts_were_not_filed(write
     assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls) or run["credits_used"] > 0
 
 
-async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer, reader, people):
-    defaults = {"providers": ["people-data-labs", "fullenrich"], "provider_policy": "gaps"}
+async def test_pdl_first_asks_fullenrich_only_for_gaps(writer, reader, people):
+    # FullEnrich alone is the default since PDL bills 60 a match; PDL first is an opt-in ladder
+    pdl_first = {"providers": ["people-data-labs", "fullenrich"], "provider_policy": "gaps"}
     specs = {s["key"]: s for s in (await writer.get("/api/assistants")).json()}
     props = specs["enrich"]["options_schema"]["properties"]
-    assert props["providers"]["default"] == defaults["providers"]
+    assert props["providers"]["default"] == ["fullenrich"]
     assert props["provider_policy"]["default"] == "gaps"
-    # PDL has an about text: FullEnrich is not asked, 1 credit instead of 6
-    run = await run_for(writer, [people["Ada Okafor"]], **defaults)
+    # PDL has an about text: FullEnrich is not asked
+    run = await run_for(writer, [people["Ada Okafor"]], **pdl_first)
     item = run["items"][0]
     res = item["result"]
     assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "skipped"}
@@ -433,7 +436,7 @@ async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer
                         "n.csv", "plus_one")
     nia = str((await db().people.find_one({"name.v": "Nia Summers"}))["_id"])
     FakeFirecrawl.calls = []
-    run = await run_for(writer, [nia], **defaults)
+    run = await run_for(writer, [nia], **pdl_first)
     res = run["items"][0]["result"]
     assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "matched"}
     assert res["linkedin_provider"] == "people-data-labs"       # the first match stays the profile
@@ -445,7 +448,7 @@ async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer
     await import_people(writer, "Name,LinkedIn\nAda,https://www.linkedin.com/in/nolastname\n",
                         "a.csv", "plus_one")
     bare = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
-    run = await run_for(writer, [bare], **defaults)
+    run = await run_for(writer, [bare], **pdl_first)
     res = run["items"][0]["result"]
     assert res["providers"] == {"people-data-labs": "matched", "fullenrich": "matched"}
     assert res["linkedin_provider"] == "people-data-labs" and written(res)["name"] == "Ada Okafor"
@@ -518,12 +521,12 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     res = ada["result"]
     assert ada["status"] == "done", ada
     assert res["enrich"]["linkedin"] == "matched" and res["enrich"]["storage"] == "stored"
-    assert res["enrich"]["linkedin_provider"] == "people-data-labs"
+    assert res["enrich"]["linkedin_provider"] == "fullenrich"
     assert written(res)["name"] == "Ada Okafor" and written(res)["about"]
     assert res["review"]["kind"] == "Person" and res["review"]["repaired"]
     assert "Enriched: LinkedIn profile matched" in res["text"]
-    # PDL, the GitHub tool and one company page (PDL carries no employer description)
-    assert ada["credits"] == PDL_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
+    # FullEnrich, the GitHub tool and one company page (the record names no employer description)
+    assert ada["credits"] == LINKEDIN_CREDITS + GITHUB_CREDITS + SCRAPE_CREDITS
     person = (await reader.get(f"/api/people/{ids['Ada']}")).json()
     assert person["name"] == "Ada Okafor" and person["record_kind"] == "Person"
     assert person["history"]["name"][-1]["src"]["by"] == "enrich/linkedin_reader"
@@ -655,3 +658,16 @@ async def test_mcp_enrich_person_runs_the_ladder_once(writer, client_factory, pe
     assert not err and again["status"] == "skipped" and again["credits"] == 0
     err, _ = await call(c, key, "enrich_person", {"id": "000000000000000000000000"})
     assert err
+
+
+async def test_a_provider_that_overbilled_is_not_asked_again(writer, people, monkeypatch):
+    from app.integrations import firecrawl as fc
+    monkeypatch.setitem(fc.OBSERVED_PRICES, "people-data-labs/person/enrich", 60)
+    monkeypatch.setitem(PROVIDERS, "people-data-labs",
+                        dataclasses.replace(PROVIDERS["people-data-labs"], credits=1))  # the listed price
+    run = await run_for(writer, [people["Ada Okafor"]], providers=["people-data-labs", "fullenrich"])
+    res = run["items"][0]["result"]
+    assert res["providers"]["people-data-labs"] == "skipped" and res["providers"]["fullenrich"] == "matched"
+    reasons = {s["step"]: s["reason"] for s in res["skipped"]}
+    assert "billed 60 credits" in reasons["linkedin"]
+    assert not any(c[0] == "people-data-labs/person/enrich" for c in FakeFirecrawl.calls)

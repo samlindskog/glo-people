@@ -70,7 +70,7 @@ Playbook
   enriched, the recent cost per person, the estimated credits, tokens and minutes, the balance
   (get_credits) and a recommended max_credits — tell the person, then start_assistant("enrich",
   …, options={"max_credits": <cap>}). A run pauses when its spend reaches the cap; resume_run with
-  a higher one. The runner reserves the worst case per item in flight (reserved_per_item, ~17) and
+  a higher one. The runner reserves the worst case per item in flight (reserved_per_item, ~16) and
   only dispatches while spend + reservations fit the cap, so use at least minimum_cap; `reserved`
   on get_credits and get_run is that worst case, not spend — judge cost by credits_per_done.
 - Long runs: do not wait inside the call. Note the run id, poll get_run every few minutes and report
@@ -637,10 +637,11 @@ async def plan_run(
 @mcp.tool()
 async def get_credits(ctx: Context) -> dict:
     """The Firecrawl credit balance: remaining, plan size, the billing period's end and `reserved`
-    — the worst case the items in flight right now may still spend (about 17 per enrich item),
+    — the worst case the items in flight right now may still spend (about 16 per enrich item),
     NOT what they spent: actual spend is on each finished item (`credits`) and on the run
     (`credits_used`, `progress.credits_per_done`; typically 2–7 per person). Enrichment spends
-    credits (People Data Labs 1, FullEnrich 5, a site read 1, GitHub 5); nothing else does. Null
+    credits (FullEnrich 5 per match, a site read 1, GitHub 5; People Data Labs 60, only when
+    opted in); nothing else does. Null
     when no provider key is set."""
     await _principal(ctx, "people:read")
     return {"credits": await credits.summary()}

@@ -5,7 +5,7 @@ from app.assistants.enrich.providers import PROVIDERS
 from app.integrations import github
 from app.integrations.firecrawl import SCRAPE_CREDITS, SEARCH_CREDITS, Budget
 
-CAPS = {"max_scrapes": 4, "max_searches": 1, "max_credits": 60,
+CAPS = {"max_scrapes": 4, "max_searches": 1, "max_credits": 80,
         "sites": 2, "follow": 1, "company_pages": 2}
 
 MIN_PAGE_CHARS = 200          # a page shorter than this is not worth an LLM call
@@ -21,7 +21,7 @@ def budget_for(options: EnrichOptions) -> Budget:
 
 def item_cap(options: EnrichOptions) -> int:
     """What the runner reserves per item in flight against the run's credit cap: the worst case
-    these options can spend (17 with the default providers), not the per-item safety ceiling
+    these options can spend (16 with the default provider), not the per-item safety ceiling
     `CAPS["max_credits"]`, so a modest cap still lets several items run at once."""
     return worst_case(options)
 

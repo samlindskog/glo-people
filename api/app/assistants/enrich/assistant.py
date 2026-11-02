@@ -34,6 +34,7 @@ from app.auth import Principal
 from app.config import get_settings
 from app.integrations import github
 from app.integrations.firecrawl import (
+    OBSERVED_PRICES,
     AsyncFirecrawl,
     BudgetExceeded,
     CreditsExhausted,
@@ -41,6 +42,7 @@ from app.integrations.firecrawl import (
     NotConfigured,
     NotFound,
     TermsRequired,
+    overpriced,
 )
 from app.integrations.profile import (
     LinkedInProfile,
@@ -224,7 +226,8 @@ async def _provider_call(deps: AssistantDeps, step: str, call, who: str = "the d
 
 async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     """Step 1: the person's record at the data providers the run names, in order (exact LinkedIn
-    URL; People Data Labs 1 credit, FullEnrich 5; a miss is free). The first match is the profile
+    URL; FullEnrich 5 credits, People Data Labs 60; a miss is free; a provider that billed far
+    above its listed price on an earlier call is not asked again in this process). The first match is the profile
     the direct writes and the later steps rest on; every match adds its facts to the passage.
     Under the default `gaps` policy the next provider is asked only when the one before had no
     record, no about text, or no full name while the record lacks one, since the records overlap
@@ -256,6 +259,12 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
     for spec in (PROVIDERS[k] for k in dict.fromkeys(st.options.providers)):
         if st.options.provider_policy == "gaps" and complete():
             deps.skip("linkedin", f"{spec.label} not asked: the record is complete without it")
+            statuses[spec.key] = "skipped"
+            continue
+        billed = OBSERVED_PRICES.get(spec.source)
+        if billed is not None and billed > overpriced(spec.credits):
+            deps.skip("linkedin", f"{spec.label} billed {billed} credits on its last call, "
+                                  f"{spec.credits} listed; not asked")
             statuses[spec.key] = "skipped"
             continue
         deps.emit("step", f"LinkedIn: asking {spec.label} about {li}")

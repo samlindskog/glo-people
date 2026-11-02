@@ -33,7 +33,7 @@ class ProviderSpec:
 PROVIDERS: dict[ProviderKey, ProviderSpec] = {
     "fullenrich": ProviderSpec(key="fullenrich", label="FullEnrich", capability="people/match",
                                credits=fullenrich.MATCH_CREDITS, match=fullenrich.match),
-    # off by default: the org's acceptance of PDL's terms and a live record are still to be seen
+    # opt in: a richer record (dated positions, education) but 60 credits a match since 2026-11-02
     "people-data-labs": ProviderSpec(key="people-data-labs", label="People Data Labs",
                                      capability=pdl.CAPABILITY, credits=pdl.ENRICH_CREDITS,
                                      match=pdl.match),

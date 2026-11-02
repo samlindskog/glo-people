@@ -20,6 +20,16 @@ from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
+# What each data tool billed on its last call in this process ("provider/capability" → credits).
+# A tool billing far above its listed price is left out of the ladder until the process restarts.
+OBSERVED_PRICES: dict[str, int] = {}
+
+
+def overpriced(listed: int) -> int:
+    """The bill above which a data tool counts as mispriced: twice its listed price, or 10 more."""
+    return max(2 * listed, listed + 10)
+
+
 RATE_LIMIT_RETRIES = 3          # 429s: wait Retry-After (capped) or 2, 4, 8 s, then give up
 RATE_LIMIT_MAX_WAIT_S = 30.0
 
@@ -260,6 +270,10 @@ class AsyncFirecrawl:
         items = (data.get("data") or {}).get("alexandria") or []
         item = items[0] if items else {}
         credits = int(item.get("creditsCost") or 0)
+        OBSERVED_PRICES[f"{provider}/{capability}"] = credits
+        if credits > overpriced(expected_credits):
+            log.warning("%s/%s billed %d credits, %d expected: the ladder will stop asking it",
+                        provider, capability, credits, expected_credits)
         if self.budget:
             self.budget.charge("scrape", f"{provider}/{capability}", credits)
         if log.isEnabledFor(logging.DEBUG):

@@ -81,8 +81,8 @@ async def test_plan_run_estimates_an_enrichment_from_history(writer, client_fact
     assert plan["eligible"] == 1                                        # Bo: a site, not yet enriched
     assert plan["averages"]["credits_per_item"] == 6 and plan["averages"]["tokens_per_item"] == 3500
     assert plan["estimate"]["credits"] == 6 and plan["estimate"]["tokens"] == 3500
-    assert plan["fits_balance"] is True and plan["reserved_per_item"] == 17
-    assert plan["minimum_cap"] == 17 * plan["estimate"]["concurrency"]
+    assert plan["fits_balance"] is True and plan["reserved_per_item"] == 16
+    assert plan["minimum_cap"] == 16 * plan["estimate"]["concurrency"]
     assert plan["recommended_options"]["max_credits"] == plan["minimum_cap"]   # 8 would throttle
     assert plan["balance"]["remaining"] == 100_000
 

@@ -10,10 +10,10 @@ ProviderKey = Literal["fullenrich", "people-data-labs"]   # one per row of enric
 class EnrichOptions(BaseModel):
     refresh: bool = Field(False, description="Re-run for people enriched recently")
     providers: list[ProviderKey] = Field(
-        ["people-data-labs", "fullenrich"],
-        description="Data providers asked about the LinkedIn URL, in order (People Data Labs 1 "
-                    "credit, FullEnrich 5); the first match fills the profile, later matches add "
-                    "facts")
+        ["fullenrich"],
+        description="Data providers asked about the LinkedIn URL, in order (FullEnrich 5 credits "
+                    "per match; People Data Labs 60, opt in for its richer record); the first "
+                    "match fills the profile, later matches add facts")
     provider_policy: Literal["gaps", "all"] = Field(
         "gaps", description="gaps: ask the next provider only when the one before had no record "
                             "or no about text; all: ask every provider and union their facts")

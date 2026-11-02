@@ -16,16 +16,16 @@ def test_provider_table_matches_the_option_and_fits_the_item_cap():
     assert set(PROVIDERS) == set(get_args(ProviderKey)) == {"fullenrich", "people-data-labs"}
     assert PROVIDERS["fullenrich"].source == "fullenrich/people/match"
     assert PROVIDERS["people-data-labs"].source == "people-data-labs/person/enrich"
-    assert EnrichOptions().providers == ["people-data-labs", "fullenrich"]   # cheapest first
+    assert EnrichOptions().providers == ["fullenrich"]       # PDL bills 60 a match since 2026-11-02
     assert EnrichOptions().provider_policy == "gaps"
     # every provider matched + GitHub + every page + the search: within the per-item cap
-    assert budget.worst_case(EnrichOptions()) == 1 + 5 + 5 + 4 + 2 <= budget.CAPS["max_credits"]
-    assert budget.item_cap(EnrichOptions()) == 17           # what a run reserves per item in flight
+    assert budget.worst_case(EnrichOptions()) == 5 + 5 + 4 + 2 <= budget.CAPS["max_credits"]
+    assert budget.item_cap(EnrichOptions()) == 16           # what a run reserves per item in flight
     assert budget.worst_case(EnrichOptions(providers=[])) == 11
     assert budget.worst_case(EnrichOptions(providers=["fullenrich", "fullenrich"])) == 16
     every = EnrichOptions(providers=list(PROVIDERS))
-    assert budget.worst_case(every) == 17 <= budget.CAPS["max_credits"]
-    assert budget.budget_for(EnrichOptions()).max_scrapes == 4 + 3       # pages + 2 providers + GitHub
+    assert budget.worst_case(every) == 60 + 5 + 5 + 4 + 2 <= budget.CAPS["max_credits"]
+    assert budget.budget_for(EnrichOptions()).max_scrapes == 4 + 2       # pages + 1 provider + GitHub
     assert budget.budget_for(every).max_scrapes == 4 + 3
 
 
@@ -206,3 +206,8 @@ async def test_rate_limited_calls_back_off_and_succeed(monkeypatch):
     finally:
         await client.aclose()
     assert len(calls) == fc.RATE_LIMIT_RETRIES + 1 and sleeps == [2.0, 4.0, 8.0]
+
+
+def test_a_tool_billing_far_above_its_price_is_flagged():
+    from app.integrations import firecrawl as fc
+    assert fc.overpriced(5) == 15 and fc.overpriced(1) == 11 and fc.overpriced(60) == 120

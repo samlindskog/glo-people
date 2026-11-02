@@ -14,7 +14,7 @@ from app.urls import github_profile, linkedin_profile, normalize_url
 
 PROVIDER = "people-data-labs"
 CAPABILITY = "person/enrich"
-ENRICH_CREDITS = 1       # listed price per record found
+ENRICH_CREDITS = 60      # billed per record found since 2026-11-02 (the catalogue still lists 1)
 MIN_LIKELIHOOD = 8       # a profile-URL match scores 10; anything weaker is not this person
 
 def _title(value: Any) -> str | None:
