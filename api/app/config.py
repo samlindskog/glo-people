@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     firecrawl_max_age_s: int = 172_800   # reuse Firecrawl's cached copy of a page up to 2 days old
     agent_model: str = "openai:gpt-6-luna"
     fake_agents: bool = False            # deterministic stand-ins for every agent (e2e, demos)
+    auto_review: bool = True             # review people after human and API writes (assistants/auto_review)
     enrich_ttl_days: int = 90
 
     # Assistant runs (app.assistants.runner): items in flight across all runs of this process,

@@ -189,6 +189,12 @@ async def subscribe(run_id: int, after: int = 0) -> AsyncIterator[dict]:
 
 # --- the scheduler --------------------------------------------------------------------------------
 
+# (run id, item id) of the assistant item executing in the current task, for observers that must
+# tell an assistant's write from a person's (the auto-review leaves assistant items alone).
+CURRENT_ITEM: contextvars.ContextVar[tuple[int, int] | None] = contextvars.ContextVar(
+    "current_item", default=None)
+
+
 @dataclass
 class _RunState:
     run: dict
@@ -430,6 +436,7 @@ class _Scheduler:
             return out
 
         otel_context.attach(otel_context.Context())      # its own trace, not the starter's
+        CURRENT_ITEM.set((run_id, item_id))              # writes below happen inside this item
         try:
             with logfire.span("assistant {assistant} item {item_id}", assistant=st.spec.key,
                               run_id=run_id, item_id=item_id, person_id=item["person_id"]) as span:

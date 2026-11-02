@@ -7,6 +7,7 @@ os.environ["MONGO_URL"] = os.environ.get("TEST_MONGO_URL", "mongodb://localhost:
 os.environ["MONGO_DB"] = "glo_test"
 os.environ["EMBEDDING_PROVIDER"] = "fake"
 os.environ["FAKE_AGENTS"] = "0"        # tests choose their own fakes; the container may run with 1
+os.environ["AUTO_REVIEW"] = "0"        # tests start their own runs; test_auto_review turns it on
 os.environ["LOGFIRE_SEND_TO_LOGFIRE"] = "false"
 
 import asyncio
