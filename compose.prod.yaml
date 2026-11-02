@@ -7,6 +7,7 @@ services:
       COOKIE_SECURE: "true"
       LOGFIRE_ENVIRONMENT: prod
       LOGFIRE_INCLUDE_CONTENT: "false"
+      ASSISTANT_CONCURRENCY: ${ASSISTANT_CONCURRENCY:-6}   # items in flight across all runs
     ports: ["127.0.0.1:8000:8000"]
     restart: unless-stopped
 

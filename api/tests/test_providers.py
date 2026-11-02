@@ -2,6 +2,8 @@
 
 from typing import get_args
 
+import pytest
+
 from app.assistants.enrich import budget
 from app.assistants.enrich.models import EnrichOptions, ProviderKey
 from app.assistants.enrich.passage import Passage
@@ -160,3 +162,46 @@ def test_split_urls_handles_lists_and_separators():
         "https://altschoolafrica.com/", "https:/Talentql.com"]
     assert split_urls(["a.com; b.com", "c.com"]) == ["a.com", "b.com", "c.com"]
     assert split_urls("no url here") == [] and split_urls(42) == []
+
+
+async def test_rate_limited_calls_back_off_and_succeed(monkeypatch):
+    """A 429 waits (Retry-After, capped) and tries again; the call succeeds once the limit lifts."""
+    import httpx
+
+    from app.integrations import firecrawl as fc
+
+    calls: list[int] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) < 3:
+            return httpx.Response(429, headers={"retry-after": "7"}, json={"error": "rate limited"})
+        return httpx.Response(200, json={"success": True, "data": {"ok": True}})
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(fc.asyncio, "sleep", fake_sleep)
+    client = fc.AsyncFirecrawl(api_key="test")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://fc.test")
+    try:
+        data = await client._post("/v2/anything", {})
+    finally:
+        await client.aclose()
+    assert data.get("success") is True and len(calls) == 3 and sleeps == [7.0, 7.0]
+
+    calls.clear(); sleeps.clear()
+
+    def always(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    client = fc.AsyncFirecrawl(api_key="test")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(always), base_url="https://fc.test")
+    try:
+        with pytest.raises(fc.FirecrawlError):
+            await client._post("/v2/anything", {})
+    finally:
+        await client.aclose()
+    assert len(calls) == fc.RATE_LIMIT_RETRIES + 1 and sleeps == [2.0, 4.0, 8.0]

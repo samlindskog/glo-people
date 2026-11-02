@@ -20,6 +20,9 @@ from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
+RATE_LIMIT_RETRIES = 3          # 429s: wait Retry-After (capped) or 2, 4, 8 s, then give up
+RATE_LIMIT_MAX_WAIT_S = 30.0
+
 SCRAPE_CREDITS = 1
 SEARCH_CREDITS = 2
 
@@ -168,14 +171,22 @@ class AsyncFirecrawl:
     async def _post(self, path: str, body: dict) -> dict:
         if not self.api_key:
             raise NotConfigured("FIRECRAWL_API_KEY is not set")
-        for attempt in range(3):
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
             resp = await self._http().post(path, json=body)
             if resp.status_code in (502, 503, 504) and attempt < 1:   # a gateway blip: once more
                 log.warning("Firecrawl %s: HTTP %s, retrying once", path, resp.status_code)
                 await asyncio.sleep(2.0)
                 continue
-            if resp.status_code == 429 and attempt < 2:
-                await asyncio.sleep(2.0 * (attempt + 1))
+            if resp.status_code == 429 and attempt < RATE_LIMIT_RETRIES:
+                # rate limited: wait what the server asks (capped), else 2, 4, 8 s
+                try:
+                    wait = min(float(resp.headers.get("retry-after") or 0), RATE_LIMIT_MAX_WAIT_S)
+                except ValueError:
+                    wait = 0.0
+                wait = wait or 2.0 * 2 ** attempt
+                log.warning("Firecrawl %s: rate limited, waiting %.0fs (attempt %d)", path, wait,
+                            attempt + 1)
+                await asyncio.sleep(wait)
                 continue
             break
         if resp.status_code == 402:

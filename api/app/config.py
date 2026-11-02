@@ -35,7 +35,11 @@ class Settings(BaseSettings):
 
     # Assistant runs (app.assistants.runner): items in flight across all runs of this process,
     # heartbeat/staleness for adopting runs left by a dead process, poison protection, retention.
-    assistant_concurrency: int = 3
+    # 6: an enrich item spends ~22 s mostly waiting on providers and the model, 3-5 Firecrawl
+    # calls and 3-6 model calls, so six in flight stay well inside provider rate limits (the
+    # client backs off on 429) while a 15k-person run finishes in half a day. ASSISTANT_CONCURRENCY
+    # in the environment overrides it.
+    assistant_concurrency: int = 6
     run_heartbeat_s: int = 10
     run_stale_s: int = 60
     item_max_attempts: int = 3
