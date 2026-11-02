@@ -123,7 +123,11 @@ async def test_ask_is_a_run_with_the_answer_as_its_item(writer, reader, monkeypa
 
 async def test_cli_drives_a_run_in_its_own_process(writer, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(get_settings(), "fake_agents", True)
-    from app import cli
+    from app import cli, wiring
+    # the CLI is its own process: it must register the write observers itself, or its runs would
+    # create people without vectors (the test process inherited the API's registration; drop it)
+    monkeypatch.setattr(people, "_hooks", [])
+    monkeypatch.setattr(wiring, "_registered", False)
     path = tmp_path / "people.csv"
     path.write_text(CSV)
     await cli.import_file(str(path), "member", dry_run=False, agent=True, review=False)

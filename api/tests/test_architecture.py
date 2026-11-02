@@ -19,7 +19,7 @@ LEVELS: dict[str, int] = {
     # 3 — assistants (per-person assistants, their runner, ask)
     "assistants": 3,
     # 4 — surfaces
-    **dict.fromkeys(["routers", "mcp_server", "cli", "main"], 4),
+    **dict.fromkeys(["routers", "mcp_server", "cli", "main", "wiring"], 4),
 }
 
 # Imports allowed between different packages of the same level (importer → imported). Inside one

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from app import assistants, auth, db, embeddings, mongo, observability, properties
+from app import assistants, auth, db, mongo, observability, properties, wiring
 from app import people as people_svc
 from app.assistants import runner
 from app.config import get_settings
@@ -30,8 +30,7 @@ observability.setup()
 
 mcp_app = build_mcp_app()
 assistants.load_all()
-# Composition root: what reacts to a person write (people.py itself knows no consumer).
-people_svc.on_write(embeddings.sync_person)
+wiring.register_write_hooks()      # what reacts to a person write; shared with the CLI
 
 
 def check_dev_auto_login() -> None:

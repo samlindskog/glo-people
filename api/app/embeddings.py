@@ -97,8 +97,10 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
     return computed
 
 
-async def sync_person(person_id: str) -> None:
-    """Write hook: re-sync one person, serialised per person within this process."""
+async def sync_person(info: "people.WriteInfo | str") -> None:
+    """Write observer: re-sync one person (a deleted one loses its vectors), serialised per person
+    within this process."""
+    person_id = info if isinstance(info, str) else info.person_id
     async with _locks[person_id]:
         await sync_people([person_id])
 

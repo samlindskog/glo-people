@@ -24,6 +24,7 @@ from app import (
     observability,
     people,
     properties,
+    wiring,
 )
 from app.assistants import embed as embed_assistant
 from app.assistants import merge, reparse, runner
@@ -75,6 +76,7 @@ def _show(msg: dict) -> None:
 async def _run(spec_key: str, items: list, params: dict, label: str) -> dict:
     """Create a run and execute it in this process, printing its activity."""
     observability.setup()
+    wiring.register_write_hooks()      # this process writes: its writes must embed too
     assistants.load_all()
     run = await runner.create_run(REGISTRY[spec_key], None, items, params, label=label)
     print(f"run {run['id']} ({spec_key}): {run['total']} item(s)")

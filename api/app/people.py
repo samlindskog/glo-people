@@ -32,7 +32,21 @@ Scalar = str | int | float | bool
 CAS_RETRIES = 8      # a compare-and-set attempt fails only because another writer succeeded
 NORMALIZE_SRC = Source("system", "normalize")
 
-_hooks: list[Callable[[str], Awaitable[None]]] = []
+@dataclass(frozen=True)
+class WriteInfo:
+    """What a commit did, reported to the write observers (`on_write`): the person, who wrote (the
+    source of the transaction's first op), the keys whose value was set, appended or removed,
+    whether the person was created by this write, and whether it was deleted instead."""
+
+    person_id: str
+    src: Source | None
+    keys: tuple[str, ...] = ()
+    is_new: bool = False
+    deleted: bool = False
+
+
+WriteHook = Callable[[WriteInfo], Awaitable[None]]
+_hooks: list[WriteHook] = []
 
 
 class PersonError(ValueError):
@@ -52,8 +66,10 @@ class WriteResult:
     changes: list[Change] = field(default_factory=list)
 
 
-def on_write(hook: Callable[[str], Awaitable[None]]) -> None:
-    """Register a coroutine called with the person id after every successful value write."""
+def on_write(hook: WriteHook) -> None:
+    """Register an observer called with a `WriteInfo` after every successful value write (and after
+    a delete). This module knows no consumer: the composition root (`app.wiring`) registers the
+    vector store and whatever else must follow a write, in every process that writes."""
     _hooks.append(hook)
 
 
@@ -492,7 +508,8 @@ class Transaction:
         self.committed = True
         pid = self.person_id
         if self._value_changed or self.is_new:
-            await _after_write(pid)
+            await _after_write(WriteInfo(pid, self.ops[0].src if self.ops else None,
+                                         tuple(sorted(self._set | self._unset)), is_new=self.is_new))
         if self.is_new:
             await activity.record("person.create", principal, pid,
                                   {"fields": sorted(self._set), "src": self.ops[0].src.kind})
@@ -641,24 +658,20 @@ async def delete(principal: Principal, person_id: str) -> bool:
     res = await db().people.delete_one({"_id": _oid(person_id)})
     if res.deleted_count == 0:
         return False
-    for hook in _hooks:
-        try:
-            await hook(person_id)
-        except Exception:
-            log.exception("write hook failed after deleting person %s", person_id)
+    await _after_write(WriteInfo(person_id, None, deleted=True))
     await activity.record("person.delete", principal, person_id)
     return True
 
 
-async def _after_write(person_id: str) -> None:
+async def _after_write(info: WriteInfo) -> None:
     for hook in _hooks:
         try:
-            await hook(person_id)
+            await hook(info)
         except Exception:
             # The write is already persisted; a hook failure (e.g. the vector store) must not fail
             # the request. `python -m app.cli embed` heals any embedding gap.
             log.exception("write hook %s failed for person %s", getattr(hook, "__name__", hook),
-                          person_id)
+                          info.person_id)
 
 
 # --- migration --------------------------------------------------------------------------------------
