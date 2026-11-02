@@ -110,3 +110,30 @@ async def test_get_credits_and_list_runs(writer, client_factory, monkeypatch):
     assert not err and res["runs"] == []
     err, run = await call(c, key, "get_run", {"run_id": res and (await writer.get("/api/assistants/runs")).json()["items"][0]["id"]})
     assert not err and run["progress"]["percent"] == 100 and "items_per_min" in run["progress"]
+
+
+async def test_enrichment_on_the_record_counts_as_recent_even_without_run_history(writer, client_factory):
+    """A database copied from another stack keeps the enrichment entries but not the runs: both
+    the plan and the TTL skip read the record itself."""
+    from datetime import UTC, datetime
+
+    from app import people
+    from app.history import Source
+    await import_people(writer, CSV, "p.csv", "member")
+    ids = {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
+    tx = await people.Transaction.open(ids["Ada Okafor"])
+    await tx.set_values({"enrichment_passage": "# filed on another stack", "linkedin_headline": "CEO"},
+                        Source("agent", "enrich/storage", "run:1/item:1"))
+    await tx.commit(None)
+    c, key = await _key_client(writer, client_factory)
+    err, plan = await call(c, key, "plan_run", {"key": "enrich", "all_with_field": "linkedin"})
+    assert not err and plan["people"] == 1 and plan["already_enriched"] == 1 and plan["eligible"] == 0
+    assert plan["estimate"]["truncated"] is False and plan["estimate"]["concurrency"] >= 1
+
+    r = await writer.post("/api/assistants/enrich/runs",
+                          json={"person_ids": [ids["Ada Okafor"]], "options": {"max_credits": 10}})
+    run = await runner.wait(r.json()["id"])
+    item = (await writer.get(f"/api/assistants/runs/{run['id']}")).json()["items"][0]
+    assert item["status"] == "skipped" and item["credits"] == 0
+    assert "use refresh" in item["result"]["skipped"][0]["reason"]
+    assert datetime.now(UTC).date().isoformat() in item["result"]["text"]

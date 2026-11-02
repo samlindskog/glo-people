@@ -183,15 +183,20 @@ async def _recently_enriched(deps: AssistantDeps, options: EnrichOptions) -> dic
     """Step 0: a person enriched inside the TTL is skipped without spending anything."""
     if options.refresh:
         return None
+    when: str | None = None
     last = await runner.last_done_item(ASSISTANT, deps.person_id)
-    if not last or not last.get("finished_at"):
+    if last and last.get("finished_at"):
+        ttl = timedelta(days=get_settings().enrich_ttl_days)
+        if datetime.fromisoformat(last["finished_at"]) > datetime.now(UTC) - ttl:
+            when = last["finished_at"][:10]
+    if when is None:                      # the record itself: a passage filed by this assistant's
+        written = deps.recent_write("enrich/storage", key="enrichment_passage")   # last step (a
+        when = written[:10] if written else None   # database copied to another stack keeps it)
+    if when is None:
         return None
-    ttl = timedelta(days=get_settings().enrich_ttl_days)
-    if datetime.fromisoformat(last["finished_at"]) <= datetime.now(UTC) - ttl:
-        return None
-    deps.skip("all", f"enriched {last['finished_at'][:10]}; use refresh to run again")
+    deps.skip("all", f"enriched {when}; use refresh to run again")
     return {"linkedin": "absent", "company": "absent", "not_found": [], "status": "skipped",
-            "text": f"Enriched on {last['finished_at'][:10]}; not run again within the TTL.",
+            "text": f"Enriched on {when}; not run again within the TTL.",
             "changes": [], "skipped": deps.skipped}
 
 

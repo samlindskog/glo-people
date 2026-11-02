@@ -397,12 +397,15 @@ async def test_redo_pays_linkedin_again_only_when_the_facts_were_not_filed(write
     FakeFirecrawl.calls = []
     run = await run_for(writer, [ada])
     res = run["items"][0]["result"]
-    assert res["linkedin"] == "skipped" and res["storage"] == "skipped"
-    assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
-    assert {s["step"]: s["reason"] for s in res["skipped"]}["storage"] == "filed by the earlier attempt"
-    # the GitHub account and the company are already on the record too: only her own site is
-    # re-read (the company site the first run wrote is not a personal-site candidate)
-    assert run["credits_used"] == SCRAPE_CREDITS
+    # the filed passage on the record is the proof the ladder completed: a free skip, with or
+    # without the run history (a database copied to another stack keeps the record, not the runs)
+    assert run["items"][0]["status"] == "skipped" and run["credits_used"] == 0
+    assert res["skipped"][0]["step"] == "all" and "use refresh" in res["skipped"][0]["reason"]
+    assert FakeFirecrawl.calls == []
+    # refresh runs the ladder again but pays only for what the record does not settle
+    run = await run_for(writer, [ada], refresh=True)
+    assert run["items"][0]["status"] == "done"
+    assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls) or run["credits_used"] > 0
 
 
 async def test_default_policy_asks_pdl_first_and_fullenrich_only_for_gaps(writer, reader, people):

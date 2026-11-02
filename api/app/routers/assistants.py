@@ -3,6 +3,7 @@ or everyone with a property, follow runs (paged items, Server-Sent Events), paus
 other options, stop."""
 
 import json
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -22,7 +23,8 @@ router = APIRouter(prefix="/api/assistants", tags=["assistants"])
 Reader = Annotated[Principal, Depends(require("people:read"))]
 Writer = Annotated[Principal, Depends(require("people:write"))]
 
-MAX_BULK = 5000
+MAX_BULK = 5000           # ids or records in one request body
+MAX_SELECT = 100_000      # people a selector (from_run, where) may resolve to
 PING_SECONDS = 15
 
 
@@ -67,12 +69,12 @@ async def _people_items(body: RunRequest) -> list[ItemSpec]:
     elif body.from_run is not None:
         if await runner.get_run(body.from_run) is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {body.from_run} not found")
-        items = await runner.get_items(body.from_run, limit=MAX_BULK)
+        items = await runner.get_items(body.from_run, limit=MAX_SELECT)
         ids = list(dict.fromkeys(it["person_id"] for it in items if it.get("person_id")))
     else:
         filters = body.where or [FieldFilter(field=body.all_with_field, op="exists", value=True)]
         req = SearchRequest(tier=body.tier, filters=filters, limit=1)
-        ids = await people.find_ids(await mongo_query(req), limit=MAX_BULK)
+        ids = await people.find_ids(await mongo_query(req), limit=MAX_SELECT)
     if not ids:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no people selected")
     names = {str(d["_id"]): (d.get("name") or {}).get("v") for d in
@@ -124,8 +126,16 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
                         and ((d.get("website") or {}).get("v") or (d.get("github") or {}).get("v")))
         nothing = len(docs) - with_linkedin - with_site
         refresh = bool(body.options.get("refresh"))
-        recent = set() if refresh else await runner.recently_done(
-            "enrich", ids, get_settings().enrich_ttl_days)
+        recent: set[str] = set()
+        if not refresh:
+            ttl_days = get_settings().enrich_ttl_days
+            recent = await runner.recently_done("enrich", ids, ttl_days)
+            # and the records themselves: entries this assistant wrote within the TTL (a database
+            # copied from another stack keeps them while the run history stays behind)
+            cutoff = datetime.now(UTC) - timedelta(days=ttl_days)
+            recent |= set(await people.find_ids({
+                "_id": {"$in": [people._oid(i) for i in ids]},
+                "enrichment_passage.h": {"$elemMatch": {"ts": {"$gte": cutoff}}}}))
         eligible = sum(1 for d in docs if str(d["_id"]) not in recent
                        and ((d.get("linkedin") or {}).get("v") or (d.get("website") or {}).get("v")
                             or (d.get("github") or {}).get("v")))
@@ -148,7 +158,9 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
         if available is not None:
             cap = min(cap, max(1, available))
         recommended["max_credits"] = cap
-    out.update({"estimate": {"credits": est_credits, "tokens": est_tokens, "minutes": est_minutes},
+    out.update({"estimate": {"credits": est_credits, "tokens": est_tokens, "minutes": est_minutes,
+                             "concurrency": get_settings().assistant_concurrency,
+                             "truncated": len(ids) >= MAX_SELECT},
                 "balance": balance and {k: balance.get(k) for k in ("remaining", "reserved", "plan", "period_end")},
                 "fits_balance": None if available is None else est_credits <= available,
                 "recommended_options": recommended})
