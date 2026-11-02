@@ -31,10 +31,11 @@ from typing import Any
 
 import logfire
 from opentelemetry import context as otel_context
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import Integer, delete, func, or_, select, update
 
 from app import activity, agent_log, db, hub
 from app import people as people_svc
+from app.agents import common as agent_common
 from app.assistants.base import REGISTRY, AssistantSpec, ItemSpec, PauseRun
 from app.assistants.context import AssistantDeps
 from app.auth import Principal
@@ -99,6 +100,74 @@ async def get_run(run_id: int) -> dict | None:
             select(r, u.c.username).select_from(r.outerjoin(u, r.c.user_id == u.c.id))
             .where(r.c.id == run_id))).first()
     return _public(row) if row else None
+
+
+async def progress(run: dict) -> dict[str, Any]:
+    """Where a run stands, for a reader who cannot watch it: items by status, credits and model
+    tokens spent so far, the rate and an estimate of the time left."""
+    i = db.workflow_run_items
+    tok_in = func.coalesce(func.sum(i.c.result["tokens"]["input"].astext.cast(Integer)), 0)
+    tok_out = func.coalesce(func.sum(i.c.result["tokens"]["output"].astext.cast(Integer)), 0)
+    async with db.engine().connect() as conn:
+        by_status = dict((await conn.execute(
+            select(i.c.status, func.count()).where(i.c.run_id == run["id"]).group_by(i.c.status))).all())
+        toks = (await conn.execute(select(tok_in, tok_out).where(i.c.run_id == run["id"]))).one()
+    finished = run["done"] + run["failed"]
+    started = run.get("started_at")
+    elapsed = None
+    if started:
+        t0 = datetime.fromisoformat(started) if isinstance(started, str) else started
+        end = run.get("finished_at")
+        t1 = (datetime.fromisoformat(end) if isinstance(end, str) else end) if end else _now()
+        elapsed = max(0.0, (t1 - t0).total_seconds())
+    rate = finished / elapsed * 60 if elapsed and finished else None
+    remaining = max(0, run["total"] - finished)
+    eta = remaining / rate if rate and remaining and run["status"] in LIVE else None
+    done_n = by_status.get("done", 0)
+    return {"finished": finished, "remaining": remaining,
+            "percent": round(100 * finished / run["total"]) if run["total"] else 100,
+            "by_status": by_status, "credits_used": run["credits_used"],
+            "credits_per_done": round(run["credits_used"] / done_n, 2) if done_n else None,
+            "tokens": {"input": int(toks[0]), "output": int(toks[1])},
+            "elapsed_s": round(elapsed) if elapsed is not None else None,
+            "items_per_min": round(rate, 1) if rate else None,
+            "eta_min": round(eta) if eta is not None else None}
+
+
+async def history_averages(workflow: str, days: int = 90) -> dict[str, Any]:
+    """What one finished item of this assistant cost lately: credits, model tokens and seconds,
+    averaged over the done items of the last `days` days (skipped and failed items excluded)."""
+    i = db.workflow_run_items
+    cutoff = _now() - timedelta(days=days)
+    secs = func.extract("epoch", i.c.finished_at - i.c.started_at)
+    tok = (func.coalesce(i.c.result["tokens"]["input"].astext.cast(Integer), 0)
+           + func.coalesce(i.c.result["tokens"]["output"].astext.cast(Integer), 0))
+    q = select(func.count(), func.avg(i.c.credits), func.avg(tok), func.avg(secs)).where(
+        i.c.workflow == workflow, i.c.status == "done", i.c.finished_at >= cutoff,
+        i.c.started_at.is_not(None))
+    async with db.engine().connect() as conn:
+        n, credits_avg, tokens_avg, secs_avg = (await conn.execute(q)).one()
+    return {"items": int(n or 0), "days": days,
+            "credits_per_item": round(float(credits_avg), 2) if credits_avg is not None else None,
+            "tokens_per_item": int(tokens_avg) if tokens_avg is not None else None,
+            "seconds_per_item": round(float(secs_avg), 1) if secs_avg is not None else None}
+
+
+async def recently_done(workflow: str, person_ids: list[str], days: int) -> set[str]:
+    """The people among `person_ids` with a done item of this assistant within `days`."""
+    if not person_ids:
+        return set()
+    i = db.workflow_run_items
+    cutoff = _now() - timedelta(days=days)
+    out: set[str] = set()
+    async with db.engine().connect() as conn:
+        for start in range(0, len(person_ids), 5000):
+            chunk = person_ids[start:start + 5000]
+            rows = await conn.execute(select(i.c.person_id).distinct().where(
+                i.c.workflow == workflow, i.c.status == "done", i.c.finished_at >= cutoff,
+                i.c.person_id.in_(chunk)))
+            out.update(r[0] for r in rows.all())
+    return out
 
 
 async def get_items(run_id: int, *, status: str | None = None, after: int = 0,
@@ -455,9 +524,11 @@ class _Scheduler:
                 deps.event_sink = sink
                 st.deps[item_id] = deps
                 self.emit(run_id, "step", f"{item.get('label') or item_id}: started", item_id)
+                usage: dict[str, int] = {}
+                agent_common.USAGE.set(usage)
                 result = await st.spec.run_item(deps)
                 result = {**result, "credits": credits(),
-                          "calls": getattr(deps.budget, "calls", None)}
+                          "calls": getattr(deps.budget, "calls", None), "tokens": usage or None}
                 span.set_attribute("credits", credits())
                 if dropped:
                     self.emit(run_id, "note", f"{dropped} more events not kept", item_id)

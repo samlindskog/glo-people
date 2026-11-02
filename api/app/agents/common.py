@@ -2,6 +2,7 @@
 usage limits, the dependencies web-reading tools receive, a budgeted page-fetch helper, and the
 property catalog rendered for prompts."""
 
+import contextvars
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +42,20 @@ def model_settings() -> dict[str, Any]:
 Emit = Callable[..., None]            # emit(kind, message, **data)
 
 
+# Model usage of the current assistant item, summed over every agent call made while it runs
+# (the runner sets a fresh dict per item and keeps the total on the item's result).
+USAGE: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("agent_usage", default=None)
+
+
+def _count(usage: Any) -> None:
+    acc = USAGE.get()
+    if acc is None or usage is None:
+        return
+    acc["input"] = acc.get("input", 0) + int(getattr(usage, "input_tokens", 0) or 0)
+    acc["output"] = acc.get("output", 0) + int(getattr(usage, "output_tokens", 0) or 0)
+    acc["requests"] = acc.get("requests", 0) + int(getattr(usage, "requests", 0) or 0)
+
+
 async def run_agent(agent: Agent, prompt: str, deps: Any = None,
                     request_limit: int = REQUEST_LIMIT, on_event: Emit | None = None) -> Any:
     """Run an agent with the configured model (or its deterministic fake under FAKE_AGENTS) and
@@ -56,7 +71,9 @@ async def run_agent(agent: Agent, prompt: str, deps: Any = None,
                               "usage_limits": UsageLimits(request_limit=request_limit),
                               "model_settings": model_settings()}
     if on_event is None:
-        return (await agent.run(prompt, **kwargs)).output
+        result = await agent.run(prompt, **kwargs)
+        _count(result.usage() if callable(result.usage) else result.usage)
+        return result.output
     short = (agent.name or "agent").rsplit(".", 1)[-1]
     on_event("agent", f"{short}: thinking", agent=short)
     async with agent.iter(prompt, **kwargs) as run:
@@ -74,6 +91,7 @@ async def run_agent(agent: Agent, prompt: str, deps: Any = None,
     result = run.result
     assert result is not None
     usage = run.usage() if callable(run.usage) else run.usage
+    _count(usage)
     on_event("agent", f"{short}: done after {usage.requests} request(s)", agent=short,
              requests=usage.requests)
     return result.output

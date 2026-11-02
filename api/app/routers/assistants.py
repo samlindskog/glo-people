@@ -11,8 +11,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from app import fields, people
 from app.assistants import REGISTRY, runner
-from app.assistants.base import ItemSpec
+from app.assistants import credits as credits_svc
+from app.assistants.base import AssistantSpec, ItemSpec
 from app.auth import Principal, require
+from app.config import get_settings
 from app.tools.search import FieldFilter, SearchRequest, mongo_query
 
 router = APIRouter(prefix="/api/assistants", tags=["assistants"])
@@ -105,6 +107,71 @@ async def start_run(key: str, body: RunRequest, principal: Reader) -> dict:
     return await runner.get_run(run["id"])
 
 
+async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
+    """What a run over this selection would cost before it is started: how many people, how many
+    an enrichment can work on (a LinkedIn URL or a site) and how many it would skip (enriched
+    within the TTL), the recent cost of one item (credits, model tokens, seconds) and the
+    estimates and recommended cap that follow, against the Firecrawl balance."""
+    items = await _people_items(body)
+    ids = [it["person_id"] for it in items if it.get("person_id")]
+    averages = await runner.history_averages(spec.key)
+    out: dict[str, Any] = {"assistant": spec.key, "people": len(ids), "averages": averages}
+    eligible = len(ids)
+    if spec.key == "enrich":
+        docs = await people.fetch(ids, projection={"linkedin": 1, "website": 1, "github": 1})
+        with_linkedin = sum(1 for d in docs if (d.get("linkedin") or {}).get("v"))
+        with_site = sum(1 for d in docs if not (d.get("linkedin") or {}).get("v")
+                        and ((d.get("website") or {}).get("v") or (d.get("github") or {}).get("v")))
+        nothing = len(docs) - with_linkedin - with_site
+        refresh = bool(body.options.get("refresh"))
+        recent = set() if refresh else await runner.recently_done(
+            "enrich", ids, get_settings().enrich_ttl_days)
+        eligible = sum(1 for d in docs if str(d["_id"]) not in recent
+                       and ((d.get("linkedin") or {}).get("v") or (d.get("website") or {}).get("v")
+                            or (d.get("github") or {}).get("v")))
+        out.update({"with_linkedin": with_linkedin, "with_site_only": with_site,
+                    "nothing_to_work_with": nothing, "already_enriched": len(recent),
+                    "eligible": eligible})
+    per_item = averages["credits_per_item"] if averages["credits_per_item"] is not None else (
+        4.0 if spec.key == "enrich" else 0.0)
+    est_credits = round(eligible * per_item)
+    est_tokens = eligible * (averages["tokens_per_item"] or 0)
+    secs = averages["seconds_per_item"] or (20.0 if spec.key == "enrich" else 1.0)
+    est_minutes = round(eligible * secs / max(1, get_settings().assistant_concurrency) / 60)
+    balance = await credits_svc.summary() if spec.key == "enrich" else None
+    available = None
+    if balance and balance.get("remaining") is not None:
+        available = int(balance["remaining"]) - int(balance.get("reserved") or 0)
+    recommended = {}
+    if spec.key == "enrich":
+        cap = round(est_credits * 1.25) or 1
+        if available is not None:
+            cap = min(cap, max(1, available))
+        recommended["max_credits"] = cap
+    out.update({"estimate": {"credits": est_credits, "tokens": est_tokens, "minutes": est_minutes},
+                "balance": balance and {k: balance.get(k) for k in ("remaining", "reserved", "plan", "period_end")},
+                "fits_balance": None if available is None else est_credits <= available,
+                "recommended_options": recommended})
+    return out
+
+
+@router.post("/{key}/plan")
+async def plan_run(key: str, body: RunRequest, principal: Reader) -> dict:
+    """Estimate a run before starting it (same selectors as a start): people selected, what an
+    enrichment could work on and would skip, the recent per-item cost, the estimated credits,
+    tokens and minutes, the Firecrawl balance and a recommended credit cap. Writes nothing."""
+    spec = REGISTRY.get(key)
+    if spec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown assistant")
+    if spec.scope != "people":
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{key} is not run over people")
+    try:
+        spec.options_model.model_validate(body.options)
+    except ValidationError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
+    return await plan(spec, body)
+
+
 @router.get("/runs")
 async def list_runs(_: Reader, limit: Annotated[int, Query(ge=1, le=100)] = 25,
                     offset: Annotated[int, Query(ge=0)] = 0,
@@ -119,7 +186,7 @@ async def get_run(run_id: int, _: Reader) -> dict:
     run = await runner.get_run(run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
-    return {**run, "items": await runner.get_items(run_id)}
+    return {**run, "progress": await runner.progress(run), "items": await runner.get_items(run_id)}
 
 
 @router.get("/runs/{run_id}/items")

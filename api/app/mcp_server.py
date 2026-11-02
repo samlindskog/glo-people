@@ -16,7 +16,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import agent_log, auth, fields, importer, properties
 from app import people as people_svc
-from app.assistants import REGISTRY, merge, runner
+from app.assistants import REGISTRY, credits, merge, runner
 from app.assistants.ask import ask
 from app.assistants.enrich.models import EnrichOptions
 from app.assistants.merge import MergeOptions
@@ -65,7 +65,14 @@ Playbook
   Large CSV files are uploaded on the web page or with the CLI, not through this interface. A free
   text about a known person → store_about_person.
 - Enriching: one person → enrich_person (LinkedIn profile through the data providers, their site,
-  GitHub, the company; costs credits, capped by options.max_credits, 30 by default); many → see below.
+  GitHub, the company; costs credits, capped by options.max_credits, 30 by default). Many people:
+  plan_run("enrich", …) first — it says how many are eligible, how many are skipped as already
+  enriched, the recent cost per person, the estimated credits, tokens and minutes, the balance
+  (get_credits) and a recommended max_credits — tell the person, then start_assistant("enrich",
+  …, options={"max_credits": <cap>}). A run pauses at its cap; resume_run with a higher one.
+- Long runs: do not wait inside the call. Note the run id, poll get_run every few minutes and report
+  progress.percent, items_per_min, eta_min and credits_used; list_runs shows what is active.
+  pause_run / stop_run if the person asks. When it finishes, summarise the items by status.
 - Following up on an upload: the import answers with a run id; start_assistant(key, from_run=<that
   id>) runs another assistant over exactly the people it created or matched: "normalize" (typed values,
   record kind, broken names; free), "enrich" (data providers and sites; costs credits — always pass
@@ -583,17 +590,79 @@ async def _run_view(run_id: int, events: int = 0) -> dict:
         raise ToolError("run not found")
     items = await runner.get_items(run_id, limit=500)
     recent = (await runner.events(run_id, limit=100_000))[-events:] if events else []
-    return {**run, "items": [_item_view(it) for it in items],
+    return {**run, "progress": await runner.progress(run), "items": [_item_view(it) for it in items],
             "events": [{k: e.get(k) for k in ("id", "ts", "kind", "message", "item_id")}
                        for e in recent]}
 
 
 @mcp.tool()
+async def plan_run(
+    ctx: Context,
+    key: Annotated[str, Field(description="The assistant key (enrich, normalize, update)")],
+    person_ids: list[str] | None = None,
+    from_run: int | None = None,
+    where: list[FieldFilter] | None = None,
+    all_with_field: str | None = None,
+    tier: fields.Tier | None = None,
+    options: Annotated[dict[str, Any] | None, Field(description="The options you would start with "
+                                                                "(refresh changes what enrich "
+                                                                "skips)")] = None,
+) -> dict:
+    """Assistant: estimate a run before starting it, with the same selectors as start_assistant.
+    Returns the people selected; for enrich, how many have a LinkedIn URL or a site to work from,
+    how many it would skip because they were enriched within the TTL, and the eligible count; the
+    recent cost of one item (credits, model tokens, seconds, from the last 90 days of runs); the
+    estimated credits, tokens and minutes; the Firecrawl balance and whether the estimate fits;
+    and a recommended options.max_credits. Writes nothing and costs nothing. Call it before any
+    run over many people and tell the person what it will cost."""
+    from app.routers.assistants import RunRequest, plan
+    spec = REGISTRY.get(key)
+    if spec is None:
+        raise ToolError(f"unknown assistant {key!r}; list_assistants names them")
+    if spec.scope != "people":
+        raise ToolError(f"{key} is not run over people")
+    await _principal(ctx, "people:read")
+    try:
+        body = RunRequest(person_ids=person_ids, from_run=from_run, where=where,
+                          all_with_field=all_with_field, tier=tier, options=options or {})
+        spec.options_model.model_validate(body.options)
+        return await plan(spec, body)
+    except (ValueError, HTTPException) as e:
+        raise ToolError(getattr(e, "detail", str(e))) from e
+
+
+@mcp.tool()
+async def get_credits(ctx: Context) -> dict:
+    """The Firecrawl credit balance: remaining, plan size, the billing period's end and the
+    credits the running assistants have reserved. Enrichment spends these (People Data Labs 1,
+    FullEnrich 5, a site read 1, GitHub 5); nothing else does. Null when no provider key is set."""
+    await _principal(ctx, "people:read")
+    return {"credits": await credits.summary()}
+
+
+@mcp.tool()
+async def list_runs(ctx: Context,
+                    status: Annotated[Literal["active", "queued", "running", "pausing", "paused",
+                                              "done", "cancelled"] | None,
+                                      Field(description="active = not finished")] = None,
+                    limit: Annotated[int, Field(ge=1, le=100)] = 20) -> dict:
+    """Assistant: the recent runs (newest first) with their status, counts, credits and label;
+    `active` lists what is running or paused right now."""
+    await _principal(ctx, "people:read")
+    page = await runner.list_runs(limit, 0, status)
+    return {"runs": [{k: r.get(k) for k in ("id", "workflow", "label", "status", "total", "done",
+                                            "failed", "credits_used", "pause_reason", "username",
+                                            "created_at", "finished_at")} for r in page["items"]]}
+
+
+@mcp.tool()
 async def get_run(ctx: Context, run_id: int,
                   events: Annotated[int, Field(ge=0, le=200, description="Latest events")] = 20) -> dict:
-    """Assistant: a run's state (status, counts, credits, pause reason), its items (status, the
-    person each one created or matched, what it wrote, its one-line text) and its latest
-    activity."""
+    """Assistant: a run's state (status, counts, credits, pause reason), its progress (percent,
+    items per minute, the estimated minutes left, credits per done item, model tokens so far),
+    its items (status, the person each one created or matched, what it wrote, its one-line
+    text) and its latest activity. Poll it every few minutes for a long run and report the
+    progress in plain words."""
     await _principal(ctx, "people:read")
     return await _run_view(run_id, events)
 
