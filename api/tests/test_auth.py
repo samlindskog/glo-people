@@ -129,3 +129,47 @@ async def test_dev_auto_login(client_factory, reader, monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         check_dev_auto_login()
+
+
+async def test_a_key_follows_its_users_current_role(writer, client_factory):
+    """Permissions are derived from the user's role at every request, so promoting or demoting a
+    user changes what their existing keys may do at once (and deactivating them kills the keys)."""
+    from tests.test_mcp import call, init, rpc
+    rex_client = await client_factory("rex", "reader")
+    rex = next(u for u in (await writer.get("/api/users")).json() if u["username"] == "rex")
+    key = (await rex_client.post("/api/api-keys", json={"name": "rex-key"})).json()["key"]
+    c = await client_factory()
+    await init(c, key)
+    tools = {t["name"] for t in (await rpc(c, key, "tools/list")).json()["result"]["tools"]}
+    assert "create_person" not in tools
+    err, _ = await call(c, key, "create_person", {"tier": "member", "fields": {"name": "Zed"}})
+    assert err                                                             # a reader's key
+
+    assert (await writer.patch(f"/api/users/{rex['id']}", json={"role": "writer"})).status_code == 200
+    tools = {t["name"] for t in (await rpc(c, key, "tools/list")).json()["result"]["tools"]}
+    assert "create_person" in tools                                        # the same key, now a writer's
+    err, person = await call(c, key, "create_person", {"tier": "member", "fields": {"name": "Zed"}})
+    assert not err and person["name"] == "Zed"
+
+    assert (await writer.patch(f"/api/users/{rex['id']}", json={"role": "reader"})).status_code == 200
+    err, _ = await call(c, key, "update_person", {"id": person["id"], "fields": {"bio": "x"}})
+    assert err                                                             # demoted: write refused again
+
+    assert (await writer.patch(f"/api/users/{rex['id']}", json={"is_active": False})).status_code == 200
+    assert (await rpc(c, key, "tools/list")).status_code == 401            # deactivated: key dead
+
+
+async def test_mcp_refuses_everything_without_a_valid_key(client_factory):
+    c = await client_factory()
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    h = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+         "MCP-Protocol-Version": "2025-06-18"}
+    assert (await c.post("/mcp", headers=h, json=body)).status_code == 401
+    assert (await c.post("/mcp", headers={**h, "Authorization": "Bearer glo_deadbeef_nope"}, json=body)).status_code == 401
+    assert (await c.post("/mcp", headers={**h, "Authorization": "Basic Z2xvOnBhc3M="}, json=body)).status_code == 401
+    assert (await c.post("/mcp?api_key=glo_x", headers=h, json=body)).status_code == 401
+    assert (await c.get("/mcp", headers={"Accept": "text/event-stream"})).status_code == 401
+    # a browser session (cookie) is not an API key: the MCP ignores it
+    rita = await client_factory("rita", "reader")
+    assert (await rita.get("/api/auth/me")).status_code == 200
+    assert (await rita.post("/mcp", headers=h, json=body)).status_code == 401

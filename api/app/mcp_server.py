@@ -653,8 +653,11 @@ class APIKeyAuth:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] == "lifespan":
             await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":                   # no other transport: a websocket is refused
+            await send({"type": "websocket.close", "code": 1008})
             return
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         scheme, _, token = headers.get("authorization", "").partition(" ")
