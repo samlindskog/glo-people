@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { READER, WRITER } from '../users'
 import { login, uid } from './helpers'
 
-test('API key works against /mcp and stops working once revoked', async ({ page, request }) => {
+test('API key works against /mcp and stops working once deleted', async ({ page, request }) => {
   await login(page, WRITER)
   await page.getByRole('link', { name: 'Accounts' }).click()
   const name = `e2e ${uid()}`
@@ -25,8 +25,8 @@ test('API key works against /mcp and stops working once revoked', async ({ page,
 
   const row = page.getByTestId('keys-table').getByRole('row', { name: new RegExp(name) })
   page.once('dialog', (d) => d.accept())
-  await row.getByRole('button', { name: 'Revoke' }).click()
-  await expect(row).toContainText('revoked')
+  await row.getByRole('button', { name: 'Delete' }).click()
+  await expect(row).toHaveCount(0)
   expect((await rpc('tools/list')).status()).toBe(401)
 })
 

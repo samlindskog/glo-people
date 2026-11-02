@@ -1,11 +1,10 @@
 """Users (accounts:manage) and MCP API keys (api_keys:manage_own / api_keys:manage_all)."""
 
-from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app import activity, auth, db
@@ -128,8 +127,9 @@ _KEY_COLS = (db.api_keys.c.id, db.api_keys.c.user_id, db.api_keys.c.name, db.api
 
 
 async def _keys_for(user_id: int) -> list[dict]:
-    q = select(*_KEY_COLS).where(db.api_keys.c.user_id == user_id).order_by(
-        db.api_keys.c.revoked_at.is_not(None), db.api_keys.c.created_at.desc())
+    q = select(*_KEY_COLS).where(db.api_keys.c.user_id == user_id,
+                                 db.api_keys.c.revoked_at.is_(None)).order_by(
+        db.api_keys.c.created_at.desc())
     async with db.engine().connect() as conn:
         return [dict(r) for r in (await conn.execute(q)).mappings()]
 
@@ -148,17 +148,17 @@ async def _issue(principal: Principal, user_id: int, name: str) -> dict:
     return {**row, "key": key}
 
 
-async def _revoke(principal: Principal, key_id: int, owner: int | None) -> None:
-    q = update(db.api_keys).where(db.api_keys.c.id == key_id, db.api_keys.c.revoked_at.is_(None))
+async def _delete(principal: Principal, key_id: int, owner: int | None) -> None:
+    """A deleted key is gone: it stops working at once and no longer appears anywhere. The
+    activity log and the agent ledger keep their rows with the key id cleared."""
+    q = delete(db.api_keys).where(db.api_keys.c.id == key_id)
     if owner is not None:
         q = q.where(db.api_keys.c.user_id == owner)
     async with db.engine().begin() as conn:
-        res = await conn.execute(q.values(revoked_at=datetime.now(UTC))
-                                 .returning(db.api_keys.c.prefix))
-        prefix = res.scalar_one_or_none()
+        prefix = (await conn.execute(q.returning(db.api_keys.c.prefix))).scalar_one_or_none()
     if prefix is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "active key not found")
-    await activity.record("apikey.revoke", principal, prefix)
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "key not found")
+    await activity.record("apikey.delete", principal, prefix)
 
 
 @router.get("/api-keys")
@@ -172,8 +172,8 @@ async def issue_my_key(body: KeyCreate, principal: OwnKeys) -> dict:
 
 
 @router.delete("/api-keys/{key_id}", status_code=204)
-async def revoke_my_key(key_id: int, principal: OwnKeys) -> None:
-    await _revoke(principal, key_id, owner=principal.user_id)
+async def delete_my_key(key_id: int, principal: OwnKeys) -> None:
+    await _delete(principal, key_id, owner=principal.user_id)
 
 
 @router.get("/users/{user_id}/api-keys")
@@ -190,5 +190,5 @@ async def issue_user_key(user_id: int, body: KeyCreate, principal: AllKeys) -> d
 
 
 @router.delete("/users/{user_id}/api-keys/{key_id}", status_code=204)
-async def revoke_user_key(user_id: int, key_id: int, principal: AllKeys) -> None:
-    await _revoke(principal, key_id, owner=user_id)
+async def delete_user_key(user_id: int, key_id: int, principal: AllKeys) -> None:
+    await _delete(principal, key_id, owner=user_id)

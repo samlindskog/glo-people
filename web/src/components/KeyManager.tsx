@@ -67,41 +67,31 @@ export default function KeyManager({ queryKey, list, issue, revoke }: Props) {
               <th>Prefix</th>
               <th>Created</th>
               <th>Last used</th>
-              <th>Status</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {keys.data?.map((k) => (
-              <tr key={k.id} className={k.revoked_at ? 'text-slate-400' : ''}>
+              <tr key={k.id}>
                 <td className="font-medium">{k.name}</td>
                 <td className="font-mono text-xs">glo_{k.prefix}_…</td>
                 <td className="whitespace-nowrap">{formatDate(k.created_at)}</td>
                 <td className="whitespace-nowrap">{formatDate(k.last_used_at)}</td>
                 <td>
-                  {k.revoked_at ? (
-                    <span className="badge bg-slate-100">revoked</span>
-                  ) : (
-                    <span className="badge bg-emerald-50 text-emerald-700">active</span>
-                  )}
-                </td>
-                <td>
-                  {!k.revoked_at && (
-                    <button
-                      className="btn-danger"
-                      onClick={() => {
-                        if (confirm(`Revoke “${k.name}”? Clients using it will stop working.`)) revokeM.mutate(k.id)
-                      }}
-                    >
-                      Revoke
-                    </button>
-                  )}
+                  <button
+                    className="btn-danger"
+                    onClick={() => {
+                      if (confirm(`Delete “${k.name}”? Clients using it will stop working.`)) revokeM.mutate(k.id)
+                    }}
+                  >
+                    Delete
+                  </button>
                 </td>
               </tr>
             ))}
             {keys.data?.length === 0 && (
               <tr>
-                <td colSpan={6} className="py-6 text-center text-slate-500">
+                <td colSpan={5} className="py-6 text-center text-slate-500">
                   No keys yet.
                 </td>
               </tr>

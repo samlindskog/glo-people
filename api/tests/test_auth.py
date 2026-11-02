@@ -80,6 +80,8 @@ async def test_api_keys_lifecycle(writer, client_factory):
     keys = (await writer.get("/api/api-keys")).json()
     assert keys[0]["last_used_at"] is not None and "key_hash" not in keys[0]
     assert (await writer.delete(f"/api/api-keys/{keys[0]['id']}")).status_code == 204
+    assert (await writer.get("/api/api-keys")).json() == []                    # gone, not "revoked"
+    assert (await writer.delete(f"/api/api-keys/{keys[0]['id']}")).status_code == 404
     assert (await bare.get("/api/properties", headers=h)).status_code == 401
     assert (await bare.get("/api/properties", headers={"Authorization": "Bearer glo_bad_x"})
             ).status_code == 401
