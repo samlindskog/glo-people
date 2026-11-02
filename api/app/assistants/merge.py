@@ -153,7 +153,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             deps.skip(key, "no such property")
     base: dict[str, Any] = {"match": match.public(), "plan": plans[0].public(),
                             "created": False, "person_id": match.person_id,
-                            "written": [], "filed": [], "changes": [], "skipped": deps.skipped}
+                            "written": [], "filed": [], "kept": [], "changes": [], "skipped": deps.skipped}
     name = first.get("name") or (deps.person or {}).get("name") or "the record"
     if match.decision == "ambiguous":
         who = ", ".join(c["name"] or c["person_id"] for c in match.candidates[:4])
@@ -183,6 +183,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
 
     written: set[str] = set()
     filed: set[str] = set()
+    kept: set[str] = set()
     for row, values, plan in zip(rows, cleaned, plans, strict=True):
         src = _source(deps, file, row.get("row"))
         skip = importer.restated(plan.direct, deps.person, catalog) if deps.person else set()
@@ -193,6 +194,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
             if res is None:
                 return {**base, "status": "failed", "error": "person vanished", "text": "Person vanished."}
             written |= {c.key for c in res.changes if c.action in ("set", "append")}
+            kept |= {c.key for c in res.changes if c.action == "kept"}
         if plan.lines and deps.person is not None:
             opts = store_tool.StoreOptions(max_new=options.max_new_properties, overflow="notes",
                                            locked=sorted(plan.direct))
@@ -200,6 +202,7 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
                                   passage=importer.render_lines(plan.lines), opts=opts)
             if isinstance(res, store_tool.StoreResult):
                 filed |= {c.key for c in res.changes if c.action in ("set", "append")}
+                kept |= set(res.kept)
     assert deps.person is not None
     rev = None
     if options.review and (deps.changes or match.decision == "new" or not deps.current("record_kind")):
@@ -211,12 +214,14 @@ async def run_item(deps: AssistantDeps) -> dict[str, Any]:
         parts.append(f"wrote {', '.join(sorted(written))}")
     if filed:
         parts.append(f"filed {', '.join(sorted(filed))}")
-    if not written and not filed:
+    if kept:
+        parts.append(f"recorded but not shown: {', '.join(sorted(kept))}")
+    if not written and not filed and not kept:
         parts.append("nothing new")
     if rev and rev.get("kind"):
         parts.append(f"record kind {rev['kind']}")
     return {**base, "person_id": deps.person["id"], "created": match.decision == "new",
-            "written": sorted(written), "filed": sorted(filed), "review": rev,
+            "written": sorted(written), "filed": sorted(filed), "kept": sorted(kept), "review": rev,
             "changes": [c.model_dump() for c in deps.changes], "skipped": deps.skipped,
             "text": fields.sentence("; ".join(parts)) + "."}
 
@@ -247,7 +252,7 @@ DETAILS = """\
 
 **Matching.** A record names its person when it carries an identifier the database already holds: an email or phone, the LinkedIn or GitHub URL, or the file's `ID`, compared on canonical forms (so a LinkedIn URL matches whatever its spelling). Without one, a name that exactly one person has decides; a name several people share is decided by company, location or email domain when exactly one of them agrees. Otherwise the record is ambiguous: the item is skipped with the candidates listed, nothing is written, a human decides and the run is redone. A record no one matches creates a person in the run's tier.
 
-**Writing.** Values for known properties that are not long prose are written as entered through the record tool, attributed to the file and row (`import` entries) or to whoever handed the record in; list properties append their items, typed properties get their normalised value from the parser, and an identifier the record restates in another spelling (an email's case, a URL variant) adds nothing. Long prose and unknown columns go to the storage agent as labelled lines (one per property), which files each into its property in the type's form, confirms what the record already has, marks conflicts (the old value stays in history), and may create up to `max_new_properties` properties; facts with no home go to notes. Blank cells never clear a value; re-merging the same file appends nothing.
+**Writing.** Values for known properties that are not long prose are written as entered through the record tool, attributed to the file and row (`import` entries) or to whoever handed the record in; list properties append their items, typed properties get their normalised value from the parser, and an identifier the record restates in another spelling (an email's case, a URL variant) adds nothing. A value that does not outrank the one shown (an upload against a person's own edit or an assistant's finding) is recorded in the history and reported as kept, not shown. Long prose and unknown columns go to the storage agent as labelled lines (one per property), which files each into its property in the type's form, confirms what the record already has, marks conflicts (the old value stays in history), and may create up to `max_new_properties` properties; facts with no home go to notes. Blank cells never clear a value; re-merging the same file appends nothing.
 
 **Review.** When anything was written or the person is new, the closing review runs: the parser confirms the typed values, the normaliser agent reads what it cannot, and the repair tool judges the record as it now stands (kind by common sense, a full name the record's own data states, misfiled values).
 

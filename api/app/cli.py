@@ -120,6 +120,23 @@ async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, revie
           f"{totals['skipped']} skipped (ambiguous or no name), {totals['failed']} failed")
 
 
+async def recompute_shown(dry_run: bool, sample: int) -> None:
+    """Recompute every property's shown value from its history (the one-time backfill for the
+    trust-ranked `v`); dry run by default, with a report of what would flip."""
+    await mongo.ensure_indexes()
+    wiring.register_write_hooks()
+    rep = await people.recompute_shown(dry_run=dry_run,
+                                       progress=lambda n, f: print(f"  {n} documents, {f} flips", end="\r"))
+    print(f"{rep['documents']} documents; {rep['flipped_documents']} with a flipped value, "
+          f"{rep['flips']} flips" + (" (dry run)" if dry_run else " (written)"))
+    for key, n in sorted(rep["by_key"].items(), key=lambda kv: -kv[1]):
+        print(f"  {key}: {n}")
+    for pair, n in sorted(rep["by_kinds"].items(), key=lambda kv: -kv[1]):
+        print(f"  {pair}: {n}")
+    for row in rep["samples"][:sample]:
+        print(f"  - {row['name']} ({row['id']}) {row['key']}: {row['from']!r} -> {row['to']!r} [{row['kinds']}]")
+
+
 async def dedupe(apply: bool) -> None:
     """Documents sharing a LinkedIn URL or an email: merge the groups whose names agree (the
     oldest document kept), list the rest. Without --yes only lists."""
@@ -405,6 +422,10 @@ def main() -> None:
     dd = sub.add_parser("dedupe", help="merge documents that share a LinkedIn URL or an email "
                                        "(same name: merged, oldest kept; else listed)")
     dd.add_argument("--yes", action="store_true", help="without it: list the groups only")
+    rs = sub.add_parser("recompute-shown", help="recompute each property's shown value from its "
+                                                "history under the trust ranking (backfill)")
+    rs.add_argument("--yes", action="store_true", help="write the flips; without it: report only")
+    rs.add_argument("--sample", type=int, default=30, help="sample rows to print")
     em = sub.add_parser("embed", help="sync property-name vectors and backfill passage vectors")
     em.add_argument("--field", action="append", help="only these fields (repeatable)")
     sub.add_parser("properties", help="the property catalog with coverage")
@@ -446,6 +467,8 @@ def main() -> None:
                                       columns=mapping)
                 case "dedupe":
                     await dedupe(args.yes)
+                case "recompute-shown":
+                    await recompute_shown(not args.yes, args.sample)
                 case "embed":
                     await embed(args.field)
                 case "properties":

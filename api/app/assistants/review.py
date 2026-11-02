@@ -53,6 +53,8 @@ def describe(rev: dict[str, Any] | None, changes: list[Change]) -> str:
             parts.append(f"{c.key} removed")
         elif c.action == "note":
             parts.append(f"{c.key}: {c.value}")
+        elif c.action == "kept":
+            parts.append(f"{c.key}: {c.value!r} recorded, {c.previous!r} still shown")
     rev = rev or {}
     for key, values in (rev.get("rejected_values") or {}).items():
         parts.append(f"{key}: {', '.join(repr(v) for v in values)} not added (cap)")

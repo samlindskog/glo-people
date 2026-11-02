@@ -323,6 +323,7 @@ class _Op:
     src: Source
     tier: str | None = None
     append: frozenset[str] = frozenset()          # values merged into the current one (`_merged`)
+    derived: frozenset[str] = frozenset()         # values computed from the shown one (supersede it)
     of_expected: dict[str, str] = field(default_factory=dict)   # norm: key → hash of the text judged
 
 
@@ -352,6 +353,7 @@ class Transaction:
         self._set: set[str] = set()
         self._unset: set[str] = set()
         self._unchanged: set[str] = set()
+        self._kept: set[str] = set()
         self._value_changed = False
 
     @classmethod
@@ -401,16 +403,18 @@ class Transaction:
         self.catalog.append(change)
 
     async def set_values(self, values: dict[str, Any], src: Source, *, tier: str | None = None,
-                         append: Iterable[str] = ()) -> list[Change]:
+                         append: Iterable[str] = (), derived: Iterable[str] = ()) -> list[Change]:
         """Stage new values (None removes); keys in `append` are merged into the current value
-        (list items unioned, a text added as a line) instead of replacing it. Returns the changes
-        this op adds."""
+        (list items unioned, a text added as a line) instead of replacing it; keys in `derived`
+        (and every appended key) were computed from the shown value and supersede it whatever
+        its source. A value that does not outrank the shown one is recorded and reported as
+        `kept`. Returns the changes this op adds."""
         cleaned = await _clean(values)
         if "name" in cleaned and cleaned["name"] is None:
             raise PersonError("name cannot be removed")
         if tier is not None:
             _check_tier(tier)
-        op = _Op("values", cleaned, src, tier, frozenset(append))
+        op = _Op("values", cleaned, src, tier, frozenset(append), frozenset(derived))
         return await self._stage(op)
 
     async def set_norm(self, parsed: dict[str, Parsed], src: Source) -> list[Change]:
@@ -437,23 +441,25 @@ class Transaction:
             data = {k: _merged(base.get(k), v) if k in op.append and v is not None else v
                     for k, v in op.data.items()}
             before = {k: history.jsonable(history.current(base.get(k))) for k in data}
-            to_set, changed, removed, unchanged = history.apply(base, data, op.src, now,
-                                                                fields.SYSTEM_FIELDS)
+            to_set, changed, removed, unchanged, kept = history.apply(
+                base, data, op.src, now, fields.SYSTEM_FIELDS, derived=op.append | op.derived)
             changes = [Change(key=k, action="append" if k in op.append else "set",
                               value=data[k], previous=before[k]) for k in changed]
             changes += [Change(key=k, action="removed", previous=before[k]) for k in removed]
+            changes += [Change(key=k, action="kept", value=data[k], previous=before[k]) for k in kept]
             if op.tier is not None and op.tier != base.get("tier"):
                 to_set["tier"] = op.tier
                 changed.append("tier")
                 changes.append(Change(key="tier", action="set", value=op.tier,
                                       previous=base.get("tier")))
-            if changed or removed:
+            if changed or removed or kept:
                 to_set["updated_at"] = now
-                self._value_changed = True
+                self._value_changed = True          # a kept entry is embedded too
             changes += await _normalize_into(base, to_set, now)
             self._set |= set(changed)
             self._unset |= set(removed)
             self._unchanged |= set(unchanged)
+            self._kept |= set(kept)
         else:
             kept: dict[str, Parsed] = {}
             changes = []
@@ -509,16 +515,19 @@ class Transaction:
         pid = self.person_id
         if self._value_changed or self.is_new:
             await _after_write(WriteInfo(pid, self.ops[0].src if self.ops else None,
-                                         tuple(sorted(self._set | self._unset)), is_new=self.is_new))
+                                         tuple(sorted(self._set | self._unset | self._kept)),
+                                         is_new=self.is_new))
         if self.is_new:
             await activity.record("person.create", principal, pid,
                                   {"fields": sorted(self._set), "src": self.ops[0].src.kind})
         elif self.ops:
             action = "person.update" if any(op.kind == "values" for op in self.ops) \
                 else "person.normalize"
-            await activity.record(action, principal, pid, {
-                "set": sorted(self._set), "unset": sorted(self._unset),
-                "unchanged": sorted(self._unchanged), "src": self.ops[0].src.kind})
+            meta: dict[str, Any] = {"set": sorted(self._set), "unset": sorted(self._unset),
+                                    "unchanged": sorted(self._unchanged), "src": self.ops[0].src.kind}
+            if self._kept:
+                meta["kept"] = sorted(self._kept)
+            await activity.record(action, principal, pid, meta)
         return WriteResult(await get(pid), self.changes())
 
 
@@ -652,6 +661,55 @@ async def normalize_all(page: int = 500, progress: Callable[[int], None] | None 
         written += await reparse(ids, force=force)
         if progress:
             progress(written)
+
+
+async def recompute_shown(*, dry_run: bool = True, page: int = 500,
+                          progress: Callable[[int, int], None] | None = None) -> dict[str, Any]:
+    """Recompute the shown value of every property from its history under `history.pick` (the
+    backfill for documents written when the last entry always showed). Reports the flips: by key,
+    by `from_kind → to_kind`, and samples. With `dry_run` nothing is written."""
+    report: dict[str, Any] = {"documents": 0, "flipped_documents": 0, "flips": 0,
+                              "by_key": {}, "by_kinds": {}, "samples": []}
+    last = None
+    while True:
+        ids = await find_ids({"_id": {"$gt": last}} if last else {}, limit=page)
+        if not ids:
+            return report
+        last = ObjectId(ids[-1])
+        for doc in await fetch(ids):
+            report["documents"] += 1
+            to_set: dict[str, Any] = {}
+            for key, prop in doc.items():
+                if key in fields.SYSTEM_FIELDS or not history.is_prop(prop) or not prop.get("h"):
+                    continue
+                i, _ = history.pick(prop["h"])
+                shown = prop["h"][i].get("v")
+                if history.same(shown, prop.get("v")):
+                    continue
+                to_set[key] = {**prop, "v": shown}
+                old_kind = (prop["h"][-1].get("src") or {}).get("kind") or "legacy"
+                new_kind = (prop["h"][i].get("src") or {}).get("kind") or "legacy"
+                report["flips"] += 1
+                report["by_key"][key] = report["by_key"].get(key, 0) + 1
+                pair = f"{old_kind} -> {new_kind}"
+                report["by_kinds"][pair] = report["by_kinds"].get(pair, 0) + 1
+                if len(report["samples"]) < 200:
+                    report["samples"].append({"id": str(doc["_id"]),
+                                              "name": history.current(doc.get("name")), "key": key,
+                                              "from": history.jsonable(prop.get("v")),
+                                              "to": history.jsonable(shown), "kinds": pair})
+            if not to_set:
+                continue
+            report["flipped_documents"] += 1
+            if not dry_run:
+                now = datetime.now(UTC)
+                await _normalize_into(doc, to_set, now)
+                to_set["updated_at"] = now
+                if await _cas_write(doc["_id"], doc, to_set):
+                    await _after_write(WriteInfo(str(doc["_id"]), Source("system", "recompute-shown"),
+                                                 tuple(sorted(k for k in to_set if k != "updated_at"))))
+        if progress:
+            progress(report["documents"], report["flips"])
 
 
 async def merge_documents(principal: Principal | None, keep_id: str, drop_id: str) -> WriteResult:

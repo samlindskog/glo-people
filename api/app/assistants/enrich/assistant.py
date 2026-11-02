@@ -282,8 +282,8 @@ async def _step_linkedin(deps: AssistantDeps, st: State) -> None:
             values.update(profile_values(profile, deps.person or {}))
         elif not full_name(st.profile) and full_name(profile):
             deps.emit("note", f"{spec.label} supplies the full name the first profile lacked")
-        if values:
-            await deps.write("linkedin_reader", values)
+        if values:                      # a name completed from the profile corrects the shown one
+            await deps.write("linkedin_reader", values, derived=["name"])
     if st.profile is None:
         # the step's status is the worst of the providers': an error beats a miss
         st.result["linkedin"] = ("error" if "error" in statuses.values() else

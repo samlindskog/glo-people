@@ -68,8 +68,12 @@ Playbook
   "plus_two"}; dry_run first). where=[filters] selects by properties instead; person_ids by id.
   wait_seconds lets a small run finish inside the call; otherwise follow it with get_run.
 - Fixing a value: update_person appends the right value (null removes); to restore an earlier value,
-  write it again — the history keeps every version with its source. normalize_person re-parses one
-  record and repairs its identity data.
+  write it again — the history keeps every version with its source. Which entry is shown follows
+  the trust of its source: a person's own edit (ui, api, mcp — yours) outranks an assistant's
+  finding (agent), which outranks a bulk upload (import); newest wins within a class, and an entry
+  marked `derived` (a fix or completion of the shown value) supersedes it. A write that does not
+  outrank the shown value is recorded and reported as `kept`; get_person marks the shown entry
+  (`shown`, `why`). normalize_person re-parses one record and repairs its identity data.
 - Before any bulk write, dry_run; after one, read the run's items (get_run) and summarise counts.
 Pass `agent` when you write on behalf of another automated agent: the entry stays attributed to your
 key (kind "mcp") with that name in its reference."""
@@ -170,8 +174,9 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
                      include_history: Annotated[bool, Field(description="Also return every "
                                                                         "property's entries")] = True
                      ) -> dict:
-    """Fetch one person by id: current field values plus, by default, `history`
-    ({field: [{v, ts, src}], oldest first})."""
+    """Fetch one person by id: the shown field values plus, by default, `history`
+    ({field: [{v, ts, src, derived?, shown?, why?}], oldest first}; the entry marked `shown` is
+    the one the value comes from)."""
     principal = await _principal(ctx, "people:read")
     try:
         person = await people_svc.get(id, include_history=include_history)
@@ -282,8 +287,10 @@ async def update_person(
                       Field(description="Property key → new value (keys must exist, see "
                                         "list_properties). Each value is appended as a new "
                                         "time-stamped entry in the property's history (earlier "
-                                        "values are kept); the current value is a no-op; null "
-                                        "records a removal.")],
+                                        "values are kept) and, as a person's own edit, becomes "
+                                        "the shown value; the shown value is a no-op; null "
+                                        "records a removal. Write an earlier value again to "
+                                        "restore it.")],
     tier: fields.Tier | None = None,
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
                                                    "change, if any; noted in the entry source")] = None,

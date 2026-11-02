@@ -72,6 +72,11 @@ export interface FieldEntry {
   v: FieldValue | null
   ts?: string
   src?: { kind: SourceKind; by?: string; ref?: string }
+  /** Computed from the value shown at the time (a merge, a fix, a completion): supersedes it. */
+  derived?: boolean
+  /** This entry is the one the shown value comes from, and why. */
+  shown?: boolean
+  why?: string
 }
 
 /** One normalised-value entry: the typed value, when, by whom, and `of`, a hash of the text it derives from. */
@@ -239,7 +244,7 @@ export interface SearchRecord {
 
 // --- levels: what a writer, tool or assistant did to a document ------------------------------
 
-export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created' | 'enum_value_added' | 'note'
+export type ChangeAction = 'set' | 'append' | 'removed' | 'normalized' | 'flagged' | 'property_created' | 'enum_value_added' | 'note' | 'kept'
 
 /** One thing that happened to a person's document (api/ARCHITECTURE.md). */
 export interface Change {

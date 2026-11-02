@@ -23,6 +23,14 @@ export default function PersonPage() {
   const [editing, setEditing] = useState(false)
   const person = useQuery({ queryKey: ['person', id], queryFn: () => api.person(id) })
   const properties = useQuery({ queryKey: ['properties'], queryFn: api.properties })
+  const use = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: unknown }) => api.updatePerson(id, { [key]: value }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['person', id] })
+      qc.invalidateQueries({ queryKey: ['search'] })
+    },
+  })
+  const onUse = can('people:write') ? (key: string) => (value: unknown) => use.mutate({ key, value }) : undefined
   const remove = useMutation({
     mutationFn: () => api.deletePerson(id),
     onSuccess: () => {
@@ -109,7 +117,7 @@ export default function PersonPage() {
               <div className="text-slate-500">Name</div>
               <div>
                 <div>{p.name}</div>
-                <History entries={nameHistory} />
+                <History entries={nameHistory} onUse={onUse?.('name')} />
               </div>
             </div>
           )}
@@ -122,7 +130,7 @@ export default function PersonPage() {
               <div>
                 <FieldValue value={p[k]} type={labels[k]?.type} />
                 <Normalised value={p.norm[k]} flag={p.norm_flags[k]} />
-                <History entries={history[k] ?? []} />
+                <History entries={history[k] ?? []} onUse={onUse?.(k)} />
               </div>
             </div>
           ))}
@@ -218,21 +226,38 @@ function Normalised({ value, flag }: { value: unknown; flag?: NormFlag }) {
 }
 
 /** Who wrote a value and when: shown when a field has more than one entry or came from an agent. */
-export function History({ entries }: { entries: FieldEntry[] }) {
+/** A property's entries, newest first: which one is shown and why, and for a writer a button to
+ * show an earlier value again (a new entry under their own name; nothing is rewritten). */
+export function History({ entries, onUse }: { entries: FieldEntry[]; onUse?: (value: unknown) => void }) {
   const show = entries.length > 1 || entries.some((e) => e.src?.kind === 'agent')
   if (!show) return null
   const newestFirst = [...entries].reverse()
+  const newerThanShown = entries.length > 1 && !entries[entries.length - 1].shown
   return (
     <details className="mt-1 text-xs text-slate-500">
-      <summary className="cursor-pointer select-none">history ({entries.length})</summary>
+      <summary className="cursor-pointer select-none">
+        history ({entries.length}){newerThanShown && <span className="ml-2 text-amber-700">newer value recorded, not shown</span>}
+      </summary>
       <ul className="mt-1 space-y-1 border-l border-slate-200 pl-3">
         {newestFirst.map((e, i) => (
-          <li key={i} className="flex flex-wrap gap-x-2">
+          <li key={i} className="flex flex-wrap items-center gap-x-2">
             <span className="text-slate-400">{e.ts ? formatDate(e.ts) : '—'}</span>
             <span className="badge bg-slate-100 text-slate-600">{describeSource(e)}</span>
+            {e.derived && <span className="badge bg-slate-50 text-slate-500">derived</span>}
             <span className={`break-all ${e.v === null ? 'italic' : 'text-slate-700'}`}>
               {e.v === null ? '(removed)' : formatValue(e.v)}
             </span>
+            {e.shown ? (
+              <span className="badge bg-emerald-50 text-emerald-700" title={e.why}>
+                shown
+              </span>
+            ) : (
+              onUse && (
+                <button type="button" className="text-brand-700 underline" onClick={() => onUse(e.v)}>
+                  use this
+                </button>
+              )
+            )}
           </li>
         ))}
       </ul>

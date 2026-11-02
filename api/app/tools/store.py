@@ -268,6 +268,9 @@ class StoreResult(ToolResult):
                                 description="Facts filed under notes because max_new was reached")
     dropped: list[str] = Field(default_factory=list,
                                description="Facts dropped because max_new was reached (overflow ignore)")
+    kept: list[str] = Field(default_factory=list,
+                            description="Properties whose value was recorded but a stronger value "
+                                        "stays shown")
     evidence: dict[str, str] = Field(default_factory=dict,
                                      description="Property → the passage words its write rests on")
     normalization: NormalizeResult | None = Field(None, description="The clean-up pass")
@@ -353,4 +356,5 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
     result.normalization = await normalize_tool.normalize(
         ctx.child(normalize_tool.AGENT_NAME), normalize_tool.NormalizeOptions(repair=False))
     result.changes = ctx.tx.changes()
+    result.kept = sorted({c.key for c in result.changes if c.action == "kept"})
     return result

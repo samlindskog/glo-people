@@ -17,6 +17,7 @@ const CHANGE_CLASS: Record<Change['action'], string> = {
   property_created: 'bg-brand-50 text-brand-700',
   enum_value_added: 'bg-brand-50 text-brand-700',
   note: 'bg-slate-100 text-slate-600',
+  kept: 'bg-slate-100 text-slate-500',
 }
 
 /** Add free text about a person: the store tool splits it into statements and files each under

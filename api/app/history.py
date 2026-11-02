@@ -33,15 +33,17 @@ SCHEMA_VERSION = 2
 SourceKind = Literal["ui", "api", "mcp", "agent", "import", "legacy", "system"]
 NormFlag = Literal["unmapped", "non_normalizable"]
 ChangeAction = Literal["set", "append", "removed", "normalized", "flagged", "property_created",
-                       "enum_value_added", "note"]
+                       "enum_value_added", "note", "kept"]
 
 
 class Change(BaseModel):
     """One thing that happened to a person's document: the vocabulary every writer, tool and
-    assistant reports in. `set`/`append`/`removed` are value writes (`previous` is the value
-    before), `normalized`/`flagged` are the typed form of a value (`flag` says why there is none),
-    `property_created` and `enum_value_added` are catalog changes (a new property; a new canonical value
-    of an enum property)."""
+    assistant reports in. `set`/`append`/`removed` are value writes that changed what is shown
+    (`previous` is the value before), `kept` is a value recorded in the history that does not
+    replace the one shown (a weaker source than the shown value's; `previous` is what still
+    shows), `normalized`/`flagged` are the typed form of a value (`flag` says why there is none),
+    `note` is something that did not happen and why, `property_created` and `enum_value_added`
+    are catalog changes (a new property; a new canonical value of an enum property)."""
 
     key: str
     action: ChangeAction
@@ -106,19 +108,72 @@ def same(a: Any, b: Any) -> bool:
     return type(a) is type(b) and a == b
 
 
-def new_entry(value: Any, src: Source, ts: datetime) -> dict:
-    return {"v": value, "ts": ts, "src": src.doc()}
+# --- which entry is shown ---------------------------------------------------------------------------
+#
+# `h` is append-only; `v` is the SHOWN value, chosen from `h` by `pick`: by the trust of the entry's
+# source, newest first within a class. A person (or their directed agent) acting on one record
+# outranks an assistant's finding, which outranks a bulk upload. An entry marked `derived` was
+# computed from the value shown at the time (a list merged, a broken name fixed, a name completed
+# from the profile behind the URL): it supersedes the shown entry whatever its source and inherits
+# its trust. A weaker later write is recorded but not shown (`kept`); writing an earlier value
+# again from a human surface restores it. Position in `h` is recency (legacy entries lack `ts`).
+TRUST: dict[str, int] = {"ui": 2, "api": 2, "mcp": 2, "agent": 1, "import": 0, "legacy": 0,
+                         "system": 0}
+TRUST_NAMES = {2: "a person's own edit", 1: "an assistant's finding", 0: "an upload"}
+
+
+def trust(entry: dict) -> int:
+    src = entry.get("src") or {}
+    return TRUST.get(src.get("kind") or "legacy", 0)
+
+
+def _derived(entry: dict) -> bool:
+    return bool(entry.get("derived")) or (entry.get("src") or {}).get("kind") == "system"
+
+
+def pick(h: list[dict]) -> tuple[int, int]:
+    """The index of the shown entry and the trust it carries: a left fold where a derived entry
+    always takes over (keeping the trust reached so far) and any other entry takes over when its
+    trust is at least the current winner's."""
+    win, wt = 0, trust(h[0])
+    for i, e in enumerate(h[1:], 1):
+        if _derived(e):
+            win, wt = i, max(wt, trust(e))
+        elif trust(e) >= wt:
+            win, wt = i, trust(e)
+    return win, wt
+
+
+def explain(h: list[dict], i: int) -> str:
+    """Why entry `i` is the one shown, for a reader."""
+    if i == len(h) - 1:
+        return "newest entry"
+    later = [e for e in h[i + 1:] if not _derived(e)]
+    if _derived(h[i]):
+        return "derived from the value shown before it"
+    kinds = sorted({(e.get("src") or {}).get("kind") or "legacy" for e in later})
+    return f"{TRUST_NAMES[trust(h[i])]} outranks the later {', '.join(kinds)} entries"
+
+
+def new_entry(value: Any, src: Source, ts: datetime, derived: bool = False) -> dict:
+    entry: dict[str, Any] = {"v": value, "ts": ts, "src": src.doc()}
+    if derived:
+        entry["derived"] = True
+    return entry
 
 
 def new_prop(value: Any, src: Source, ts: datetime) -> dict:
     return {"v": value, "h": [new_entry(value, src, ts)]}
 
 
-def append(prop: Any, value: Any, src: Source, ts: datetime) -> dict | None:
-    """The property with `value` appended, or None when that would change nothing.
+def append(prop: Any, value: Any, src: Source, ts: datetime, derived: bool = False) -> dict | None:
+    """The property with `value` appended and `v` recomputed as the shown entry, or None when the
+    write would change nothing.
 
-    `prop` may be None (field absent), a legacy bare value, or a property. Appending the current
-    value is a no-op; so is removing (value None) an absent or already removed field.
+    `prop` may be None (field absent), a legacy bare value, or a property. Writing the shown value
+    is a no-op; so is removing (value None) an absent or already removed field; so is repeating the
+    last entry's value from a source that still would not be shown (a repeated enrichment adds
+    nothing). A human re-writing a kept value lands and shows.
     """
     if prop is None:
         return None if value is None else new_prop(value, src, ts)
@@ -126,29 +181,40 @@ def append(prop: Any, value: Any, src: Source, ts: datetime) -> dict | None:
         prop = {"v": prop, "h": [{"v": prop}]}
     if same(prop.get("v"), value):
         return None
-    return {**prop, "v": value, "h": [*prop["h"], new_entry(value, src, ts)]}   # keeps `norm`
+    new_h = [*prop["h"], new_entry(value, src, ts, derived)]
+    shown, _ = pick(new_h)
+    if shown != len(new_h) - 1 and prop["h"] and same(prop["h"][-1].get("v"), value):
+        return None
+    return {**prop, "v": new_h[shown]["v"], "h": new_h}   # keeps `norm`
 
 
-def apply(doc: dict, changes: dict[str, Any], src: Source, now: datetime,
-          system: frozenset[str]) -> tuple[dict[str, Any], list[str], list[str], list[str]]:
+def apply(doc: dict, changes: dict[str, Any], src: Source, now: datetime, system: frozenset[str],
+          derived: frozenset[str] | set[str] = frozenset()
+          ) -> tuple[dict[str, Any], list[str], list[str], list[str], list[str]]:
     """Diff `changes` ({key: value | None}) against `doc` and return what to `$set`.
 
-    Returns (to_set, changed, removed, unchanged). `to_set` holds the upgraded form of every
-    legacy bare field (so a first write migrates the whole document) plus the appended
-    properties; `changed`/`removed`/`unchanged` list the keys by outcome.
+    Returns (to_set, changed, removed, unchanged, kept). `to_set` holds the upgraded form of every
+    legacy bare field (so a first write migrates the whole document) plus the appended properties;
+    `changed`/`removed` list the keys whose shown value changed, `kept` the keys whose entry was
+    recorded while a stronger value stays shown, `unchanged` the keys nothing was appended for.
+    Keys in `derived` were computed from the shown value and supersede it.
     """
     upgraded = upgrade_doc(doc, now, system)
     props = {**{k: v for k, v in doc.items() if k not in system}, **upgraded}
     to_set: dict[str, Any] = dict(upgraded)
-    changed, removed, unchanged = [], [], []
+    changed, removed, unchanged, kept = [], [], [], []
     for key, value in changes.items():
-        new = append(props.get(key), value, src, now)
+        before = current(props.get(key))
+        new = append(props.get(key), value, src, now, derived=key in derived)
         if new is None:
             unchanged.append(key)
             continue
         to_set[key] = props[key] = new
-        (removed if value is None else changed).append(key)
-    return to_set, changed, removed, unchanged
+        if same(current(new), before):
+            kept.append(key)
+        else:
+            (removed if current(new) is None else changed).append(key)
+    return to_set, changed, removed, unchanged, kept
 
 
 def _legacy_source(doc: dict) -> Source:
@@ -204,7 +270,12 @@ def _public_entry(e: dict) -> dict:
 
 
 def public_entries(prop: Any) -> list[dict]:
-    return [_public_entry(e) for e in entries(prop)]
+    """The entries as the API returns them; the shown one carries `shown: true` and `why`."""
+    out = [_public_entry(e) for e in entries(prop)]
+    if is_prop(prop) and prop.get("h"):
+        i, _ = pick(prop["h"])
+        out[i] = {**out[i], "shown": True, "why": explain(prop["h"], i)}
+    return out
 
 
 # --- normalised values ----------------------------------------------------------------------------

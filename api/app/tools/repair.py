@@ -274,7 +274,7 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         ctx.emit("step", "looks wrong: " + "; ".join(result.signals), signals=result.signals)
 
     if opts.mechanical and (fixes := mechanical_fixes(doc)):
-        await ctx.stage(fixes, src=Source("system", "repair"))
+        await ctx.stage(fixes, src=Source("system", "repair"), derived=fixes)
         result.mechanical = sorted(fixes)
         ctx.emit("write", "mechanical fixes: " + ", ".join(result.mechanical), keys=result.mechanical)
         doc = ctx.tx.view
@@ -307,11 +307,12 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
     elif verdict.name:
         result.rejected.append(f"name {verdict.name!r} (low confidence)")
     kind_proposed = verdict.kind
+    overruled = False
     if fields.fold(kind_proposed) == fields.fold(UNIDENTIFIABLE) and is_full_name(current_name) \
             and isinstance(li, str) and linkedin_profile(li):
         # a first-and-last name behind a LinkedIn profile URL identifies a person, whatever the
-        # agent made of an earlier Unidentifiable mark
-        kind_proposed = PERSON
+        # agent made of an earlier Unidentifiable mark: a rule's correction, so it supersedes
+        kind_proposed, overruled = PERSON, True
         result.note = f"{result.note} A full name and a LinkedIn profile identify a person.".strip()
     result.name_source = name_source
 
@@ -340,8 +341,8 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
                  key=m.key, move_to=m.move_to)
     if name:
         values["name"] = name
-    if values:
-        await ctx.stage(values)
+    if values:          # corrections of broken data supersede what is shown; the kind competes unless
+        await ctx.stage(values, derived=[k for k in values if k != KIND or overruled])   # a rule set it
     if moves:
         await ctx.stage(moves, append=set(moves))      # the text joins the target as new lines
     result.changes = ctx.tx.changes()

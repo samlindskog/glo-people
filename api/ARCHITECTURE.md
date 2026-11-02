@@ -21,8 +21,18 @@ Change{key, action: set | append | removed | normalized | flagged | property_cre
 Writers produce it (`people.Transaction`, through `update`, `create`, `update_norm`), tools return it
 (`ToolResult.changes`), assistants carry it beside their text (`AssistantResult.changes`), surfaces
 render it. `append` is a merge into the current value (list items unioned by `fields.fold`, a text
-line added unless already present). `note` is something that did *not* happen and why (a normalised
-value dropped on replay because its text changed concurrently); `assistants/review.describe` shows it.
+line added unless already present). `kept` is a value recorded in the history that does not replace
+the shown one. `note` is something that did *not* happen and why (a normalised value dropped on
+replay because its text changed concurrently); `assistants/review.describe` shows both.
+
+**Which entry is shown** (`history.pick`): `h` is append-only and `v` is the shown value chosen from it
+by the trust of each entry's source — a person's own edit (`ui`, `api`, `mcp`) outranks an assistant's
+finding (`agent`), which outranks a bulk upload (`import`, `legacy`) — newest first within a class. An
+entry flagged `derived` was computed from the value shown at the time (a list merge, a mechanical fix,
+the repair agent's correction of a broken name, enrich's completion of a bare name, a rule's correction
+of the kind) and supersedes the shown entry whatever its source, inheriting its trust. A weaker later
+write is recorded and reported as `kept`; writing an earlier value again from a human surface restores
+it. `python -m app.cli recompute-shown [--yes]` is the backfill (dry run reports the flips).
 
 ## Tools (level 2)
 
@@ -41,7 +51,8 @@ it made with `ctx.tx.record_catalog`, and narrates with `ctx.emit(kind, message,
 `agent`, `provider`, `write`, `note`, `error`; the invocation adds the final `result`). Attribution
 rule: an agent's verdict is written under the context's source (`agent <assistant>/<agent>`),
 deterministic code under `system/<tool>` (the parser `system/normalize`, mechanical fixes
-`system/repair`), a value copied from a file under its provenance (`import <file> row n`). It never
+`system/repair`), a value copied from a file under its provenance (`import <file> row n`); a merge or a
+correction of the shown value is staged `derived`. It never
 writes: the invocation's driver commits `people.Transaction` once after the tool returns (rebasing on
 a concurrent write), so `stop()` before that point leaves the record untouched and removes the
 unused properties and enum values the tool created. A tool that calls another tool hands it
@@ -89,7 +100,7 @@ the details in a "How it works" toggle on the card.
 | embed | batches | `EmbedOptions{fields, batch}`; everyone or `person_ids`; property-name vectors synced in `prepare` | `{text, vectors}` per batch |
 | reparse | batches | `ReparseOptions{force, batch}` | `{text, written}` per batch (`people.reparse`) |
 
-`python -m app.cli import [--dry-run --no-agent --no-review --map HEADER=KEY]|embed|normalize --all` create these runs (import = a merge run) and execute them in the CLI
+`python -m app.cli import [--dry-run --no-agent --no-review --map HEADER=KEY]|embed|normalize --all|recompute-shown [--yes]` create these runs (import = a merge run) and execute them in the CLI
 process (`worker = cli:<pid>`), printing the events; the API's scheduler leaves a run alone while
 its owner heartbeats. Other CLI commands: `dedupe [--yes]` (documents sharing a LinkedIn URL or email: same name merged, oldest kept; else listed), `properties` (the catalog with coverage), `drop-property
 <key>… [--yes]` (removes test leftovers: documents, vectors, registry; refuses spec keys),

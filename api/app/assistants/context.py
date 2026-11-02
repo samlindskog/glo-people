@@ -112,11 +112,13 @@ class AssistantDeps(AgentDeps):
         return result
 
     async def write(self, agent: str, values: dict[str, Any], *, append: Iterable[str] = (),
-                    source: Source | None = None) -> None:
+                    derived: Iterable[str] = (), source: Source | None = None) -> None:
         """Write `values` to the person's properties through the record tool (keys in `append`
-        are merged into the current value); the writer reports what actually changed (values
-        equal to the current one append nothing)."""
+        are merged into the current value; keys in `derived` were computed from the shown value
+        and supersede it); the writer reports what actually changed (values equal to the current
+        one append nothing)."""
         values = {k: v for k, v in values.items() if v not in (None, "", [])}
         if values:
             await self.tool(record.write, agent, source=source, values=values,
-                            append=[k for k in append if k in values])
+                            append=[k for k in append if k in values],
+                            derived=[k for k in derived if k in values])

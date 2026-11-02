@@ -93,13 +93,20 @@ class ToolContext:
         return list(budget.calls) if budget is not None else []
 
     async def stage(self, values: dict[str, Any], *, append: Iterable[str] = (),
-                    tier: str | None = None, src: Source | None = None) -> list[Change]:
+                    derived: Iterable[str] = (), tier: str | None = None,
+                    src: Source | None = None) -> list[Change]:
         """Stage values on the transaction under this context's source (or `src`) and report
-        each set, append or removal as a `write` event: the one way a tool writes a value."""
-        changes = await self.tx.set_values(values, src or self.source, tier=tier, append=append)
+        each set, append, removal or kept entry as a `write` event: the one way a tool writes a
+        value. Keys in `derived` were computed from the shown value (a correction, a completion)
+        and supersede it whatever its source."""
+        changes = await self.tx.set_values(values, src or self.source, tier=tier, append=append,
+                                           derived=derived)
         for c in changes:
             if c.action in ("set", "append", "removed"):
                 self.emit("write", f"{c.key}: {c.action}", key=c.key, action=c.action)
+            elif c.action == "kept":
+                self.emit("write", f"{c.key}: recorded, {c.previous!r} still shown", key=c.key,
+                          action=c.action)
         return changes
 
     async def stage_norm(self, parsed: dict[str, Any], src: Source | None = None) -> list[Change]:
