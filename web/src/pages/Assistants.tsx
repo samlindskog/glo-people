@@ -331,6 +331,43 @@ export function RunCard({
 }
 
 /** The expanded run: its live activity and its items. */
+/** After an upload: run another assistant over exactly the people the merge run created or matched. */
+function FollowUp({ run }: { run: AssistantRun }) {
+  const { can } = useAuth()
+  const navigate = useNavigate()
+  const qc = useQueryClient()
+  const [cap, setCap] = useState('50')
+  const start = useMutation({
+    mutationFn: (key: 'normalize' | 'enrich') =>
+      api.startRun(key, {
+        from_run: run.id,
+        options: key === 'enrich' ? { max_credits: Number(cap) || 50 } : { enrich: false },
+        label: `${key} ← run #${run.id}`,
+      }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ['assistant-runs'] })
+      navigate(`/assistants/${r.id}`)
+    },
+  })
+  if (!can('people:write')) return null
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm" data-testid="follow-up">
+      <span className="text-slate-500">These people:</span>
+      <button type="button" className="btn-secondary" disabled={start.isPending} onClick={() => start.mutate('normalize')}>
+        Normalise
+      </button>
+      <button type="button" className="btn-secondary" disabled={start.isPending} onClick={() => start.mutate('enrich')}>
+        Enrich
+      </button>
+      <label className="flex items-center gap-1 text-xs text-slate-500">
+        credit cap
+        <input className="input w-20" aria-label="Enrich credit cap" value={cap} onChange={(e) => setCap(e.target.value)} />
+      </label>
+      <ErrorNote error={start.error} />
+    </div>
+  )
+}
+
 function RunDetail({ run, onFinished }: { run: AssistantRun; onFinished: () => void }) {
   const live = LIVE.includes(run.status)
   const { events, done } = useRunEvents(run.id)
@@ -357,6 +394,7 @@ function RunDetail({ run, onFinished }: { run: AssistantRun; onFinished: () => v
         </p>
       )}
       <ActivityFeed events={events} empty={live ? 'Waiting for activity…' : 'No activity recorded.'} />
+      {run.workflow === 'merge' && !live && run.done > 0 && <FollowUp run={run} />}
       <RunItemsTable items={items.data ?? []} />
     </div>
   )

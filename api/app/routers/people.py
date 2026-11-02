@@ -50,6 +50,20 @@ def _bad_request(e: Exception) -> HTTPException:
 
 # --- people -------------------------------------------------------------------------------------
 
+@router.get("/people/find")
+async def find_people(_: Reader, name: str | None = None, email: str | None = None,
+                      phone: str | None = None, linkedin: str | None = None,
+                      github: str | None = None) -> dict:
+    """Who a record is: the people sharing an identifier (email, phone, LinkedIn or GitHub URL,
+    compared on canonical forms) or the name, with the merge assistant's decision (matched by
+    what, ambiguous between whom, or nobody). The deterministic lookup before a search."""
+    values = {k: v for k, v in {"name": name, "email": email, "phone_number": phone,
+                                "linkedin": linkedin, "github": github}.items() if v}
+    if not values:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "give a name or an identifier")
+    return (await importer.match_record(values)).public()
+
+
 @router.get("/people/{person_id}")
 async def get_person(person_id: str, _: Reader) -> dict:
     try:

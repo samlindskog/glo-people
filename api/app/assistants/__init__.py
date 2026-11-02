@@ -2,7 +2,7 @@
 
 An assistant composes tools into something a person asks for and answers in text meant for a
 human, plus the normalised list of `changes` it caused through the tools, so every surface can
-show both. Every assistant runs as a run (`assistants.runner`): `enrich` and `normalize` per
+show both. Every assistant runs as a run (`assistants.runner`): `enrich`, `normalize` and `update` per
 person, `merge`, `embed` and `reparse` over batches, `ask` as one item whose result is the
 answer (MCP also calls `ask()` directly for a synchronous answer).
 """
@@ -22,7 +22,7 @@ class AssistantResult(BaseModel):
 
 def load_all() -> None:
     """Import every assistant so it registers itself."""
-    from app.assistants import ask, embed, enrich, merge, normalize, reparse  # noqa: F401
+    from app.assistants import ask, embed, enrich, merge, normalize, reparse, update  # noqa: F401
 
 
 __all__ = ["REGISTRY", "AssistantResult", "AssistantSpec", "Budget", "Change", "StopRun",

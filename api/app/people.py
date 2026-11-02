@@ -99,9 +99,9 @@ def public(doc: dict, include_history: bool = False) -> dict:
     return out
 
 
-async def get(person_id: str) -> dict | None:
+async def get(person_id: str, include_history: bool = True) -> dict | None:
     doc = await db().people.find_one({"_id": _oid(person_id)})
-    return public(doc, include_history=True) if doc else None
+    return public(doc, include_history=include_history) if doc else None
 
 
 async def fetch(ids: list[str], projection: dict | None = None) -> list[dict]:

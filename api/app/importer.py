@@ -304,7 +304,8 @@ class Match:
 
 
 def _summary(doc: dict, hits: list[str]) -> dict:
-    return {"person_id": str(doc["_id"]), "name": history.current(doc.get("name")), "keys": hits}
+    return {"person_id": str(doc["_id"]), "name": history.current(doc.get("name")),
+            "tier": doc.get("tier"), "keys": hits}
 
 
 def _domain(email: Any) -> str | None:

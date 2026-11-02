@@ -138,7 +138,15 @@ export const api = {
   assistants: () => request<AssistantSpec[]>('GET', '/api/assistants'),
   startRun: (
     key: string,
-    body: { person_ids?: string[]; all_with_field?: string; tier?: Tier | null; options?: Record<string, unknown>; label?: string },
+    body: {
+      person_ids?: string[]
+      from_run?: number
+      where?: { field: string; op: string; value?: unknown }[]
+      all_with_field?: string
+      tier?: Tier | null
+      options?: Record<string, unknown>
+      label?: string
+    },
   ) => request<AssistantRun>('POST', `/api/assistants/${key}/runs`, body),
   runs: (params: { limit?: number; offset?: number; status?: 'active' | RunStatus } = {}) =>
     request<Page<AssistantRun>>('GET', `/api/assistants/runs${qs(params)}`),

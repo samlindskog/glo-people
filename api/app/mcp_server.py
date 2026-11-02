@@ -12,7 +12,7 @@ from pydantic import Field
 from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import activity, auth, fields, properties
+from app import activity, auth, fields, importer, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, merge, runner
 from app.assistants.ask import ask
@@ -44,27 +44,35 @@ WRITE_TOOLS = frozenset({"create_person", "merge_person", "update_person", "dele
                          "resume_run", "stop_run"})
 
 INSTRUCTIONS = """\
-Search and read the GLO people database. People are documents in two tiers ('member' and
-'plus_one') made of properties. Call list_properties first to see which properties exist, their
-type, canonical values (enum types), coverage, and which are embeddable for semantic search.
-search_people combines literal per-property filters (AND) with optional semantic similarity over
-one or more embeddable properties, aggregated by avg or max and cut off at a threshold (cosine
-similarity; default 0.4. Unrelated text scores around 0.2-0.3, so 0.35-0.5 is the useful range).
-A property's semantic score is its best-matching passage across its history. Values are never
-overwritten: create_person and update_person append time-stamped entries (with their source) to
-each property's history, and the latest entry is the current value; get_person returns the
-current values plus `history`. Only existing properties can be written directly; new properties
-come only from store_about_person.
+The GLO people database: people in tiers ('member', 'plus_one', 'plus_two'), each a document of
+properties whose values are never overwritten (every write appends a time-stamped, sourced entry to
+the property's history). You act for a person who is not technical: do the lookups, previews and
+follow-ups yourself and report in plain words.
 
-Two kinds of operation. Tools act on one record, one shot, and return structured results for
-programs: search_people (run a search), plan_search (question → an executable search request),
-store_about_person (file a passage into the person's properties; returns every change),
-normalize_person (typed values; returns every change); while they run, their activity arrives as
-progress notifications. Assistants answer in text for a human (ask_people: plan, search, answer
-with citations) or run over many records as a run you can follow, pause, resume with other
-options and stop: list_assistants, start_assistant, get_run, pause_run, resume_run, stop_run.
-Pass `agent` when you write on behalf of an automated agent: the entry stays attributed to your
-key (kind "mcp") with the agent name noted in its reference."""
+Playbook
+- Finding someone: find_people first (an email, phone, LinkedIn or GitHub URL, or a name: exact,
+  canonical, deterministic; it says matched / ambiguous / nobody). search_people is for descriptions
+  ("fintech founders in Lagos"): literal per-property filters (AND) plus semantic similarity over
+  embeddable properties (cosine; default threshold 0.4, 0.35-0.5 is the useful range). Call
+  list_properties once to see the properties, their types and canonical values. get_person reads one
+  record; pass include_history=false unless you need the entries.
+- Adding information: one record → merge_person (matches a person by identifier or unique name, else
+  creates one; known values are written as entered, long prose and unknown keys go to the storage
+  agent; use dry_run first when unsure); several records → start_assistant("merge", records=[…]).
+  Large CSV files are uploaded on the web page or with the CLI, not through this interface. A free
+  text about a known person → store_about_person.
+- Following up on an upload: the import answers with a run id; start_assistant(key, from_run=<that
+  id>) runs another assistant over exactly the people it created or matched: "normalize" (typed values,
+  record kind, broken names; free), "enrich" (data providers and sites; costs credits — always pass
+  options.max_credits), "update" (the same values or tier on all of them, e.g. options={"tier":
+  "plus_two"}; dry_run first). where=[filters] selects by properties instead; person_ids by id.
+  wait_seconds lets a small run finish inside the call; otherwise follow it with get_run.
+- Fixing a value: update_person appends the right value (null removes); to restore an earlier value,
+  write it again — the history keeps every version with its source. normalize_person re-parses one
+  record and repairs its identity data.
+- Before any bulk write, dry_run; after one, read the run's items (get_run) and summarise counts.
+Pass `agent` when you write on behalf of another automated agent: the entry stays attributed to your
+key (kind "mcp") with that name in its reference."""
 
 
 class GloMCP(MCPServer):
@@ -125,6 +133,9 @@ async def search_people(
                     Field(description="'score' or {field, dir}")] = "score",
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 25,
     page: Annotated[int, Field(ge=1)] = 1,
+    fields: Annotated[list[str] | None,
+                      Field(description="Only these properties in each result (id, tier, name and "
+                                        "the scores always come); default: every current value")] = None,
 ) -> dict:
     """Tool: search people. Same parameters as the web UI and POST /api/search.
 
@@ -147,22 +158,54 @@ async def search_people(
     resp.search_id = await record_search(principal, req, resp, "mcp")
     await activity.record("mcp.search", principal, str(resp.search_id),
                           {**describe(req), "total": resp.total})
-    return json.loads(resp.model_dump_json())
+    out = json.loads(resp.model_dump_json())
+    if fields:
+        keep = {"id", "tier", "name", "score", "field_scores", *fields}
+        out["results"] = [{k: v for k, v in r.items() if k in keep} for r in out["results"]]
+    return out
 
 
 @mcp.tool()
-async def get_person(ctx: Context, id: Annotated[str, Field(description="Person id")]) -> dict:
-    """Fetch one person by id: current field values plus `history`
+async def get_person(ctx: Context, id: Annotated[str, Field(description="Person id")],
+                     include_history: Annotated[bool, Field(description="Also return every "
+                                                                        "property's entries")] = True
+                     ) -> dict:
+    """Fetch one person by id: current field values plus, by default, `history`
     ({field: [{v, ts, src}], oldest first})."""
     principal = await _principal(ctx, "people:read")
     try:
-        person = await people_svc.get(id)
+        person = await people_svc.get(id, include_history=include_history)
     except people_svc.PersonError as e:
         raise ToolError(str(e)) from e
     if not person:
         raise ToolError("person not found")
     await activity.record("mcp.get_person", principal, id)
     return person
+
+
+@mcp.tool()
+async def find_people(
+    ctx: Context,
+    name: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    linkedin: Annotated[str | None, Field(description="LinkedIn profile URL, any spelling")] = None,
+    github: str | None = None,
+) -> dict:
+    """Tool: who a record is. Compares the given identifiers (email, phone, LinkedIn or GitHub URL,
+    on canonical forms) and the name against every person and answers like the merge assistant
+    would: decision `matched` (person_id, tier: identifier | name | name+context, keys), `ambiguous`
+    (candidates to choose between) or `new` (nobody). Deterministic and exact; use it before
+    search_people when you have a name or an identifier."""
+    principal = await _principal(ctx, "people:read")
+    values = {k: v for k, v in {"name": name, "email": email, "phone_number": phone,
+                                "linkedin": linkedin, "github": github}.items() if v}
+    if not values:
+        raise ToolError("give a name or an identifier (email, phone, linkedin, github)")
+    match = await importer.match_record(values)
+    await activity.record("mcp.find_people", principal, match.person_id or "-",
+                          {"decision": match.decision, "keys": sorted(values)})
+    return match.public()
 
 
 @mcp.tool()
@@ -381,25 +424,36 @@ async def start_assistant(
     ctx: Context,
     key: Annotated[str, Field(description="The assistant key (see list_assistants)")],
     person_ids: Annotated[list[str] | None, Field(description="The people to run it for")] = None,
+    from_run: Annotated[int | None, Field(description="Or: the people another run touched (the "
+                                                      "merge run of an upload: everyone it "
+                                                      "created or matched)")] = None,
+    where: Annotated[list[FieldFilter] | None,
+                     Field(description="Or: everyone matching these filters (ANDed; `tier` "
+                                       "narrows)")] = None,
     all_with_field: Annotated[str | None, Field(description="Or: everyone whose property is set")] = None,
     records: Annotated[list[dict[str, Any]] | None,
                        Field(description="Or, for merge: the incoming records (property key → "
                                          "value each)")] = None,
-    tier: Literal["member", "plus_one"] | None = None,
+    tier: fields.Tier | None = None,
     options: Annotated[dict[str, Any] | None, Field(description="Per the options schema")] = None,
     label: Annotated[str | None, Field(description="A name for the run")] = None,
+    wait_seconds: Annotated[int, Field(ge=0, le=120,
+                                       description="Block up to this long for the run to finish "
+                                                   "and return it done, with its items")] = 0,
 ) -> dict:
-    """Assistant: start a run (requires people:write). Returns the run; follow it with get_run,
-    pause_run / resume_run / stop_run control it. A run pauses by itself when it reaches its
-    credit cap (resume with a higher max_credits) or when the Firecrawl account is empty."""
+    """Assistant: start a run (requires people:write). Returns the run with its items; follow it
+    with get_run, pause_run / resume_run / stop_run control it. A run pauses by itself when it
+    reaches its credit cap (resume with a higher max_credits) or when the Firecrawl account is
+    empty."""
     from app.routers.assistants import RunRequest, _people_items
     spec = REGISTRY.get(key)
     if spec is None:
-        raise ToolError(f"unknown assistant {key!r}")
+        raise ToolError(f"unknown assistant {key!r}; list_assistants names them")
     principal = await _principal(ctx, spec.permission)
     try:
-        body = RunRequest(person_ids=person_ids, all_with_field=all_with_field, records=records,
-                          tier=tier, options=options or {}, label=label)
+        body = RunRequest(person_ids=person_ids, from_run=from_run, where=where,
+                          all_with_field=all_with_field, records=records, tier=tier,
+                          options=options or {}, label=label)
         opts = spec.options_model.model_validate(body.options)
         if spec.scope == "people":
             items = await _people_items(body)
@@ -411,27 +465,53 @@ async def start_assistant(
         raise ToolError(getattr(e, "detail", str(e))) from e
     label = label or (items[0].get("label") if len(items) == 1 else None)
     run = await runner.create_run(spec, principal, items, {
-        "options": opts.model_dump(mode="json"), "selector": all_with_field, "tier": tier},
-        label=label)
+        "options": opts.model_dump(mode="json"), "selector": all_with_field, "from_run": from_run,
+        "where": [f.model_dump() for f in where or []] or None, "tier": tier}, label=label)
     await runner.start(run["id"], principal)
-    return await runner.get_run(run["id"])
+    if wait_seconds:
+        try:
+            await runner.wait(run["id"], timeout=wait_seconds)
+        except TimeoutError:
+            pass                                   # still running: the caller follows it with get_run
+    return await _run_view(run["id"])
 
 
-@mcp.tool()
-async def get_run(ctx: Context, run_id: int,
-                  events: Annotated[int, Field(ge=0, le=200, description="Latest events")] = 20) -> dict:
-    """Assistant: a run's state (status, counts, credits, pause reason), its items' statuses and
-    its latest activity."""
-    await _principal(ctx, "people:read")
+_RESULT_KEYS = ("person_id", "created", "written", "filed", "kept", "text", "dry_run")
+
+
+def _item_view(it: dict) -> dict:
+    """An item for an agent: its state plus the result's summary, not the full result."""
+    out = {k: it.get(k) for k in ("id", "person_id", "label", "status", "credits", "error")}
+    res = it.get("result") or {}
+    summary = {k: res[k] for k in _RESULT_KEYS if k in res}
+    if isinstance(res.get("match"), dict):
+        summary["match"] = {k: res["match"].get(k) for k in ("decision", "tier", "keys")}
+        if res["match"].get("decision") == "ambiguous":
+            summary["match"]["candidates"] = res["match"].get("candidates")
+    if summary:
+        out["result"] = summary
+    return out
+
+
+async def _run_view(run_id: int, events: int = 0) -> dict:
     run = await runner.get_run(run_id)
     if run is None:
         raise ToolError("run not found")
     items = await runner.get_items(run_id, limit=500)
     recent = (await runner.events(run_id, limit=100_000))[-events:] if events else []
-    return {**run, "items": [{k: it.get(k) for k in ("id", "person_id", "label", "status",
-                                                     "credits", "error")} for it in items],
+    return {**run, "items": [_item_view(it) for it in items],
             "events": [{k: e.get(k) for k in ("id", "ts", "kind", "message", "item_id")}
                        for e in recent]}
+
+
+@mcp.tool()
+async def get_run(ctx: Context, run_id: int,
+                  events: Annotated[int, Field(ge=0, le=200, description="Latest events")] = 20) -> dict:
+    """Assistant: a run's state (status, counts, credits, pause reason), its items (status, the
+    person each one created or matched, what it wrote, its one-line text) and its latest
+    activity."""
+    await _principal(ctx, "people:read")
+    return await _run_view(run_id, events)
 
 
 @mcp.tool()

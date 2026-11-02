@@ -3,13 +3,13 @@ or everyone with a property, follow runs (paged items, Server-Sent Events), paus
 other options, stop."""
 
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationError
 from sse_starlette.sse import EventSourceResponse
 
-from app import people
+from app import fields, people
 from app.assistants import REGISTRY, runner
 from app.assistants.base import ItemSpec
 from app.auth import Principal, require
@@ -25,12 +25,20 @@ PING_SECONDS = 15
 
 
 class RunRequest(BaseModel):
+    """Who a run is for: exactly one of the selectors (`records` for merge)."""
+
     person_ids: list[str] | None = Field(None, max_length=MAX_BULK)
-    all_with_field: str | None = Field(None, description="Run for everyone whose field is set")
+    from_run: int | None = Field(None, description="The people another run touched (its items "
+                                                   "with a person: created, matched or processed), "
+                                                   "e.g. the merge run of an upload")
+    where: list[FieldFilter] | None = Field(None, max_length=20,
+                                            description="Everyone matching these filters (ANDed; "
+                                                        "`tier` narrows further)")
+    all_with_field: str | None = Field(None, description="Everyone whose property is set")
     records: list[dict[str, Any]] | None = Field(None, max_length=MAX_BULK,
                                                  description="Incoming records for the merge "
                                                              "assistant (property key → value)")
-    tier: Literal["member", "plus_one"] | None = None
+    tier: fields.Tier | None = None
     options: dict[str, Any] = Field(default_factory=dict)
     label: str | None = Field(None, max_length=200)
 
@@ -47,15 +55,22 @@ async def list_assistants(_: Reader) -> list[dict]:
 
 
 async def _people_items(body: RunRequest) -> list[ItemSpec]:
+    chosen = [k for k in ("person_ids", "from_run", "where", "all_with_field")
+              if getattr(body, k) not in (None, [], "")]
+    if len(chosen) != 1:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            "exactly one of person_ids, from_run, where or all_with_field is required")
     if body.person_ids:
         ids = list(dict.fromkeys(pid for pid in body.person_ids if pid))
-    elif body.all_with_field:
-        req = SearchRequest(tier=body.tier, filters=[
-            FieldFilter(field=body.all_with_field, op="exists", value=True)], limit=1)
-        ids = await people.find_ids(await mongo_query(req), limit=MAX_BULK)
+    elif body.from_run is not None:
+        if await runner.get_run(body.from_run) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"run {body.from_run} not found")
+        items = await runner.get_items(body.from_run, limit=MAX_BULK)
+        ids = list(dict.fromkeys(it["person_id"] for it in items if it.get("person_id")))
     else:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
-                            "person_ids or all_with_field is required")
+        filters = body.where or [FieldFilter(field=body.all_with_field, op="exists", value=True)]
+        req = SearchRequest(tier=body.tier, filters=filters, limit=1)
+        ids = await people.find_ids(await mongo_query(req), limit=MAX_BULK)
     if not ids:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no people selected")
     names = {str(d["_id"]): (d.get("name") or {}).get("v") for d in
@@ -84,6 +99,7 @@ async def start_run(key: str, body: RunRequest, principal: Reader) -> dict:
     label = body.label or (items[0].get("label") if len(items) == 1 else None)
     run = await runner.create_run(spec, principal, items, {
         "options": options.model_dump(mode="json"), "selector": body.all_with_field,
+        "from_run": body.from_run, "where": [f.model_dump() for f in body.where or []] or None,
         "tier": body.tier}, label=label)
     await runner.start(run["id"], principal)
     return await runner.get_run(run["id"])
