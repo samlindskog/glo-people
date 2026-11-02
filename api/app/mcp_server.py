@@ -18,6 +18,7 @@ from app import agent_log, auth, fields, importer, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, merge, runner
 from app.assistants.ask import ask
+from app.assistants.enrich.models import EnrichOptions
 from app.assistants.merge import MergeOptions
 from app.auth import Principal
 from app.config import get_settings
@@ -41,7 +42,7 @@ from app.tools.store import StoreOptions
 
 log = logging.getLogger(__name__)
 
-WRITE_TOOLS = frozenset({"create_person", "merge_person", "merge_people", "update_person", "delete_person",
+WRITE_TOOLS = frozenset({"create_person", "merge_person", "merge_people", "enrich_person", "update_person", "delete_person",
                          "store_about_person", "normalize_person", "start_assistant", "pause_run",
                          "resume_run", "stop_run"})
 
@@ -63,6 +64,8 @@ Playbook
   agent; use dry_run first when unsure); several records → start_assistant("merge", records=[…]).
   Large CSV files are uploaded on the web page or with the CLI, not through this interface. A free
   text about a known person → store_about_person.
+- Enriching: one person → enrich_person (LinkedIn profile through the data providers, their site,
+  GitHub, the company; costs credits, capped by options.max_credits, 30 by default); many → see below.
 - Following up on an upload: the import answers with a run id; start_assistant(key, from_run=<that
   id>) runs another assistant over exactly the people it created or matched: "normalize" (typed values,
   record kind, broken names; free), "enrich" (data providers and sites; costs credits — always pass
@@ -288,6 +291,39 @@ async def merge_person(
                                      Source.for_mcp(principal))
     except (ValueError, TypeError) as e:
         raise ToolError(str(e)) from e
+
+
+@mcp.tool()
+async def enrich_person(
+    ctx: Context,
+    id: Annotated[str, Field(description="Person id")],
+    options: Annotated[EnrichOptions | None,
+                       Field(description="max_credits (default 30 for one person), providers, "
+                                         "provider_policy, refresh, max_new_properties")] = None,
+) -> dict:
+    """Assistant: enrich one person now (requires people:write; costs Firecrawl credits, capped
+    by options.max_credits). Resolves their LinkedIn profile through the data providers, reads
+    their own site, summarises a known GitHub account and the company's site, files the profile's
+    facts through the storage agent and closes with the review. A person enriched recently is
+    skipped unless options.refresh. Returns what was written and filed, the providers asked, the
+    credits spent, the review and every change. For many people use start_assistant("enrich", …)."""
+    from app.assistants import enrich as enrich_assistant
+    principal = await _principal(ctx, "people:write")
+    opts = options or EnrichOptions(max_credits=30)
+    person = await people_svc.get(id, include_history=False)
+    if person is None:
+        raise ToolError("person not found")
+    items = [{"person_id": id, "payload": {}, "label": person.get("name") or id}]
+    try:
+        res = await runner.run_one(enrich_assistant.SPEC, principal, items,
+                                   {"options": opts.model_dump(mode="json")})
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    changes = res.get("changes") or []
+    written = sorted({c["key"] for c in changes if c.get("action") in ("set", "append")})
+    keep = ("run_id", "item_id", "status", "error", "credits", "text", "linkedin", "providers",
+            "storage", "stored", "not_found", "skipped", "review", "kept")
+    return {**{k: res.get(k) for k in keep if k in res}, "written": written, "changes": changes}
 
 
 @mcp.tool()

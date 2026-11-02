@@ -234,13 +234,8 @@ async def merge_one(record: dict[str, Any], options: MergeOptions, principal: Pr
     items = await prepare({"records": [record]}, options)
     if source is not None:
         items[0]["payload"]["source"] = source.doc()
-    run = await runner.create_run(SPEC, principal, items, {"options": options.model_dump(mode="json")},
-                                  label=items[0].get("label"))
-    await runner.start(run["id"], principal)
-    await runner.wait(run["id"], timeout)
-    item = (await runner.get_items(run["id"]))[0]
-    return {**(item.get("result") or {}), "run_id": run["id"], "item_id": item["id"],
-            "status": item["status"], "error": item.get("error")}
+    return await runner.run_one(SPEC, principal, items, {"options": options.model_dump(mode="json")},
+                                timeout=timeout)
 
 
 DETAILS = """\

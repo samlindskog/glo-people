@@ -810,6 +810,23 @@ async def adopt(all_api_runs: bool) -> list[int]:
     return await scheduler().adopt(all_api_runs)
 
 
+async def run_one(spec: AssistantSpec, principal: Principal | None, items: list[ItemSpec],
+                  params: dict[str, Any], *, label: str | None = None,
+                  timeout: float = 120) -> dict[str, Any]:
+    """A run of one item, started and waited for: how the synchronous surfaces (REST, MCP) run an
+    assistant on one record. Returns the item's result with the run and item ids and the item's
+    status (and error); still `running` when `timeout` passed first."""
+    run = await create_run(spec, principal, items, params, label=label or items[0].get("label"))
+    await start(run["id"], principal)
+    try:
+        await wait(run["id"], timeout)
+    except TimeoutError:
+        pass
+    item = (await get_items(run["id"]))[0]
+    return {**(item.get("result") or {}), "run_id": run["id"], "item_id": item["id"],
+            "status": item["status"], "error": item.get("error"), "credits": item.get("credits")}
+
+
 async def wait(run_id: int, timeout: float = 120) -> dict:
     """Until the run stops executing: finished or paused (tests, the CLI)."""
     deadline = asyncio.get_running_loop().time() + timeout

@@ -635,3 +635,20 @@ async def test_unconfigured_firecrawl_fails_fast(writer, people, monkeypatch):
     assert item["status"] == "failed" and "FIRECRAWL_API_KEY" in item["error"]
     assert run["failed"] == 1 and model_calls == {}
 
+
+async def test_mcp_enrich_person_runs_the_ladder_once(writer, client_factory, people):
+    from tests.test_mcp import call, init
+    key = (await writer.post("/api/api-keys", json={"name": "w"})).json()["key"]
+    c = await client_factory()
+    await init(c, key)
+    err, res = await call(c, key, "enrich_person", {"id": people["Ada Okafor"],
+                                                   "options": {"providers": ["fullenrich"], "max_credits": 30}})
+    assert not err, res
+    assert res["status"] == "done" and res["credits"] > 0 and res["linkedin"] == "matched"
+    assert "linkedin_headline" in res["written"] and res["review"]["kind"] == "Person"
+    assert res["run_id"] and res["text"].startswith("LinkedIn profile matched")
+    # the same person again is a TTL skip, free
+    err, again = await call(c, key, "enrich_person", {"id": people["Ada Okafor"]})
+    assert not err and again["status"] == "skipped" and again["credits"] == 0
+    err, _ = await call(c, key, "enrich_person", {"id": "000000000000000000000000"})
+    assert err

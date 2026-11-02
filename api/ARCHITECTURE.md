@@ -146,7 +146,7 @@ blocks for the result), `GET /api/invocations/{id}` has its state and result, `G
 `Last-Event-ID`), `POST /api/invocations/{id}/stop` stops it before the commit (409 when too late).
 MCP mirrors them: `search_people`, `plan_search`, `store_about_person`, `normalize_person` return
 tool results and forward the activity as progress notifications while they run; `ask_people`
-returns text; `find_people` is the identity lookup; `merge_people` folds a duplicate; `merge_person` merges one record (a one-item merge run, waited for); `list_assistants`,
+returns text; `find_people` is the identity lookup; `merge_people` folds a duplicate; `merge_person` merges one record and `enrich_person` enriches one (each a one-item run waited for, `runner.run_one`); `list_assistants`,
 `start_assistant` (the same selectors, `records` for merge, `wait_seconds` to return the run finished), `get_run` (items with a compact result summary), `pause_run`, `resume_run`,
 `stop_run` drive runs. The server instructions are a playbook for an agent acting for a non-technical person. `POST /api/assistants/{key}/runs` ignores empty ids in `person_ids` and
 answers 422 when none is left.
