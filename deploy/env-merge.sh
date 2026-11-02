@@ -5,6 +5,9 @@
 set -eu
 src=$1; dst=$2
 [ -f "$dst" ] || { umask 077; : > "$dst"; }
+# the file stays the deploy user's (CI's deploy shell rewrites IMAGE_TAG in it on every release)
+owner=$(stat -c '%u:%g' "$dst" 2>/dev/null || stat -f '%u:%g' "$dst")
+mode=$(stat -c '%a' "$dst" 2>/dev/null || stat -f '%Lp' "$dst")
 tmp=$(mktemp)
 cp "$dst" "$tmp"
 while IFS= read -r line || [ -n "$line" ]; do
@@ -17,5 +20,5 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
   echo "set $key"
 done < "$src"
-install -m 600 "$tmp" "$dst"
+install -o "${owner%%:*}" -g "${owner##*:}" -m "${mode:-600}" "$tmp" "$dst"
 rm -f "$tmp"
