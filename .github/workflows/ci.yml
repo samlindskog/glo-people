@@ -70,6 +70,19 @@ jobs:
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           docker build -f api/Dockerfile --target prod -t glo-people-api:$TAG .
           docker build -f web/Dockerfile -t glo-people-web:$TAG .
+      - name: Check the nginx config
+        # The image's config includes files that exist only on the server (certs, the Cloudflare
+        # real-ip list, the AOP switch): stub them and let nginx parse the whole thing.
+        run: |
+          mkdir -p /tmp/nginx-stub/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=stub -days 1 \
+            -keyout /tmp/nginx-stub/certs/origin.key -out /tmp/nginx-stub/certs/origin.pem 2>/dev/null
+          cp /tmp/nginx-stub/certs/origin.pem /tmp/nginx-stub/certs/aop-ca.pem
+          echo "set_real_ip_from 127.0.0.1;" > /tmp/nginx-stub/cloudflare-realip.conf
+          echo "ssl_verify_client off;" > /tmp/nginx-stub/aop.conf
+          docker run --rm -v /tmp/nginx-stub/certs:/etc/nginx/certs:ro \
+            -v /tmp/nginx-stub/cloudflare-realip.conf:/etc/nginx/cloudflare-realip.conf:ro \
+            -v /tmp/nginx-stub/aop.conf:/etc/nginx/aop.conf:ro glo-people-web:$TAG nginx -t
       # Secrets reach the shell through env, never by ${{ }} interpolation into the script body.
       # DEPLOY_PORT is the deploy-only sshd port, which the host firewalls to the GitHub Actions
       # ranges, so DEPLOY_KNOWN_HOSTS must carry the `[host]:port` form of the host key.

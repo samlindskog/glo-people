@@ -19,6 +19,14 @@ services:
       - ./nginx/aop.conf:/etc/nginx/aop.conf:ro
     depends_on:
       api: {condition: service_healthy}
+    # A config error leaves the container restarting; without a healthcheck `up --wait` would
+    # still return success and the deploy would look green while the site is down.
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
     mem_limit: 64m
 
