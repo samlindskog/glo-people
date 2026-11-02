@@ -282,10 +282,24 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
         result.changes = ctx.tx.changes()
         return result
 
+    current_name = str(_cur(doc, "name") or "")
+    li = _cur(doc, "linkedin")
+    if _cur(doc, KIND) is None and not result.signals and is_full_name(current_name) \
+            and isinstance(li, str) and linkedin_profile(li):
+        # the deterministic case, no model call: a first-and-last name behind a LinkedIn profile
+        # URL with nothing looking wrong identifies a person (an import of thousands of such rows
+        # must not consult the agent for each)
+        await ctx.stage({KIND: PERSON})
+        result.kind, result.name_source = PERSON, "unchanged"
+        result.note = "A full name and a LinkedIn profile identify a person."
+        result.changes = ctx.tx.changes()
+        ctx.emit("step", f"record kind: {PERSON} (full name behind a LinkedIn profile)",
+                 record_kind=PERSON)
+        return result
+
     result.agent_called = True
     verdict = await _judge(doc, result.signals, opts, ctx.emit)
     result.confidence, result.note = verdict.confidence, verdict.note
-    current_name = str(_cur(doc, "name") or "")
     name: str | None = None
     name_source: NameSource = "unchanged"
     if verdict.name and verdict.confidence != "low":
@@ -293,7 +307,6 @@ async def repair(ctx: ToolContext, opts: RepairOptions | None = None) -> RepairR
     elif verdict.name:
         result.rejected.append(f"name {verdict.name!r} (low confidence)")
     kind_proposed = verdict.kind
-    li = _cur(doc, "linkedin")
     if fields.fold(kind_proposed) == fields.fold(UNIDENTIFIABLE) and is_full_name(current_name) \
             and isinstance(li, str) and linkedin_profile(li):
         # a first-and-last name behind a LinkedIn profile URL identifies a person, whatever the

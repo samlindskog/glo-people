@@ -85,12 +85,18 @@ async def _run(spec_key: str, items: list, params: dict, label: str) -> dict:
     return run
 
 
-async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, review: bool) -> None:
+async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, review: bool,
+                      columns: dict[str, str] | None = None) -> None:
     """Merge a CSV's rows into the people database (a merge run executed here)."""
     await mongo.ensure_indexes()
     text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
     options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
-    parsed, created, items = await merge.prepare_csv(text, Path(path).name, dry_run=dry_run)
+    parsed, created, items = await merge.prepare_csv(text, Path(path).name, dry_run=dry_run,
+                                                     columns=columns)
+    mapped = [c for c in parsed.columns if c.get("alias") or c["role"] != "field"]
+    if mapped:
+        print("columns: " + ", ".join(f"{c['header']} -> {c['key'] if c['role'] == 'field' else c['role']}"
+                                      for c in mapped))
     print(f"{path}: {parsed.total} rows, {len(parsed.rows)} with a name, {parsed.skipped} skipped")
     if created:
         print(f"new properties: {', '.join(created)}")
@@ -112,6 +118,29 @@ async def import_file(path: str, tier: str, *, dry_run: bool, agent: bool, revie
     verb = "would be " if dry_run else ""
     print(f"{totals['created']} {verb}created, {totals['matched']} {verb}matched, "
           f"{totals['skipped']} skipped (ambiguous or no name), {totals['failed']} failed")
+
+
+async def dedupe(apply: bool) -> None:
+    """Documents sharing a LinkedIn URL or an email: merge the groups whose names agree (the
+    oldest document kept), list the rest. Without --yes only lists."""
+    await mongo.ensure_indexes()
+    wiring.register_write_hooks()
+    groups = await people.duplicate_groups()
+    print(f"{len(groups)} duplicate group(s)")
+    merged = listed = 0
+    for g in groups:
+        who = "; ".join(f"{p['name']} ({p['id']}, {p['tier']})" for p in g["people"])
+        tag = "same name" if g["same_name"] else "DIFFERENT names"
+        print(f"- {g['key']} {g['value']!r} [{tag}]: {who}")
+        if not g["same_name"] or not apply:
+            listed += 1
+            continue
+        keep, *drops = g["ids"]
+        for drop in drops:
+            res = await people.merge_documents(None, keep, drop)
+            merged += 1
+            print(f"    merged {drop} into {keep}: {', '.join(c.key for c in res.changes) or 'nothing new'}")
+    print(f"{merged} merged, {listed} listed" + ("" if apply else " (dry run; --yes to merge the same-name groups)"))
 
 
 async def embed(only: list[str] | None) -> None:
@@ -371,6 +400,11 @@ def main() -> None:
     im.add_argument("--no-agent", action="store_true",
                     help="write every known value as entered; nothing goes to the storage agent")
     im.add_argument("--no-review", action="store_true", help="skip the closing review")
+    im.add_argument("--map", action="append", default=[], metavar="HEADER=KEY",
+                    help="map a column to a property key, 'id' or 'skip' (repeatable)")
+    dd = sub.add_parser("dedupe", help="merge documents that share a LinkedIn URL or an email "
+                                       "(same name: merged, oldest kept; else listed)")
+    dd.add_argument("--yes", action="store_true", help="without it: list the groups only")
     em = sub.add_parser("embed", help="sync property-name vectors and backfill passage vectors")
     em.add_argument("--field", action="append", help="only these fields (repeatable)")
     sub.add_parser("properties", help="the property catalog with coverage")
@@ -406,8 +440,12 @@ def main() -> None:
                 case "set-password":
                     await set_password(args.username.lower(), args.password)
                 case "import":
+                    mapping = dict(m.split("=", 1) for m in args.map if "=" in m) or None
                     await import_file(args.file, args.tier, dry_run=args.dry_run,
-                                      agent=not args.no_agent, review=not args.no_review)
+                                      agent=not args.no_agent, review=not args.no_review,
+                                      columns=mapping)
+                case "dedupe":
+                    await dedupe(args.yes)
                 case "embed":
                     await embed(args.field)
                 case "properties":

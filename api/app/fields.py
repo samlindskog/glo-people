@@ -16,6 +16,20 @@ SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated
 TIERS = ("member", "plus_one", "plus_two")
 Tier = Literal["member", "plus_one", "plus_two"]      # the same tuple as a type, for every surface
 TIER_LABELS = {"member": "Member", "plus_one": "Plus one", "plus_two": "Plus two"}
+# Cell texts that mean "no value" in exported files; an importer treats them as empty cells.
+NULL_TOKENS = frozenset({"null", "none", "n/a", "na", "nan", "-", "\u2014", "\u2013"})
+# Common export headers (slugified) → the property they mean. The LinkedIn connections export
+# says URL / Email Address / Position / Connected On; CRM exports say Title / Phone; a foreign
+# database id is the file's ID (the match key, not a property).
+HEADER_ALIASES = {
+    "url": "linkedin", "linkedin_url": "linkedin", "profile": "linkedin", "profile_url": "linkedin",
+    "linkedin_profile": "linkedin",
+    "email_address": "email", "e_mail": "email", "mail": "email",
+    "position": "role", "title": "role", "job_title": "role",
+    "connected_on": "linkedin_connected",
+    "phone": "phone_number", "mobile": "phone_number", "telephone": "phone_number",
+    "mongo_id": "id", "uuid": "id", "external_id": "id", "record_id": "id",
+}
 RESERVED_PREFIX = "col_"      # a CSV header that slugifies to a system key becomes col_<key>
 MAX_TEXT_CHARS = 40_000       # about 5000 words: text values are not capped below this,
                               # neither when stored nor when an agent reads them

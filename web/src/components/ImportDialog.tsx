@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api'
@@ -15,10 +15,20 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
   const [tier, setTier] = useState<Tier>('member')
   const [preview, setPreview] = useState<ImportPreview | null>(null)
   const [started, setStarted] = useState<ImportStarted | null>(null)
+  const [columns, setColumns] = useState<Record<string, string>>({})
+  const properties = useQuery({ queryKey: ['properties'], queryFn: api.properties })
 
-  const previewM = useMutation({ mutationFn: (f: File) => api.importPreview(f), onSuccess: setPreview })
+  const previewM = useMutation({
+    mutationFn: ({ f, cols }: { f: File; cols: Record<string, string> }) => api.importPreview(f, cols),
+    onSuccess: setPreview,
+  })
+  const remap = (header: string, target: string) => {
+    const next = { ...columns, [header]: target }
+    setColumns(next)
+    if (file) previewM.mutate({ f: file, cols: next })
+  }
   const mergeM = useMutation({
-    mutationFn: (dryRun: boolean) => api.importCsv(file!, tier, dryRun),
+    mutationFn: (dryRun: boolean) => api.importCsv(file!, tier, dryRun, columns),
     onSuccess: (r) => {
       setStarted(r)
       qc.invalidateQueries({ queryKey: ['properties'] })
@@ -47,7 +57,8 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
               setFile(f)
               setPreview(null)
               setStarted(null)
-              if (f) previewM.mutate(f)
+              setColumns({})
+              if (f) previewM.mutate({ f, cols: {} })
             }}
           />
         </label>
@@ -93,9 +104,25 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
               </thead>
               <tbody>
                 {preview.columns.map((c) => (
-                  <tr key={c.header + c.key}>
+                  <tr key={c.header}>
                     <td>{c.header}</td>
-                    <td className="font-mono text-xs">{c.key}</td>
+                    <td>
+                      <select
+                        className="input w-44 font-mono text-xs"
+                        aria-label={`Property for ${c.header}`}
+                        value={c.role === 'skip' ? 'skip' : c.role === 'source_id' ? 'id' : c.key}
+                        onChange={(e) => remap(c.header, e.target.value)}
+                      >
+                        {c.role === 'field' && (c.new || !properties.data?.some((p) => p.key === c.key)) && <option value={c.key}>{c.key} (new)</option>}
+                        <option value="id">ID (match key)</option>
+                        <option value="skip">skip</option>
+                        {(properties.data ?? []).map((p) => (
+                          <option key={p.key} value={p.key}>
+                            {p.key}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td>
                       <PlanBadge column={c} />
                     </td>
@@ -137,6 +164,7 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
 }
 
 function PlanBadge({ column: c }: { column: ImportColumn }) {
+  if (c.role === 'skip') return <span className="badge bg-slate-100 text-slate-400">skipped</span>
   if (c.role === 'source_id' || c.plan === 'identifier') return <span className="badge bg-slate-100 text-slate-600">identifier</span>
   if (c.new || c.plan === 'new') return <span className="badge bg-amber-50 text-amber-700">new property</span>
   if (c.plan === 'agent') return <span className="badge bg-violet-50 text-violet-700">storage agent</span>

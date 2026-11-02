@@ -143,9 +143,10 @@ async def test_import_records_text_and_normalised_value(people_by_name):
     assert bo["needs_stated"]["norm"] == {**bo["needs_stated"]["norm"], "v": ["Growth"],
                                           "flag": "unmapped"}
     cy_norm = {k: (cy[k]["norm"].get("v"), cy[k]["norm"].get("flag"))
-               for k in ("mrr", "stage", "joined", "in_whatsapp")}
+               for k in ("mrr", "stage", "in_whatsapp")}
     assert cy_norm == {"mrr": (None, "non_normalizable"), "stage": (None, "unmapped"),
-                       "joined": (None, "non_normalizable"), "in_whatsapp": (None, "unmapped")}
+                       "in_whatsapp": (None, "unmapped")}
+    assert "joined" not in cy                             # an em dash is an empty cell at import
     assert "mrr" not in people_by_name["Di"]
 
 
@@ -157,8 +158,7 @@ async def test_public_view_and_coverage_flags(people_by_name, reader):
     assert "bio" not in ada["history_norm"]
     cy = (await reader.get(f"/api/people/{people_by_name['Cy']['_id']}")).json()
     assert cy["norm"] == {"needs_stated": ["Exit"]} and cy["norm_flags"] == {
-        "mrr": "non_normalizable", "stage": "unmapped", "joined": "non_normalizable",
-        "in_whatsapp": "unmapped"}
+        "mrr": "non_normalizable", "stage": "unmapped", "in_whatsapp": "unmapped"}
     cat = {p["key"]: p for p in (await reader.get("/api/properties")).json()}
     assert (cat["mrr"]["count"], cat["mrr"]["unmapped"], cat["mrr"]["non_normalizable"]) == (3, 0, 1)
     assert (cat["stage"]["unmapped"], cat["needs_stated"]["unmapped"]) == (1, 1)
@@ -237,7 +237,7 @@ async def test_reparse_fills_legacy_documents_and_update_norm(people_by_name, wr
     agent = Source("agent", "normalizer", "run:1/item:2")
     got = (await people.update_norm(None, cy, {"stage": Parsed("Pre-seed")}, agent)).person
     assert got["norm"]["stage"] == "Pre-seed" and got["norm_flags"] == {
-        "mrr": "non_normalizable", "joined": "non_normalizable", "in_whatsapp": "unmapped"}
+        "mrr": "non_normalizable", "in_whatsapp": "unmapped"}
     assert got["history_norm"]["stage"][-1]["src"] == agent.doc()
     assert await people.update_norm(None, cy, {"stage": Parsed("Pre-seed")}, agent)  # no-op ok
     r = await writer.patch(f"/api/people/{cy}", json={"fields": {"bio": "lending for SMBs"}})

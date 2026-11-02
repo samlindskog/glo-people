@@ -10,6 +10,7 @@ os.environ["FAKE_AGENTS"] = "0"        # tests choose their own fakes; the conta
 os.environ["LOGFIRE_SEND_TO_LOGFIRE"] = "false"
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -85,13 +86,16 @@ async def _clean():
 
 
 async def import_people(client: httpx.AsyncClient, text: str, name: str, tier: str, *,
-                        agent: bool = False, review: bool = False, dry_run: bool = False) -> dict:
+                        agent: bool = False, review: bool = False, dry_run: bool = False,
+                        columns: dict[str, str] | None = None) -> dict:
     """Merge a CSV through the API and wait for its run; returns the import summary. Without the
     storage agent and the review by default: fixtures want the rows in the database, not model
     calls (tests of the agents turn them on under their own fakes)."""
-    r = await client.post("/api/people/import",
-                          data={"tier": tier, "agent": str(agent).lower(),
-                                "review": str(review).lower(), "dry_run": str(dry_run).lower()},
+    data = {"tier": tier, "agent": str(agent).lower(), "review": str(review).lower(),
+            "dry_run": str(dry_run).lower()}
+    if columns:
+        data["columns"] = json.dumps(columns)
+    r = await client.post("/api/people/import", data=data,
                           files={"file": (name, text.encode(), "text/csv")})
     assert r.status_code == 201, r.text
     run = await runner.wait(r.json()["run_id"])

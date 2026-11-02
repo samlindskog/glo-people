@@ -59,11 +59,13 @@ def clean_values(values: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-async def prepare_csv(text: str, filename: str, *,
-                      dry_run: bool = False) -> tuple[importer.ParsedCsv, list[str], list[ItemSpec]]:
-    """Parse a CSV, create the properties its columns need (not on a dry run) and cut it into
-    items: the step the upload surfaces (REST, CLI) share. Returns (parsed, created keys, items)."""
-    parsed = importer.parse_csv(text, filename)
+async def prepare_csv(text: str, filename: str, *, dry_run: bool = False,
+                      columns: dict[str, str] | None = None
+                      ) -> tuple[importer.ParsedCsv, list[str], list[ItemSpec]]:
+    """Parse a CSV (with the caller's column mapping), create the properties its columns need (not
+    on a dry run) and cut it into items: the step the upload surfaces (REST, CLI) share. Returns
+    (parsed, created keys, items)."""
+    parsed = importer.parse_csv(text, filename, columns)
     created = [] if dry_run else await properties.ensure(parsed.used_keys, "import")
     return parsed, created, items_for_csv(parsed)
 

@@ -139,11 +139,13 @@ export interface Property {
 export interface ImportColumn {
   header: string
   key: string
-  role: 'field' | 'source_id'
+  role: 'field' | 'source_id' | 'skip'
   new?: boolean
+  /** The header was renamed by an alias or by the caller's mapping. */
+  alias?: boolean
   /** How the merge treats the column: the file's identifier, written as entered, read by the
-   * storage agent (long prose), or a property to create. */
-  plan?: 'identifier' | 'verbatim' | 'agent' | 'new'
+   * storage agent (long prose), a property to create, or ignored. */
+  plan?: 'identifier' | 'verbatim' | 'agent' | 'new' | 'skip'
 }
 
 /** The match decision for one of the first rows, against the database as it is now. */

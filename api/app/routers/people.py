@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -114,12 +115,29 @@ async def _read_upload(file: UploadFile) -> str:
         return data.decode("latin-1")
 
 
-@router.post("/people/import/preview")
-async def import_preview(file: Annotated[UploadFile, File()], _: Writer) -> dict:
-    """Each column's plan (identifier, verbatim, agent, new property), the row count, and the
-    match decisions of the first rows against the database. Nothing is written."""
+def _columns(raw: str | None) -> dict[str, str] | None:
+    """The caller's column mapping: a JSON object header → property key | "id" | "skip"."""
+    if not raw:
+        return None
     try:
-        return await importer.preview(await _read_upload(file), file.filename or "upload.csv")
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"columns: {e}") from e
+    if not isinstance(parsed, dict) or not all(isinstance(v, str) for v in parsed.values()):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            "columns must map each header to a property key, 'id' or 'skip'")
+    return parsed
+
+
+@router.post("/people/import/preview")
+async def import_preview(file: Annotated[UploadFile, File()], _: Writer,
+                         columns: Annotated[str | None, Form()] = None) -> dict:
+    """Each column's plan (identifier, verbatim, agent, new property, skip), the row count, and the
+    match decisions of the first rows against the database. `columns` (JSON, header → key | id |
+    skip) overrides the header mapping. Nothing is written."""
+    try:
+        return await importer.preview(await _read_upload(file), file.filename or "upload.csv",
+                                      _columns(columns))
     except ValueError as e:
         raise _bad_request(e) from e
 
@@ -130,7 +148,8 @@ async def import_people(file: Annotated[UploadFile, File()],
                         principal: Writer,
                         dry_run: Annotated[bool, Form()] = False,
                         agent: Annotated[bool, Form()] = True,
-                        review: Annotated[bool, Form()] = True) -> dict:
+                        review: Annotated[bool, Form()] = True,
+                        columns: Annotated[str | None, Form()] = None) -> dict:
     """Assistant: merge the CSV's rows into the people database as a run, one item per person
     the file describes (follow it on /api/assistants/runs). Columns the catalog lacks are created
     first (except on a dry run); `tier` is for the people the run creates."""
@@ -138,7 +157,8 @@ async def import_people(file: Annotated[UploadFile, File()],
     name = file.filename or "upload.csv"
     options = MergeOptions(tier=tier, dry_run=dry_run, agent=agent, review=review)
     try:
-        parsed, created, items = await merge.prepare_csv(text, name, dry_run=dry_run)
+        parsed, created, items = await merge.prepare_csv(text, name, dry_run=dry_run,
+                                                         columns=_columns(columns))
     except ValueError as e:                     # PropertyError is one
         raise _bad_request(e) from e
     if not items:
@@ -159,6 +179,20 @@ class MergeBody(BaseModel):
                                                "person, otherwise the record is matched by "
                                                "identifier or name")
     options: MergeOptions = Field(default_factory=MergeOptions)
+
+
+@router.post("/people/{keep_id}/merge/{drop_id}")
+async def merge_people(keep_id: str, drop_id: str, principal: Writer) -> dict:
+    """Fold a duplicate document into another: every entry of the dropped person joins the kept
+    one's histories with its own time and source, the duplicate is deleted. Returns the kept
+    person and the changes."""
+    try:
+        res = await people_svc.merge_documents(principal, keep_id, drop_id)
+    except people_svc.ConflictError as e:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
+    except people_svc.PersonError as e:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
+    return {"person": res.person, "changes": [c.model_dump() for c in res.changes]}
 
 
 @router.post("/people/merge")

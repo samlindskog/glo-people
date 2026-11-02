@@ -76,16 +76,18 @@ export const api = {
   updatePerson: (id: string, fields: Record<string, unknown>, tier?: Tier) =>
     request<Person>('PATCH', `/api/people/${id}`, { fields, tier }),
   deletePerson: (id: string) => request<void>('DELETE', `/api/people/${id}`),
-  importPreview: (file: File) => {
+  importPreview: (file: File, columns?: Record<string, string>) => {
     const fd = new FormData()
     fd.append('file', file)
+    if (columns && Object.keys(columns).length) fd.append('columns', JSON.stringify(columns))
     return request<ImportPreview>('POST', '/api/people/import/preview', fd)
   },
-  importCsv: (file: File, tier: Tier, dryRun = false) => {
+  importCsv: (file: File, tier: Tier, dryRun = false, columns?: Record<string, string>) => {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('tier', tier)
     fd.append('dry_run', String(dryRun))
+    if (columns && Object.keys(columns).length) fd.append('columns', JSON.stringify(columns))
     return request<ImportStarted>('POST', '/api/people/import', fd)
   },
 

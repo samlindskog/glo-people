@@ -39,7 +39,7 @@ from app.tools.store import StoreOptions
 
 log = logging.getLogger(__name__)
 
-WRITE_TOOLS = frozenset({"create_person", "merge_person", "update_person", "delete_person",
+WRITE_TOOLS = frozenset({"create_person", "merge_person", "merge_people", "update_person", "delete_person",
                          "store_about_person", "normalize_person", "start_assistant", "pause_run",
                          "resume_run", "stop_run"})
 
@@ -254,6 +254,24 @@ async def merge_person(
                                      Source.for_mcp(principal))
     except (ValueError, TypeError) as e:
         raise ToolError(str(e)) from e
+
+
+@mcp.tool()
+async def merge_people(
+    ctx: Context,
+    keep_id: Annotated[str, Field(description="The person to keep")],
+    drop_id: Annotated[str, Field(description="The duplicate to fold into it and delete")],
+) -> dict:
+    """Fold a duplicate document into another (requires people:write): every entry of the dropped
+    person joins the kept one's histories with its own time and source, then the duplicate is
+    deleted. Use it when find_people reports two people who are one (the same LinkedIn URL or
+    email). Returns the kept person and the changes."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        res = await people_svc.merge_documents(principal, keep_id, drop_id)
+    except people_svc.PersonError as e:
+        raise ToolError(str(e)) from e
+    return {"person": res.person, "changes": [c.model_dump(mode="json") for c in res.changes]}
 
 
 @mcp.tool()

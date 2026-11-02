@@ -654,6 +654,80 @@ async def normalize_all(page: int = 500, progress: Callable[[int], None] | None 
             progress(written)
 
 
+async def merge_documents(principal: Principal | None, keep_id: str, drop_id: str) -> WriteResult:
+    """Fold one person's document into another's: every entry of every property of `drop` is
+    appended to `keep`'s histories in its original order with its own time and source (nothing is
+    rewritten), the normalised values follow, `drop` is deleted and both are reported to the write
+    observers. The remedy for two documents that are one person (the same LinkedIn URL)."""
+    if keep_id == drop_id:
+        raise PersonError("keep and drop are the same person")
+    keep = await db().people.find_one({"_id": _oid(keep_id)})
+    drop = await db().people.find_one({"_id": _oid(drop_id)})
+    if keep is None or drop is None:
+        raise PersonError("person not found")
+    now = datetime.now(UTC)
+    to_set: dict[str, Any] = {}
+    changes: list[Change] = []
+    for key, prop in drop.items():
+        if key in fields.SYSTEM_FIELDS:
+            continue
+        merged = {**keep, **to_set}.get(key)
+        before = history.current(merged)
+        for e in history.entries(prop):
+            src = Source(**e["src"]) if isinstance(e.get("src"), dict) else Source("legacy")
+            new = history.append(merged, e.get("v"), src, e.get("ts") or now)
+            if new is not None:
+                merged = new
+        if merged is not None and merged is not keep.get(key):
+            to_set[key] = merged
+            after = history.current(merged)
+            if not history.same(before, after):
+                changes.append(Change(key=key, action="set" if before is None else "append",
+                                      value=after, previous=before))
+    if to_set:
+        to_set["updated_at"] = now
+        changes += await _normalize_into(keep, to_set, now)
+        if not await _cas_write(keep["_id"], keep, to_set):
+            raise ConflictError(f"person {keep_id} is being modified concurrently; retry")
+    await db().people.delete_one({"_id": drop["_id"]})
+    keys = tuple(sorted(k for k in to_set if k not in ("updated_at",)))
+    await _after_write(WriteInfo(keep_id, Source("system", "merge"), keys))
+    await _after_write(WriteInfo(drop_id, None, deleted=True))
+    await activity.record("person.merge", principal, keep_id,
+                          {"dropped": drop_id, "keys": list(keys)})
+    doc = await get(keep_id)
+    assert doc is not None
+    return WriteResult(doc, changes)
+
+
+async def duplicate_groups() -> list[dict[str, Any]]:
+    """Documents that share a canonical identity value (a LinkedIn URL, an email): one group per
+    value, `ids` oldest first with each one's name and folded name, for a dedup pass to judge."""
+    groups: dict[str, dict[str, Any]] = {}
+    for key in ("linkedin", "email", "emails"):
+        pipeline = [
+            {"$match": {f"{key}.norm.v": {"$exists": True, "$ne": None}}},
+            {"$unwind": f"${key}.norm.v"},
+            {"$group": {"_id": f"${key}.norm.v", "ids": {"$push": "$_id"}, "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}},
+        ]
+        async for g in await db().people.aggregate(pipeline):
+            ids = sorted({str(i) for i in g["ids"]})
+            if len(ids) < 2:
+                continue
+            groups.setdefault("|".join(ids), {"key": key, "value": g["_id"], "ids": ids})
+    out = []
+    for g in groups.values():
+        docs = await fetch(g["ids"], projection={"name": 1, "created_at": 1, "tier": 1})
+        docs.sort(key=lambda d: (d.get("created_at") or datetime.min.replace(tzinfo=UTC), str(d["_id"])))
+        people_ = [{"id": str(d["_id"]), "name": history.current(d.get("name")), "tier": d.get("tier"),
+                    "created_at": d.get("created_at")} for d in docs]
+        names = {fields.fold(str(p["name"] or "")) for p in people_}
+        out.append({**g, "ids": [p["id"] for p in people_], "people": people_,
+                    "same_name": len(names) == 1})
+    return out
+
+
 async def delete(principal: Principal, person_id: str) -> bool:
     res = await db().people.delete_one({"_id": _oid(person_id)})
     if res.deleted_count == 0:

@@ -9,6 +9,7 @@ order. A record matches a person by a shared identity key (email, phone, LinkedI
 file's ID), else by the folded name when it is unique or corroborated by company, location or an
 email domain; several plausible people is `ambiguous`, nothing is `new`."""
 
+import collections
 import csv
 import io
 import re
@@ -96,48 +97,84 @@ def _coerce(value: str, kind: str) -> Any:
     return value
 
 
-def header_map(headers: list[str]) -> list[dict]:
-    """Map CSV headers to field keys, de-duplicating keys that collide."""
+SKIP = "skip"
+
+
+def header_map(headers: list[str], columns: dict[str, str] | None = None) -> list[dict]:
+    """Map CSV headers to property keys: the caller's `columns` (header or its slug → key, "id"
+    for the file's identifier, "skip" to ignore the column), else `fields.HEADER_ALIASES`, else
+    the slug; keys that collide are de-duplicated. Each column records its `role` (field |
+    source_id | skip) and whether an alias or override renamed it."""
+    overrides = {k.strip().lower(): v for k, v in (columns or {}).items()}
     seen: dict[str, int] = {}
     out = []
     for h in headers:
-        key = fields.slugify(h)
-        if key == "id":
-            out.append({"header": h, "key": "id", "role": "source_id"})
+        slug = fields.slugify(h)
+        target = overrides.get(h.strip().lower()) or overrides.get(slug) \
+            or fields.HEADER_ALIASES.get(slug) or slug
+        col = {"header": h, "key": target, "role": "field", "alias": target != slug}
+        if target == SKIP:
+            out.append({**col, "role": SKIP})
             continue
+        if target == "id":
+            out.append({**col, "key": "id", "role": "source_id"})
+            continue
+        key = fields.slugify(target) or target
         if not key or key in fields.SYSTEM_FIELDS:
             key = f"{fields.RESERVED_PREFIX}{key or 'blank'}"
         n = seen.get(key, 0)
         seen[key] = n + 1
-        out.append({"header": h, "key": key if n == 0 else f"{key}_{n + 1}", "role": "field"})
+        out.append({**col, "key": key if n == 0 else f"{key}_{n + 1}"})
     return out
 
 
-def parse_csv(text: str, filename: str) -> ParsedCsv:
-    """Rows and the property keys they use; nothing is written."""
-    text = text.lstrip("﻿")
-    reader = csv.reader(io.StringIO(text))
-    headers = next(reader, None)
-    if not headers:
+def _header_row(rows: list[list[str]]) -> int:
+    """The index of the header: the first row with two or more cells that is at least as wide as
+    most rows (an export may start with a few one-cell lines of notes; data rows may be shorter
+    than the header when trailing cells are omitted)."""
+    widths = collections.Counter(len(r) for r in rows if any(c.strip() for c in r))
+    if not widths:
+        return 0
+    modal = widths.most_common(1)[0][0]
+    for i, row in enumerate(rows):
+        if len(row) >= modal and sum(1 for c in row if c.strip()) >= 2:
+            return i
+    return 0
+
+
+def _cell(text: str) -> str:
+    value = text.strip()
+    return "" if value.lower() in fields.NULL_TOKENS else value
+
+
+def parse_csv(text: str, filename: str, columns: dict[str, str] | None = None) -> ParsedCsv:
+    """Rows and the property keys they use; nothing is written. A preamble before the header is
+    skipped, cells that say null / n/a / - are empty, `columns` overrides the header mapping."""
+    text = text.lstrip("\ufeff")
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
         raise ValueError("CSV has no header row")
-    cols = header_map(headers)
-    raw_rows = [r for r in reader if any(c.strip() for c in r)]
+    header_i = _header_row(rows)
+    headers = rows[header_i]
+    cols = header_map(headers, columns)
+    numbered = [(header_i + 1 + i, r) for i, r in enumerate(rows[header_i + 1:], start=1)
+                if any(_cell(c) for c in r)]
 
     kinds = {}
     for i, c in enumerate(cols):
         if c["role"] != "field":
             continue
-        values = [r[i].strip() for r in raw_rows if i < len(r) and r[i].strip()]
+        values = [_cell(r[i]) for _, r in numbered if i < len(r) and _cell(r[i])]
         sp = properties.spec(c["key"])
         kinds[c["key"]] = _column_kind(c["key"], values, sp.type if sp else None)
 
-    parsed = ParsedCsv(file=filename.rsplit("/", 1)[-1], columns=cols, rows=[], total=len(raw_rows))
-    for row_no, row in enumerate(raw_rows, start=2):
+    parsed = ParsedCsv(file=filename.rsplit("/", 1)[-1], columns=cols, rows=[], total=len(numbered))
+    for row_no, row in numbered:
         doc: dict[str, Any] = {}
         raw_id = None
         for i, c in enumerate(cols):
-            value = row[i].strip() if i < len(row) else ""
-            if not value:
+            value = _cell(row[i]) if i < len(row) else ""
+            if not value or c["role"] == SKIP:
                 continue
             if c["role"] == "source_id":
                 raw_id = value
@@ -362,16 +399,20 @@ async def match_record(values: dict[str, Any], source: dict | None = None) -> Ma
 
 # --- the preview a surface shows before a run ---------------------------------------------------------
 
-async def preview(text: str, filename: str = "upload.csv") -> dict:
-    """Columns with their plan (identifier | verbatim | agent | new), the row count, and the match
-    decisions of the first rows against the database."""
-    parsed = parse_csv(text, filename)
+async def preview(text: str, filename: str = "upload.csv",
+                  columns: dict[str, str] | None = None) -> dict:
+    """Columns with their plan (identifier | verbatim | agent | new | skip), the row count, and the
+    match decisions of the first rows against the database."""
+    parsed = parse_csv(text, filename, columns)
     known = await properties.known_keys()
     catalog = {p.key: p for p in await properties.catalog()}
     for col in parsed.columns:
         key = col["key"]
         if col["role"] == "source_id":
             col["plan"], col["new"] = "identifier", False
+            continue
+        if col["role"] == SKIP:
+            col["plan"], col["new"] = SKIP, False
             continue
         col["new"] = key not in known
         if col["new"]:
