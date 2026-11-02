@@ -9,6 +9,7 @@ import { ErrorNote, PageHeader } from '../components/Layout'
 import SearchForm from '../components/SearchForm'
 import { decodeSearch, describeSearch, encodeSearch, formatValue } from '../lib'
 import type { SearchRequest } from '../types'
+import { TIERS } from '../types'
 
 const COLUMNS_KEY = 'glo.people.columns'
 const DEFAULT_COLUMNS = ['company', 'role', 'location']
@@ -174,10 +175,13 @@ export default function PeoplePage() {
   )
 }
 
+const TIER_BADGE: Record<string, string> = {
+  member: 'bg-emerald-50 text-emerald-700',
+  plus_one: 'bg-amber-50 text-amber-700',
+  plus_two: 'bg-sky-50 text-sky-700',
+}
+
 export function TierBadge({ tier }: { tier: string }) {
-  return tier === 'member' ? (
-    <span className="badge bg-emerald-50 text-emerald-700">Member</span>
-  ) : (
-    <span className="badge bg-amber-50 text-amber-700">Plus one</span>
-  )
+  const label = TIERS.find((t) => t.value === tier)?.label ?? tier
+  return <span className={`badge ${TIER_BADGE[tier] ?? 'bg-slate-100 text-slate-600'}`}>{label}</span>
 }

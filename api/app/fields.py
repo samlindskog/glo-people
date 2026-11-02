@@ -13,8 +13,9 @@ from typing import Any, Literal
 SYSTEM_FIELDS = frozenset({"_id", "id", "tier", "source", "created_at", "updated_at",
                            "schema_version", "rev", "history", "norm", "norm_flags",
                            "history_norm"})
-TIERS = ("member", "plus_one")
-Tier = Literal["member", "plus_one"]      # the same tuple as a type, for every surface
+TIERS = ("member", "plus_one", "plus_two")
+Tier = Literal["member", "plus_one", "plus_two"]      # the same tuple as a type, for every surface
+TIER_LABELS = {"member": "Member", "plus_one": "Plus one", "plus_two": "Plus two"}
 RESERVED_PREFIX = "col_"      # a CSV header that slugifies to a system key becomes col_<key>
 MAX_TEXT_CHARS = 40_000       # about 5000 words: text values are not capped below this,
                               # neither when stored nor when an agent reads them

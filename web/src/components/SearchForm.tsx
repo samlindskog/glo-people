@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { FILTER_OPS } from '../lib'
 import type { FieldFilter, Property, SearchRequest, SemanticQuery } from '../types'
+import { TIERS } from '../types'
 
 const DEFAULT_SEMANTIC: SemanticQuery = {
   query: '',
@@ -62,8 +63,11 @@ export default function SearchForm({ initial, properties, onSearch }: Props) {
           <span className="label">Tier</span>
           <select className="input w-36" value={tier} onChange={(e) => setTier(e.target.value)} aria-label="Tier">
             <option value="">All tiers</option>
-            <option value="member">Members</option>
-            <option value="plus_one">Plus ones</option>
+            {TIERS.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.plural}
+              </option>
+            ))}
           </select>
         </label>
         <label className="space-y-1">

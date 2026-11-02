@@ -123,7 +123,7 @@ async def list_properties(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def search_people(
     ctx: Context,
-    tier: Annotated[Literal["member", "plus_one"] | None,
+    tier: Annotated[fields.Tier | None,
                     Field(description="Restrict to one tier")] = None,
     filters: Annotated[list[FieldFilter] | None,
                        Field(description="Literal per-field filters, ANDed")] = None,
@@ -211,7 +211,7 @@ async def find_people(
 @mcp.tool()
 async def create_person(
     ctx: Context,
-    tier: Literal["member", "plus_one"],
+    tier: fields.Tier,
     fields: Annotated[dict[str, Any], Field(description="Property key → value; 'name' required. "
                                                         "Keys must exist (list_properties).")],
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
@@ -266,7 +266,7 @@ async def update_person(
                                         "time-stamped entry in the property's history (earlier "
                                         "values are kept); the current value is a no-op; null "
                                         "records a removal.")],
-    tier: Literal["member", "plus_one"] | None = None,
+    tier: fields.Tier | None = None,
     agent: Annotated[str | None, Field(description="Name of the automated agent making this "
                                                    "change, if any; noted in the entry source")] = None,
 ) -> dict:
@@ -287,7 +287,7 @@ async def plan_search(
     ctx: Context,
     question: Annotated[str, Field(min_length=1, max_length=2000,
                                    description="A question about who is in the database")],
-    tier: Annotated[Literal["member", "plus_one"] | None, Field(description="Restrict to one "
+    tier: Annotated[fields.Tier | None, Field(description="Restrict to one "
                                                                             "tier")] = None,
     filters: Annotated[list[FieldFilter] | None,
                        Field(description="Extra literal filters, ANDed with the plan")] = None,
@@ -311,7 +311,7 @@ async def ask_people(
     ctx: Context,
     question: Annotated[str, Field(min_length=1, max_length=2000,
                                    description="A question about who is in the database")],
-    tier: Annotated[Literal["member", "plus_one"] | None, Field(description="Restrict to one "
+    tier: Annotated[fields.Tier | None, Field(description="Restrict to one "
                                                                             "tier")] = None,
     filters: Annotated[list[FieldFilter] | None,
                        Field(description="Extra literal filters, ANDed with the plan")] = None,

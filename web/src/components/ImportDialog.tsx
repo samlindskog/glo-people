@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api'
 import type { ImportColumn, ImportMatch, ImportPreview, ImportStarted, Tier } from '../types'
+import { TIERS } from '../types'
 import { ErrorNote } from './Layout'
 
 /** Pick a CSV, preview what the merge would do (each column's plan, the match decisions of the
@@ -53,8 +54,11 @@ export default function ImportDialog({ onStarted }: { onStarted?: (started: Impo
         <label className="space-y-1">
           <span className="label">Tier for new people</span>
           <select className="input w-36" aria-label="Import tier" value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
-            <option value="member">Members</option>
-            <option value="plus_one">Plus ones</option>
+            {TIERS.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.plural}
+              </option>
+            ))}
           </select>
         </label>
         <button type="button" className="btn-secondary" disabled={!file || !preview || mergeM.isPending} onClick={() => mergeM.mutate(true)}>

@@ -93,7 +93,7 @@ class SortSpec(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    tier: Literal["member", "plus_one"] | None = Field(None, description="Restrict to one tier")
+    tier: fields.Tier | None = Field(None, description="Restrict to one tier")
     filters: list[FieldFilter] = Field(default_factory=list,
                                        description="Literal filters, combined with AND")
     semantic: SemanticQuery | None = None

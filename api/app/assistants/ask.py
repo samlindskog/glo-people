@@ -4,7 +4,7 @@ hits with citations. Nothing is written; the executed search is saved like any o
 re-run from the history. Tuning is per call."""
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -175,7 +175,7 @@ ASSISTANT = "ask"
 
 class AskRunOptions(Tuning):
     question: str = Field(min_length=1, max_length=2000)
-    tier: Literal["member", "plus_one"] | None = None
+    tier: fields.Tier | None = None
     filters: list[FieldFilter] = Field(default_factory=list, max_length=10)
 
 

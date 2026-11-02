@@ -2,13 +2,13 @@
 /api/search/plan turns a question into a request. Assistant: POST /api/search/ask answers a
 question in text. Tuning travels with each call (option models with defaults)."""
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 
-from app import activity
+from app import activity, fields
 from app.assistants.ask import AskResult, ask
 from app.auth import Principal, require
 from app.tools.plan import PlanResult, Tuning, plan_search
@@ -41,7 +41,7 @@ async def search(req: SearchRequest, principal: Reader) -> SearchResponse:
 
 class QuestionBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    tier: Literal["member", "plus_one"] | None = None
+    tier: fields.Tier | None = None
     filters: list[FieldFilter] = Field(default_factory=list, max_length=10,
                                        description="Extra literal filters, ANDed with the plan")
     options: Tuning = Field(default_factory=Tuning)

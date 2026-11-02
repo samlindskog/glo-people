@@ -1,7 +1,13 @@
 import type contract from '@shared/permissions.json'
 
 export type Permission = keyof typeof contract.permissions
-export type Tier = 'member' | 'plus_one'
+export type Tier = 'member' | 'plus_one' | 'plus_two'
+/** The tiers, declared once for every select and badge (mirrors api/app/fields.py TIERS). */
+export const TIERS: { value: Tier; label: string; plural: string }[] = [
+  { value: 'member', label: 'Member', plural: 'Members' },
+  { value: 'plus_one', label: 'Plus one', plural: 'Plus ones' },
+  { value: 'plus_two', label: 'Plus two', plural: 'Plus twos' },
+]
 
 export interface Me {
   id: number

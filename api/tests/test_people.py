@@ -312,3 +312,16 @@ async def test_find_candidates_by_identifier_and_name(writer):
     person = (await writer.get(f"/api/people/{ada}")).json()
     assert "name" not in person["norm"] and "email" not in person["norm"]
     assert "linkedin" not in person["history_norm"]
+
+
+async def test_third_tier_is_accepted_everywhere(writer, reader):
+    r = await writer.post("/api/people", json={"tier": "plus_two", "fields": {"name": "Lee Lead"}})
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    assert (await reader.get(f"/api/people/{pid}")).json()["tier"] == "plus_two"
+    r = await writer.post("/api/search", json={"tier": "plus_two", "filters": []})
+    assert r.status_code == 200 and r.json()["total"] == 1
+    r = await writer.patch(f"/api/people/{pid}", json={"fields": {}, "tier": "member"})
+    assert r.status_code == 200 and r.json()["tier"] == "member"
+    r = await writer.post("/api/people", json={"tier": "plus_three", "fields": {"name": "X"}})
+    assert r.status_code == 422

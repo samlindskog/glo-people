@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import type { Person, Property, Tier } from '../types'
+import { TIERS } from '../types'
 
 const SYSTEM = new Set(['id', 'tier', 'source', 'created_at', 'updated_at', 'schema_version', 'history', 'norm', 'norm_flags', 'history_norm'])
 
@@ -79,8 +80,11 @@ export default function PersonEditor({ person, properties, onSave, onCancel }: P
       <label className="flex items-center gap-3">
         <span className="label w-40">Tier</span>
         <select className="input w-40" value={tier} onChange={(e) => setTier(e.target.value as Tier)} aria-label="Tier">
-          <option value="member">Member</option>
-          <option value="plus_one">Plus one</option>
+          {TIERS.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
         </select>
       </label>
       {rows.map((r, i) => (

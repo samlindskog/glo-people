@@ -8,7 +8,7 @@ then the closing review every assistant shares. Several plausible people for one
 Replaces the CSV import: the same endpoint, every column still a property, but matched by
 identity rather than by a file-scoped id, and with history entries for every write."""
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -27,7 +27,7 @@ ASSISTANT = "merge"
 
 
 class MergeOptions(BaseModel):
-    tier: Literal["member", "plus_one"] = Field("member", description="Tier for the people the run "
+    tier: fields.Tier = Field("member", description="Tier for the people the run "
                                                                      "creates; a matched person "
                                                                      "keeps theirs")
     max_new_properties: int = Field(3, ge=0, le=5,

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import JSONResponse
@@ -31,12 +31,12 @@ MAX_PASSAGE = fields.MAX_TEXT_CHARS
 
 
 class PersonCreate(BaseModel):
-    tier: Literal["member", "plus_one"]
+    tier: fields.Tier
     fields: dict[str, Any]
 
 
 class PersonPatch(BaseModel):
-    tier: Literal["member", "plus_one"] | None = None
+    tier: fields.Tier | None = None
     fields: dict[str, Any] = {}
 
 
@@ -126,7 +126,7 @@ async def import_preview(file: Annotated[UploadFile, File()], _: Writer) -> dict
 
 @router.post("/people/import", status_code=201)
 async def import_people(file: Annotated[UploadFile, File()],
-                        tier: Annotated[Literal["member", "plus_one"], Form()],
+                        tier: Annotated[fields.Tier, Form()],
                         principal: Writer,
                         dry_run: Annotated[bool, Form()] = False,
                         agent: Annotated[bool, Form()] = True,
