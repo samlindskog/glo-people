@@ -285,3 +285,11 @@ async def test_mcp_merge_person(client_factory, writer):
     err, res = await call(c, key, "merge_person", {"record": {"email": "lonely@x.io"}})
     assert not err and res["status"] == "skipped"
     assert await db().people.count_documents({}) == 1
+
+
+async def test_upload_is_logged_and_needs_people_write(writer, reader):
+    res = await import_people(writer, "Name,Email\nAda Okafor,ada@x.io\n", "p.csv", "member")
+    acts = (await writer.get("/api/activity?action=people.import")).json()["items"]
+    assert acts[0]["meta"]["rows"] == 1 and acts[0]["meta"]["run_id"] == res["run_id"]
+    assert (await reader.post("/api/people/import", data={"tier": "member"},
+                              files={"file": ("a.csv", b"Name\nX\n", "text/csv")})).status_code == 403

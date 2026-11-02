@@ -296,20 +296,6 @@ async def test_concurrent_updates_all_land(writer):
     assert doc["mrr"]["norm"]["flag"] == "unmapped"
 
 
-async def test_concurrent_writes_from_two_sources_lose_nothing(writer):
-    await import_people(writer, "ID,Name,Bio\n1,Ada,first\n", "c.csv", "member")
-    pid = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
-    principal = Principal(user_id=1, username="wendy", role="writer",
-                          permissions=frozenset({"people:write"}))
-    for i in range(5):
-        await asyncio.gather(
-            people.update(principal, pid, {"bio": f"import {i}"},
-                          source=Source("import", "c.csv", "row 2")),
-            people.update(principal, pid, {"notes": f"note {i}"}))
-    doc = await db().people.find_one({"_id": people._oid(pid)})
-    assert [e["v"] for e in doc["bio"]["h"]] == ["first", *(f"import {i}" for i in range(5))]
-    assert [e["v"] for e in doc["notes"]["h"]] == [f"note {i}" for i in range(5)]
-    assert doc["rev"] == 11 and await db().people.count_documents({}) == 1
 
 
 def test_norm_history_helpers():

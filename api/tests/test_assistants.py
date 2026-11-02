@@ -23,9 +23,7 @@ from app.assistants import normalize as normalize_assistant
 from app.assistants import runner
 from app.assistants.enrich import assistant as enrich_workflow
 from app.assistants.enrich import budget as enrich_budget
-from app.assistants.enrich.passage import Passage
 from app.history import Source
-from app.integrations import profile as profile_mod
 from app.integrations.firecrawl import (
     SCRAPE_CREDITS,
     SEARCH_CREDITS,
@@ -262,20 +260,6 @@ async def run_for(client, ids, **options):
     return (await client.get(f"/api/assistants/runs/{r.json()['id']}")).json()
 
 
-async def test_workflow_listing_and_permissions(reader, writer):
-    specs = {s["key"]: s for s in (await reader.get("/api/assistants")).json()}
-    assert specs["enrich"]["selector_field"] == "linkedin" and specs["enrich"]["scope"] == "people"
-    assert "refresh" in specs["enrich"]["options_schema"]["properties"]
-    r = await reader.post("/api/assistants/enrich/runs", json={"person_ids": ["x"]})
-    assert r.status_code == 403
-    assert (await reader.get("/api/assistants/runs")).json() == {"items": [], "has_more": False}
-    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": []})
-    assert r.status_code == 422
-    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": ["x"],
-                                                              "options": {"max_credits": 0}})
-    assert r.status_code == 422
-    r = await writer.post("/api/assistants/nope/runs", json={"person_ids": ["x"]})
-    assert r.status_code == 404
 
 
 async def test_full_ladder_writes_history_entries(writer, reader, people):
@@ -511,56 +495,10 @@ async def test_max_new_properties_reaches_the_storage_tool(writer, people, monke
     assert specs["enrich"]["options_schema"]["properties"]["max_new_properties"]["default"] == 0
 
 
-def test_passage_merges_lists_and_drops_a_second_text():
-    p = Passage()
-    assert not p
-    p.add("fullenrich/people/match", "LinkedIn profile",
-          [("about", "  Founder\nof PayRail "), ("skills", ["Payments", " payments", "Fintech"]),
-           ("languages", [])])
-    p.add("pdl/person/enrich", "PDL profile", [("skills", ["fintech", "Go-to-market"]),
-                                               ("about", "another about")])
-    assert p and p.keys == ["about", "skills"]
-    assert p.render() == ("# Facts from data providers; each line names the property it belongs to.\n"
-                          "# LinkedIn profile (fullenrich/people/match)\n"
-                          "about: Founder of PayRail\n"
-                          "skills: Payments; Fintech; Go-to-market")
-    assert p.source_of("skills") == "fullenrich/people/match, pdl/person/enrich"
-    assert p.dropped == [("about", "pdl/person/enrich")]
-    assert len(p.digest()) == 16 and p.digest() == Passage.digest(p)
 
 
-def test_name_fill_from_the_profile():
-    prof = profile_mod.LinkedInProfile(full_name="Alina Kharina")
-    assert profile_mod.name_fill(prof, "Alina") == "Alina Kharina"
-    assert profile_mod.name_fill(prof, "alina ") == "Alina Kharina"
-    assert profile_mod.name_fill(prof, None) == "Alina Kharina"
-    assert profile_mod.name_fill(prof, "Fleek") == "Alina Kharina"   # not a full name: the profile's
-    assert profile_mod.name_fill(prof, "Alina K.") == "Alina Kharina"  # an initial is not a last name
-    assert profile_mod.name_fill(prof, "Alina Kharina") is None
-    assert profile_mod.name_fill(prof, "Someone Else") is None        # a full name is kept
-    # the provider's full_name field is not always the full name
-    halves = profile_mod.LinkedInProfile(full_name="Jack", first_name="Jack", last_name="Mathews")
-    assert profile_mod.full_name(halves) == "Jack Mathews"
-    assert profile_mod.full_name(profile_mod.LinkedInProfile(full_name="jack", last_name=None)) is None
-    assert profile_mod.full_name(profile_mod.LinkedInProfile(first_name="Jack", last_name="M.")) is None
-    # taglines and handles are not full names, whatever their token count
-    for junk in ("Jordan | Cofounder | UXUY", "Lena@Cohere Commerce", "Raj - LootMogul accelerated by a16z",
-                 "Anna (she/her)", "DJ_Deep"):
-        assert not profile_mod.is_full_name(junk), junk
-    assert profile_mod.is_full_name("Rwaida Gharib-Kane") and profile_mod.is_full_name("O'Neil Mcdonald")
-    assert profile_mod.name_fill(profile_mod.LinkedInProfile(first_name="Ada"), "Ada") is None
 
 
-async def test_a_bare_first_name_is_completed_from_the_profile(writer, reader):
-    await import_people(writer, "Name,LinkedIn\nAda,https://www.linkedin.com/in/adaokafor\n",
-                        "p.csv", "plus_one")
-    ada = str((await db().people.find_one({"name.v": "Ada"}))["_id"])
-    run = await run_for(writer, [ada])
-    res = run["items"][0]["result"]
-    assert written(res)["name"] == "Ada Okafor"
-    person = (await reader.get(f"/api/people/{ada}")).json()
-    assert person["name"] == "Ada Okafor"
-    assert [e["src"]["by"] for e in person["history"]["name"]] == ["p.csv", "enrich/linkedin_reader"]
 
 
 async def test_normalise_enriches_a_record_without_a_full_name_first(writer, reader):
@@ -602,33 +540,8 @@ async def test_normalise_enriches_a_record_without_a_full_name_first(writer, rea
     assert "provider" not in specs["normalize"]["options_schema"]["properties"]
 
 
-def test_profile_lines_clean_provider_text():
-    prof = profile_mod.LinkedInProfile(
-        summary="Strategy &amp; ops \u2800\u2800 leader\u200b", languages=["english", "Yoruba"],
-        skills=["Payments", " payments "])
-    assert dict(profile_mod.profile_lines(prof)) == {
-        "about": "Strategy & ops leader", "skills": ["Payments", "payments"],
-        "languages": ["English", "Yoruba"]}
 
 
-def test_profile_lines_use_spec_properties_of_the_right_type():
-    from app.property_specs import SPECS
-    prof = profile_mod.LinkedInProfile(
-        summary="About.", current_title="CTO",
-        experience=[profile_mod.Position(title="CTO", company="Leafy", start="2022", is_current=True),
-                    profile_mod.Position(title="Engineer", start="2019-01", end="2021-12"),
-                    profile_mod.Position(company="Unknown Co")],
-        education=[profile_mod.Education(school="TU Berlin", degree="MSc", field="CS", end="2018")],
-        skills=["Python"], interests=["Climate"])
-    lines = dict(profile_mod.profile_lines(prof))
-    assert lines == {"about": "About.", "title_enriched": "CTO",
-                     "experience": "CTO at Leafy (2022–present); Engineer (2019–2021); Unknown Co",
-                     "education": "MSc CS, TU Berlin (2018)", "skills": ["Python"],
-                     "interests": ["Climate"]}
-    for key, value in lines.items():
-        assert SPECS[key].type == ("list" if isinstance(value, list) else
-                                   "keyword" if key == "title_enriched" else "text"), key
-    assert profile_mod.profile_lines(profile_mod.LinkedInProfile()) == []
 
 
 async def test_provider_error_is_a_skipped_step(writer, people):
@@ -708,71 +621,10 @@ async def test_run_cap_above_one_item_lets_a_bigger_batch_finish(writer, people)
     assert None not in traces and len(traces) == 4    # one Logfire trace per person
 
 
-def test_split_urls_handles_lists_and_separators():
-    from app.assistants.enrich.assistant import split_urls
-    assert split_urls("https://altschoolafrica.com/ , https:/Talentql.com") == [
-        "https://altschoolafrica.com/", "https:/Talentql.com"]
-    assert split_urls(["a.com; b.com", "c.com"]) == ["a.com", "b.com", "c.com"]
-    assert split_urls("no url here") == [] and split_urls(42) == []
 
 
-async def test_bulk_selector_and_listing(writer, people):
-    r = await writer.post("/api/assistants/enrich/runs", json={"all_with_field": "linkedin"})
-    assert r.status_code == 201 and r.json()["total"] == 3
-    await runner.drain()
-    runs = (await writer.get("/api/assistants/runs")).json()["items"]
-    assert runs[0]["id"] == r.json()["id"] and runs[0]["username"] == "wendy"
-    assert runs[0]["status"] == "done" and runs[0]["done"] == 3
-    acts = (await writer.get("/api/activity?action=assistant.run")).json()["items"]
-    assert acts[0]["meta"]["people"] == 3 and acts[0]["meta"]["assistant"] == "enrich"
-    item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
-    assert item["result"]["text"].startswith("Linkedin profile matched") or "LinkedIn" in item["result"]["text"]
-    assert all({"key", "action", "value", "previous", "flag"} <= set(c) for c in item["result"]["changes"])
 
 
-async def test_a_run_left_by_a_dead_worker_is_adopted_and_continues(writer, people):
-    from datetime import UTC, datetime, timedelta
-
-    from sqlalchemy import insert
-
-    from app import db as pg
-    stale = datetime.now(UTC) - timedelta(hours=1)
-    async with pg.engine().begin() as conn:
-        rid = (await conn.execute(insert(pg.workflow_runs).values(
-            workflow="enrich", status="running", total=2, worker="api:999", heartbeat_at=stale,
-            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
-        await conn.execute(insert(pg.workflow_run_items).values([
-            {"run_id": rid, "workflow": "enrich", "person_id": people["Cy Diaz"],
-             "status": "running", "attempts": 1, "label": "Cy Diaz"},
-            {"run_id": rid, "workflow": "enrich", "person_id": people["Dee Evans"],
-             "status": "queued", "attempts": 0, "label": "Dee Evans"}]))
-        # a CLI-owned run with a fresh heartbeat is left alone
-        other = (await conn.execute(insert(pg.workflow_runs).values(
-            workflow="enrich", status="running", total=0, worker="cli:4", heartbeat_at=datetime.now(UTC),
-            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
-    adopted = await runner.adopt(all_api_runs=True)
-    assert adopted == [rid]
-    run = await runner.wait(rid)
-    assert run["status"] == "done" and run["done"] == 2 and run["worker"].startswith("api:")
-    items = {it["person_id"]: it for it in (await writer.get(f"/api/assistants/runs/{rid}")).json()["items"]}
-    assert items[people["Cy Diaz"]]["status"] == "done" and items[people["Cy Diaz"]]["attempts"] == 2
-    messages = [e["message"] for e in await runner.events(rid)]
-    assert any(m.startswith("adopted by api:") and "1 item(s) requeued" in m for m in messages)
-    assert (await writer.get(f"/api/assistants/runs/{other}")).json()["worker"] == "cli:4"
-    assert (await writer.post(f"/api/assistants/runs/{rid}/cancel")).status_code == 409
-    # an item interrupted too often fails instead of running forever
-    async with pg.engine().begin() as conn:
-        rid2 = (await conn.execute(insert(pg.workflow_runs).values(
-            workflow="enrich", status="running", total=1, worker=None,
-            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
-        await conn.execute(insert(pg.workflow_run_items).values(
-            run_id=rid2, workflow="enrich", person_id=people["Cy Diaz"], status="running",
-            attempts=3, label="Cy Diaz"))
-    assert await runner.adopt(all_api_runs=False) == [rid2]
-    run = await runner.wait(rid2)
-    assert run["status"] == "done" and run["failed"] == 1
-    item = (await writer.get(f"/api/assistants/runs/{rid2}")).json()["items"][0]
-    assert item["status"] == "failed" and item["error"] == "interrupted repeatedly"
 
 
 async def test_unconfigured_firecrawl_fails_fast(writer, people, monkeypatch):

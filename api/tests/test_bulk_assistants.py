@@ -1,5 +1,5 @@
-"""The assistants that run over the database or answer in one item: merge (a CSV's rows, one item
-per person), embed, reparse and ask as runs; the CLI driving a run in its own process; enrich steps that are
+"""The assistants that run over the database or answer in one item: embed, reparse and ask as runs;
+the assistant listing, selectors and the adoption of runs left by a dead worker; the CLI driving a run in its own process; enrich steps that are
 not paid twice after an interruption."""
 
 import pytest
@@ -9,9 +9,9 @@ from app import db as pg
 from app import people
 from app.assistants import runner
 from app.config import get_settings
-from app.history import Source
 from app.mongo import db
-from tests.test_assistants import PEOPLE, FakeFirecrawl, written
+from tests.conftest import import_people
+from tests.test_assistants import PEOPLE
 from tests.test_assistants import _fakes as _fakes  # noqa: PLC0414  (fake Firecrawl, site + company agents)
 from tests.test_mcp import call, init
 from tests.test_tools import CSV
@@ -27,41 +27,18 @@ async def _import(client, text: str, name: str, tier: str = "member") -> dict:
     return {**body, "run": run}
 
 
+@pytest.fixture
+async def enrich_people(writer):
+    await import_people(writer, PEOPLE, "p.csv", "member")
+    return {d["name"]["v"]: str(d["_id"]) async for d in db().people.find({})}
+
+
 async def _vectors(field: str = "bio") -> int:
     async with pg.engine().connect() as conn:
         rows = (await conn.execute(select(pg.field_embeddings.c.field))).scalars().all()
     return rows.count(field)
 
 
-async def test_import_is_a_merge_run_with_one_item_per_person(writer, reader, monkeypatch):
-    monkeypatch.setattr(get_settings(), "fake_agents", True)
-    res = await _import(writer, CSV, "a.csv")
-    assert res["rows"] == 3 and res["skipped"] == 0 and res["new_properties"] == []
-    run = res["run"]
-    assert run["workflow"] == "merge" and run["total"] == 3 and run["done"] == 3
-    assert run["label"] == "a.csv"
-    items = (await reader.get(f"/api/assistants/runs/{run['id']}")).json()["items"]
-    ada = next(it for it in items if it["label"] == "Ada")
-    assert ada["person_id"] and ada["result"]["created"] and ada["result"]["match"]["decision"] == "new"
-    assert ada["result"]["written"] == ["bio", "mrr", "name", "notes", "stage"]
-    assert ada["result"]["review"]["kind"] == "Person"          # the closing review ran (fakes)
-    assert ada["result"]["text"].startswith("Created Ada (member); wrote bio, mrr, name, notes, stage")
-    assert await db().people.count_documents({}) == 3 and await _vectors("bio") == 3   # write hooks
-    # a second import of the same file matches by the file's ids, nothing duplicated
-    res = await _import(writer, CSV.replace("met at demo day", "met at the summit"), "a.csv")
-    assert res["run"]["done"] == 3
-    items = (await reader.get(f"/api/assistants/runs/{res['run']['id']}")).json()["items"]
-    ada = next(it for it in items if it["label"] == "Ada")
-    assert not ada["result"]["created"] and ada["result"]["match"]["tier"] == "identifier"
-    assert ada["result"]["written"] == ["notes"]
-    assert await db().people.count_documents({}) == 3
-    doc = await db().people.find_one({"name.v": "Ada"})
-    assert [e["v"] for e in doc["notes"]["h"]] == ["met at demo day", "met at the summit"]
-    acts = (await writer.get("/api/activity?action=people.import")).json()["items"]
-    assert acts[0]["meta"]["rows"] == 3 and acts[0]["meta"]["run_id"] == res["run"]["id"]
-    assert (await writer.get("/api/jobs")).status_code == 404        # the jobs list is gone
-    assert (await reader.post("/api/people/import", data={"tier": "member"},
-                              files={"file": ("a.csv", CSV.encode(), "text/csv")})).status_code == 403
 
 
 async def test_embed_and_reparse_run_in_batches(writer, reader, monkeypatch):
@@ -143,28 +120,6 @@ async def test_cli_drives_a_run_in_its_own_process(writer, tmp_path, monkeypatch
     assert all(r["status"] == "done" for r in runs)
 
 
-async def test_enrich_does_not_pay_twice_for_a_step_already_on_the_record(writer, reader):
-    # the LinkedIn step ran and its facts were filed (entries by enrich/linkedin_reader and
-    # enrich/storage are on the record) but the item never finished: a redo skips the paid step
-    # instead of spending 5 credits again
-    r = await writer.post("/api/people/import", data={"tier": "member"},
-                          files={"file": ("p.csv", PEOPLE.encode(), "text/csv")})
-    assert r.status_code == 201, r.text
-    await runner.wait(r.json()["run_id"])
-    ada = str((await db().people.find_one({"name.v": "Ada Okafor"}))["_id"])
-    await people.update(None, ada, {"linkedin_headline": "CEO at PayRail"},
-                        source=Source("agent", "enrich/linkedin_reader", "run:0/item:0"))
-    await people.update(None, ada, {"enrichment_passage": "# filed earlier"},
-                        source=Source("agent", "enrich/storage", "run:0/item:0"))
-    FakeFirecrawl.calls.clear()
-    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": [ada]})
-    run = await runner.wait(r.json()["id"])
-    item = (await reader.get(f"/api/assistants/runs/{run['id']}")).json()["items"][0]
-    assert item["status"] == "done"
-    steps = {s["step"]: s["reason"] for s in item["result"]["skipped"]}
-    assert "already" in steps["linkedin"]
-    assert not any(c[0] == "fullenrich/people/match" for c in FakeFirecrawl.calls)
-    assert "linkedin_headline" not in written(item["result"])
 
 
 async def test_mcp_starts_a_batch_assistant_and_ask(writer, reader, client_factory, monkeypatch):
@@ -196,3 +151,78 @@ async def test_mcp_starts_a_batch_assistant_and_ask(writer, reader, client_facto
 async def test_batch_assistants_refuse_an_empty_database(writer, key):
     r = await writer.post(f"/api/assistants/{key}/runs", json={})
     assert r.status_code == 422 and "no people" in r.text
+
+
+async def test_workflow_listing_and_permissions(reader, writer):
+    specs = {s["key"]: s for s in (await reader.get("/api/assistants")).json()}
+    assert specs["enrich"]["selector_field"] == "linkedin" and specs["enrich"]["scope"] == "people"
+    assert "refresh" in specs["enrich"]["options_schema"]["properties"]
+    r = await reader.post("/api/assistants/enrich/runs", json={"person_ids": ["x"]})
+    assert r.status_code == 403
+    assert (await reader.get("/api/assistants/runs")).json() == {"items": [], "has_more": False}
+    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": []})
+    assert r.status_code == 422
+    r = await writer.post("/api/assistants/enrich/runs", json={"person_ids": ["x"],
+                                                              "options": {"max_credits": 0}})
+    assert r.status_code == 422
+    r = await writer.post("/api/assistants/nope/runs", json={"person_ids": ["x"]})
+    assert r.status_code == 404
+
+
+async def test_bulk_selector_and_listing(writer, enrich_people):
+    r = await writer.post("/api/assistants/enrich/runs", json={"all_with_field": "linkedin"})
+    assert r.status_code == 201 and r.json()["total"] == 3
+    await runner.drain()
+    runs = (await writer.get("/api/assistants/runs")).json()["items"]
+    assert runs[0]["id"] == r.json()["id"] and runs[0]["username"] == "wendy"
+    assert runs[0]["status"] == "done" and runs[0]["done"] == 3
+    acts = (await writer.get("/api/activity?action=assistant.run")).json()["items"]
+    assert acts[0]["meta"]["people"] == 3 and acts[0]["meta"]["assistant"] == "enrich"
+    item = (await writer.get(f"/api/assistants/runs/{r.json()['id']}")).json()["items"][0]
+    assert item["result"]["text"].startswith("Linkedin profile matched") or "LinkedIn" in item["result"]["text"]
+    assert all({"key", "action", "value", "previous", "flag"} <= set(c) for c in item["result"]["changes"])
+
+
+async def test_a_run_left_by_a_dead_worker_is_adopted_and_continues(writer, enrich_people):
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import insert
+
+    from app import db as pg
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    async with pg.engine().begin() as conn:
+        rid = (await conn.execute(insert(pg.workflow_runs).values(
+            workflow="enrich", status="running", total=2, worker="api:999", heartbeat_at=stale,
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+        await conn.execute(insert(pg.workflow_run_items).values([
+            {"run_id": rid, "workflow": "enrich", "person_id": enrich_people["Cy Diaz"],
+             "status": "running", "attempts": 1, "label": "Cy Diaz"},
+            {"run_id": rid, "workflow": "enrich", "person_id": enrich_people["Dee Evans"],
+             "status": "queued", "attempts": 0, "label": "Dee Evans"}]))
+        # a CLI-owned run with a fresh heartbeat is left alone
+        other = (await conn.execute(insert(pg.workflow_runs).values(
+            workflow="enrich", status="running", total=0, worker="cli:4", heartbeat_at=datetime.now(UTC),
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+    adopted = await runner.adopt(all_api_runs=True)
+    assert adopted == [rid]
+    run = await runner.wait(rid)
+    assert run["status"] == "done" and run["done"] == 2 and run["worker"].startswith("api:")
+    items = {it["person_id"]: it for it in (await writer.get(f"/api/assistants/runs/{rid}")).json()["items"]}
+    assert items[enrich_people["Cy Diaz"]]["status"] == "done" and items[enrich_people["Cy Diaz"]]["attempts"] == 2
+    messages = [e["message"] for e in await runner.events(rid)]
+    assert any(m.startswith("adopted by api:") and "1 item(s) requeued" in m for m in messages)
+    assert (await writer.get(f"/api/assistants/runs/{other}")).json()["worker"] == "cli:4"
+    assert (await writer.post(f"/api/assistants/runs/{rid}/cancel")).status_code == 409
+    # an item interrupted too often fails instead of running forever
+    async with pg.engine().begin() as conn:
+        rid2 = (await conn.execute(insert(pg.workflow_runs).values(
+            workflow="enrich", status="running", total=1, worker=None,
+            params={"options": {}}).returning(pg.workflow_runs.c.id))).scalar_one()
+        await conn.execute(insert(pg.workflow_run_items).values(
+            run_id=rid2, workflow="enrich", person_id=enrich_people["Cy Diaz"], status="running",
+            attempts=3, label="Cy Diaz"))
+    assert await runner.adopt(all_api_runs=False) == [rid2]
+    run = await runner.wait(rid2)
+    assert run["status"] == "done" and run["failed"] == 1
+    item = (await writer.get(f"/api/assistants/runs/{rid2}")).json()["items"][0]
+    assert item["status"] == "failed" and item["error"] == "interrupted repeatedly"

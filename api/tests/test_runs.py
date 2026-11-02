@@ -12,6 +12,7 @@ from pydantic_ai.models.function import FunctionModel
 from app import people
 from app.assistants import credits, runner
 from app.config import get_settings
+from app.history import Source
 from app.mongo import db
 from app.tools import normalize as normalize_tool
 from tests.conftest import import_people
@@ -84,16 +85,19 @@ async def test_stop_cancels_in_flight_tools_and_skips_the_queue(people_by_name, 
                                                                   monkeypatch):
     monkeypatch.setattr(get_settings(), "assistant_concurrency", 1)
     cy, ada = people_by_name["Cy"], people_by_name["Ada"]
-    before = await db().people.find_one({"_id": people._oid(cy)})
+    # both records need the agent, so whichever item is dispatched first waits at the gate and
+    # the other stays queued, whatever order the scheduler picks
+    await people.update(None, ada, {"stage": "Pre-seed w/o revenue"}, source=Source("ui", "wendy"))
+    before = {pid: await db().people.find_one({"_id": people._oid(pid)}) for pid in (cy, ada)}
     gate = Gate()
     with normalize_tool.agent.override(model=FunctionModel(gate.model)):
         try:
-            run_id = await _start(writer, [cy, ada])     # Cy first: its stage text needs the agent
+            run_id = await _start(writer, [cy, ada])
             await asyncio.wait_for(gate.entered.wait(), 10)
             run = (await reader.get(f"/api/assistants/runs/{run_id}")).json()
             assert run["status"] == "running"
-            statuses = {it["person_id"]: it["status"] for it in run["items"]}
-            assert statuses == {cy: "running", ada: "queued"}
+            statuses = sorted(it["status"] for it in run["items"])
+            assert statuses == ["queued", "running"]
             r = await writer.post(f"/api/assistants/runs/{run_id}/stop")
             assert r.status_code == 200, r.text
         finally:
@@ -103,8 +107,8 @@ async def test_stop_cancels_in_flight_tools_and_skips_the_queue(people_by_name, 
     items = {it["person_id"]: it for it in (await reader.get(f"/api/assistants/runs/{run_id}")).json()["items"]}
     assert items[cy]["status"] == "skipped" and items[cy]["error"] == "stopped"
     assert items[ada]["status"] == "skipped" and items[ada]["error"] == "stopped"
-    after = await db().people.find_one({"_id": people._oid(cy)})
-    assert after == before                                  # the in-flight tool wrote nothing
+    for pid in (cy, ada):                                   # the in-flight tool wrote nothing
+        assert await db().people.find_one({"_id": people._oid(pid)}) == before[pid]
     assert (await writer.post(f"/api/assistants/runs/{run_id}/stop")).status_code == 409
     assert (await writer.post(f"/api/assistants/runs/{run_id}/resume")).status_code == 409
 

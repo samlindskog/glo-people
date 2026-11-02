@@ -4,7 +4,9 @@ from typing import get_args
 
 from app.assistants.enrich import budget
 from app.assistants.enrich.models import EnrichOptions, ProviderKey
+from app.assistants.enrich.passage import Passage
 from app.assistants.enrich.providers import PROVIDERS
+from app.integrations import profile as profile_mod
 from app.integrations.firecrawl import AsyncFirecrawl
 
 
@@ -79,3 +81,82 @@ async def test_find_tools_is_a_free_catalogue_query(monkeypatch):
                     "limit": 10}}})]
     await client.find_tools(categories=["people"], level="providers")
     assert "expand" not in sent[1][1]["alexandria"]["options"]       # not accepted at that level
+
+
+# --- the shared profile and passage helpers (level 0/2 pure functions) ---
+
+def test_passage_merges_lists_and_drops_a_second_text():
+    p = Passage()
+    assert not p
+    p.add("fullenrich/people/match", "LinkedIn profile",
+          [("about", "  Founder\nof PayRail "), ("skills", ["Payments", " payments", "Fintech"]),
+           ("languages", [])])
+    p.add("pdl/person/enrich", "PDL profile", [("skills", ["fintech", "Go-to-market"]),
+                                               ("about", "another about")])
+    assert p and p.keys == ["about", "skills"]
+    assert p.render() == ("# Facts from data providers; each line names the property it belongs to.\n"
+                          "# LinkedIn profile (fullenrich/people/match)\n"
+                          "about: Founder of PayRail\n"
+                          "skills: Payments; Fintech; Go-to-market")
+    assert p.source_of("skills") == "fullenrich/people/match, pdl/person/enrich"
+    assert p.dropped == [("about", "pdl/person/enrich")]
+    assert len(p.digest()) == 16 and p.digest() == Passage.digest(p)
+
+
+def test_name_fill_from_the_profile():
+    prof = profile_mod.LinkedInProfile(full_name="Alina Kharina")
+    assert profile_mod.name_fill(prof, "Alina") == "Alina Kharina"
+    assert profile_mod.name_fill(prof, "alina ") == "Alina Kharina"
+    assert profile_mod.name_fill(prof, None) == "Alina Kharina"
+    assert profile_mod.name_fill(prof, "Fleek") == "Alina Kharina"   # not a full name: the profile's
+    assert profile_mod.name_fill(prof, "Alina K.") == "Alina Kharina"  # an initial is not a last name
+    assert profile_mod.name_fill(prof, "Alina Kharina") is None
+    assert profile_mod.name_fill(prof, "Someone Else") is None        # a full name is kept
+    # the provider's full_name field is not always the full name
+    halves = profile_mod.LinkedInProfile(full_name="Jack", first_name="Jack", last_name="Mathews")
+    assert profile_mod.full_name(halves) == "Jack Mathews"
+    assert profile_mod.full_name(profile_mod.LinkedInProfile(full_name="jack", last_name=None)) is None
+    assert profile_mod.full_name(profile_mod.LinkedInProfile(first_name="Jack", last_name="M.")) is None
+    # taglines and handles are not full names, whatever their token count
+    for junk in ("Jordan | Cofounder | UXUY", "Lena@Cohere Commerce", "Raj - LootMogul accelerated by a16z",
+                 "Anna (she/her)", "DJ_Deep"):
+        assert not profile_mod.is_full_name(junk), junk
+    assert profile_mod.is_full_name("Rwaida Gharib-Kane") and profile_mod.is_full_name("O'Neil Mcdonald")
+    assert profile_mod.name_fill(profile_mod.LinkedInProfile(first_name="Ada"), "Ada") is None
+
+
+def test_profile_lines_clean_provider_text():
+    prof = profile_mod.LinkedInProfile(
+        summary="Strategy &amp; ops \u2800\u2800 leader\u200b", languages=["english", "Yoruba"],
+        skills=["Payments", " payments "])
+    assert dict(profile_mod.profile_lines(prof)) == {
+        "about": "Strategy & ops leader", "skills": ["Payments", "payments"],
+        "languages": ["English", "Yoruba"]}
+
+
+def test_profile_lines_use_spec_properties_of_the_right_type():
+    from app.property_specs import SPECS
+    prof = profile_mod.LinkedInProfile(
+        summary="About.", current_title="CTO",
+        experience=[profile_mod.Position(title="CTO", company="Leafy", start="2022", is_current=True),
+                    profile_mod.Position(title="Engineer", start="2019-01", end="2021-12"),
+                    profile_mod.Position(company="Unknown Co")],
+        education=[profile_mod.Education(school="TU Berlin", degree="MSc", field="CS", end="2018")],
+        skills=["Python"], interests=["Climate"])
+    lines = dict(profile_mod.profile_lines(prof))
+    assert lines == {"about": "About.", "title_enriched": "CTO",
+                     "experience": "CTO at Leafy (2022–present); Engineer (2019–2021); Unknown Co",
+                     "education": "MSc CS, TU Berlin (2018)", "skills": ["Python"],
+                     "interests": ["Climate"]}
+    for key, value in lines.items():
+        assert SPECS[key].type == ("list" if isinstance(value, list) else
+                                   "keyword" if key == "title_enriched" else "text"), key
+    assert profile_mod.profile_lines(profile_mod.LinkedInProfile()) == []
+
+
+def test_split_urls_handles_lists_and_separators():
+    from app.assistants.enrich.assistant import split_urls
+    assert split_urls("https://altschoolafrica.com/ , https:/Talentql.com") == [
+        "https://altschoolafrica.com/", "https:/Talentql.com"]
+    assert split_urls(["a.com; b.com", "c.com"]) == ["a.com", "b.com", "c.com"]
+    assert split_urls("no url here") == [] and split_urls(42) == []
