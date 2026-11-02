@@ -137,6 +137,32 @@ async def recompute_shown(dry_run: bool, sample: int) -> None:
         print(f"  - {row['name']} ({row['id']}) {row['key']}: {row['from']!r} -> {row['to']!r} [{row['kinds']}]")
 
 
+async def agent_report(days: int) -> None:
+    """How agents use the application over MCP in the last `days` days (the agent ledger)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app import agent_log
+    from app.mcp_server import mcp
+    since = datetime.now(UTC) - timedelta(days=days)
+    rep = await agent_log.report(since, [t.name for t in await mcp.list_tools()])
+    print(f"last {days} days: {rep['calls']} calls, {rep['errors']} errors, {rep['keys']} keys, "
+          f"{rep['runs_started']} runs started")
+    print(f"retries {rep['retries']}; dry runs {rep['dry_runs']} of which followed by a write "
+          f"{rep['writes_after_dry_run']}; list_properties re-read {rep['list_properties_rereads']}x")
+    print("by tool:")
+    for t in rep["by_tool"]:
+        print(f"  {t['tool']:22} {t['calls']:6} calls {t['errors']:4} errors  p50 {t['p50_ms']} ms")
+    if rep["top_errors"]:
+        print("top errors:")
+        for e in rep["top_errors"]:
+            print(f"  {e['n']:4}x {e['tool']}: {e['error']}")
+    if rep["unused_tools"]:
+        print("never used:", ", ".join(rep["unused_tools"]))
+    for k in await agent_log.by_key(since):
+        print(f"key {k['api_key_id']} {k['key_name']!r} ({k['username']}): {k['calls']} calls, "
+              f"{k['errors']} errors, {k['sessions']} conversations, last {k['last_seen'][:16]}")
+
+
 async def dedupe(apply: bool) -> None:
     """Documents sharing a LinkedIn URL or an email: merge the groups whose names agree (the
     oldest document kept), list the rest. Without --yes only lists."""
@@ -422,6 +448,8 @@ def main() -> None:
     dd = sub.add_parser("dedupe", help="merge documents that share a LinkedIn URL or an email "
                                        "(same name: merged, oldest kept; else listed)")
     dd.add_argument("--yes", action="store_true", help="without it: list the groups only")
+    ar = sub.add_parser("agent-report", help="how agents use the application over MCP (the ledger)")
+    ar.add_argument("--days", type=int, default=7)
     rs = sub.add_parser("recompute-shown", help="recompute each property's shown value from its "
                                                 "history under the trust ranking (backfill)")
     rs.add_argument("--yes", action="store_true", help="write the flips; without it: report only")
@@ -469,6 +497,8 @@ def main() -> None:
                     await dedupe(args.yes)
                 case "recompute-shown":
                     await recompute_shown(not args.yes, args.sample)
+                case "agent-report":
+                    await agent_report(args.days)
                 case "embed":
                     await embed(args.field)
                 case "properties":

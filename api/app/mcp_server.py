@@ -2,8 +2,10 @@
 
 import json
 import logging
+import time
 from typing import Annotated, Any, Literal
 
+import logfire
 from fastapi import HTTPException
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -12,12 +14,13 @@ from pydantic import Field
 from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import activity, auth, fields, importer, properties
+from app import agent_log, auth, fields, importer, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, merge, runner
 from app.assistants.ask import ask
 from app.assistants.merge import MergeOptions
 from app.auth import Principal
+from app.config import get_settings
 from app.history import Source
 from app.tools import invoke
 from app.tools import normalize as normalize_tool
@@ -31,7 +34,6 @@ from app.tools.search import (
     SearchRequest,
     SemanticQuery,
     SortSpec,
-    describe,
     record_search,
     run_search,
 )
@@ -80,13 +82,46 @@ key (kind "mcp") with that name in its reference."""
 
 
 class GloMCP(MCPServer):
-    """Hides write tools from keys whose owner lacks people:write."""
+    """Hides write tools from keys whose owner lacks people:write, and records every tool call in
+    the agent ledger (`app.agent_log`): who, which tool, the shape of the arguments, the outcome
+    the agent saw, how long it took."""
 
     async def _handle_list_tools(self, ctx, params):
         result = await super()._handle_list_tools(ctx, params)
         principal = await _principal_from_request(ctx.request)
         if principal is None or not principal.can("people:write"):
             result.tools = [t for t in result.tools if t.name not in WRITE_TOOLS]
+        return result
+
+    async def _handle_call_tool(self, ctx, params):
+        request = ctx.request
+        headers = getattr(request, "headers", None) or {}
+        session = headers.get("x-agent-session") or headers.get("mcp-session-id")
+        principal = await _principal_from_request(request)
+        t0 = time.monotonic()
+        with logfire.span("mcp {tool}", tool=params.name, api_key_id=getattr(principal, "api_key_id", None),
+                          session=session) as span:
+            result = await super()._handle_call_tool(ctx, params)
+            is_error = bool(getattr(result, "is_error", False))
+            error = None
+            payload: Any = None
+            if is_error:
+                content = getattr(result, "content", None) or []
+                error = getattr(content[0], "text", None) if content else "error"
+            else:
+                payload = getattr(result, "structured_content", None)
+                if payload is None:                       # a tool answering plain JSON text
+                    content = getattr(result, "content", None) or []
+                    text = getattr(content[0], "text", None) if content else None
+                    try:
+                        payload = json.loads(text) if text else None
+                    except ValueError:
+                        payload = None
+            span.set_attribute("ok", not is_error)
+        await agent_log.record(agent_log.Call(
+            tool=params.name, principal=principal, session=session, args=params.arguments or {},
+            ok=not is_error, error=error, duration_ms=int((time.monotonic() - t0) * 1000),
+            result=payload), full_args=get_settings().mcp_log_args)
         return result
 
 
@@ -118,8 +153,7 @@ async def _principal(ctx: Context, permission: str) -> Principal:
 async def list_properties(ctx: Context) -> list[dict]:
     """List every property on people records: key, label, type, canonical values (enum types),
     coverage count, and whether it is embeddable (usable in search_people semantic.fields)."""
-    principal = await _principal(ctx, "people:read")
-    await activity.record("mcp.list_properties", principal)
+    await _principal(ctx, "people:read")
     props = await properties.catalog(await people_svc.coverage())
     return [p.model_dump(mode="json") for p in props]
 
@@ -160,8 +194,6 @@ async def search_people(
     except ValueError as e:
         raise ToolError(str(e)) from e
     resp.search_id = await record_search(principal, req, resp, "mcp")
-    await activity.record("mcp.search", principal, str(resp.search_id),
-                          {**describe(req), "total": resp.total})
     out = json.loads(resp.model_dump_json())
     if fields:
         keep = {"id", "tier", "name", "score", "field_scores", *fields}
@@ -177,14 +209,13 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
     """Fetch one person by id: the shown field values plus, by default, `history`
     ({field: [{v, ts, src, derived?, shown?, why?}], oldest first}; the entry marked `shown` is
     the one the value comes from)."""
-    principal = await _principal(ctx, "people:read")
+    await _principal(ctx, "people:read")
     try:
         person = await people_svc.get(id, include_history=include_history)
     except people_svc.PersonError as e:
         raise ToolError(str(e)) from e
     if not person:
         raise ToolError("person not found")
-    await activity.record("mcp.get_person", principal, id)
     return person
 
 
@@ -202,14 +233,12 @@ async def find_people(
     would: decision `matched` (person_id, tier: identifier | name | name+context, keys), `ambiguous`
     (candidates to choose between) or `new` (nobody). Deterministic and exact; use it before
     search_people when you have a name or an identifier."""
-    principal = await _principal(ctx, "people:read")
+    await _principal(ctx, "people:read")
     values = {k: v for k, v in {"name": name, "email": email, "phone_number": phone,
                                 "linkedin": linkedin, "github": github}.items() if v}
     if not values:
         raise ToolError("give a name or an identifier (email, phone, linkedin, github)")
     match = await importer.match_record(values)
-    await activity.record("mcp.find_people", principal, match.person_id or "-",
-                          {"decision": match.decision, "keys": sorted(values)})
     return match.public()
 
 
@@ -322,12 +351,11 @@ async def plan_search(
     the question into typed filters (canonical enum values, numbers, ISO dates) and a passage per
     embeddable property; the result is a search request you run with search_people, plus the
     planner's rationale. Nothing is executed or written."""
-    principal = await _principal(ctx, "people:read")
+    await _principal(ctx, "people:read")
     try:
         result = await plan_search_tool(question, tier, filters or [], options or Tuning())
     except (ValueError, AgentRunError) as e:
         raise ToolError(str(e)) from e
-    await activity.record("mcp.plan", principal, None, {"question": question})
     return json.loads(result.model_dump_json())
 
 
@@ -352,8 +380,6 @@ async def ask_people(
                            source="mcp")
     except (ValueError, AgentRunError) as e:
         raise ToolError(str(e)) from e
-    await activity.record("mcp.ask", principal, str(result.search_id),
-                          {"question": question, "total": result.total})
     return json.loads(result.model_dump_json())
 
 
@@ -381,9 +407,6 @@ async def store_about_person(
     result = await _run_tool(ctx, store_tool.store, id, src, principal,
                              passage=passage, opts=options or StoreOptions())
     assert isinstance(result, store_tool.StoreResult)
-    await activity.record("mcp.store", principal, id, {
-        "changes": [{"key": c.key, "action": c.action} for c in result.changes],
-        "created": result.created_properties})
     return json.loads(result.model_dump_json())
 
 

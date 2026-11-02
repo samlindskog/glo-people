@@ -156,6 +156,23 @@ workflow_run_items = Table(
     Index("ix_workflow_run_items_person", "workflow", "person_id", "finished_at"),
 )
 
+agent_calls = Table(
+    "agent_calls", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("api_key_id", Integer, ForeignKey("api_keys.id", ondelete="SET NULL")),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Column("session", String(64)),
+    Column("tool", String(64), nullable=False),
+    Column("args", JSONB, nullable=False, server_default="{}"),
+    Column("result", JSONB),
+    Column("ok", Boolean, nullable=False, server_default="true"),
+    Column("error", Text),
+    Column("duration_ms", Integer, nullable=False, server_default="0"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Index("ix_agent_calls_key_time", "api_key_id", "created_at"),
+    Index("ix_agent_calls_tool", "tool"),
+)
+
 workflow_run_events = Table(
     "workflow_run_events",
     metadata,

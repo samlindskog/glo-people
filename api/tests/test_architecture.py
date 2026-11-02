@@ -10,7 +10,7 @@ APP = Path(__file__).resolve().parents[1] / "app"
 LEVELS: dict[str, int] = {
     # 0 — rules and adapters
     **dict.fromkeys(["fields", "names", "history", "normalize", "property_specs", "embedder", "urls",
-                     "config", "db", "mongo", "auth", "permissions", "activity", "observability",
+                     "config", "db", "mongo", "auth", "permissions", "activity", "agent_log", "observability",
                      "integrations", "hub"], 0),
     # 1 — stores
     **dict.fromkeys(["properties", "people", "embeddings", "importer"], 1),

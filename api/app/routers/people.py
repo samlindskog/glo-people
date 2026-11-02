@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import AgentRunError
 from sqlalchemy import select
 
-from app import activity, db, fields, importer
+from app import activity, agent_log, db, fields, importer
 from app import people as people_svc
 from app.assistants import merge, runner
 from app.assistants.merge import MergeOptions
@@ -341,6 +341,39 @@ async def get_search(search_id: int,
     if row["user_id"] != principal.user_id and not principal.can("searches:read_all"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "search not found")
     return dict(row)
+
+
+Auditor = Annotated[Principal, Depends(require("activity:read"))]
+
+
+def _since(days: int) -> datetime:
+    return datetime.now(UTC) - timedelta(days=days)
+
+
+@router.get("/activity/agents")
+async def agents_overview(_: Auditor, days: Annotated[int, Query(ge=1, le=365)] = 30) -> dict:
+    """How the agents behind each API key use the application over MCP: calls, errors,
+    conversations, tool mix, first and last seen (from the agent ledger)."""
+    return {"since": _since(days).isoformat(), "keys": await agent_log.by_key(_since(days))}
+
+
+@router.get("/activity/agents/report")
+async def agents_report(_: Auditor, days: Annotated[int, Query(ge=1, le=365)] = 30) -> dict:
+    """The numbers that point at product fixes: calls and errors per tool with median latency,
+    the top error texts agents saw, retries, dry-run to write conversion, catalog re-reads, runs
+    started, tools never used."""
+    from app.mcp_server import mcp
+    tools = [t.name for t in await mcp.list_tools()]
+    return await agent_log.report(_since(days), tools)
+
+
+@router.get("/activity/agents/{api_key_id}/sessions")
+async def agent_sessions(api_key_id: int, _: Auditor,
+                         days: Annotated[int, Query(ge=1, le=365)] = 30,
+                         limit: Annotated[int, Query(ge=1, le=200)] = 50) -> dict:
+    """One key's conversations, newest first, each with its calls in order (tool, outcome, duration,
+    the shape of arguments and result)."""
+    return {"sessions": await agent_log.key_sessions(api_key_id, _since(days), limit)}
 
 
 @router.get("/activity")

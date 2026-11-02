@@ -342,6 +342,56 @@ export interface AskResult {
   search_id: number | null
 }
 
+/** The agent ledger: how the agents behind API keys use the application over MCP. */
+export interface AgentKeySummary {
+  api_key_id: number | null
+  key_name: string | null
+  username: string | null
+  calls: number
+  errors: number
+  sessions: number
+  tools: Record<string, number>
+  first_seen: string
+  last_seen: string
+}
+
+export interface AgentCall {
+  id: number
+  tool: string
+  ok: boolean
+  error: string | null
+  duration_ms: number
+  args: unknown
+  result: unknown
+  session: string | null
+  created_at: string
+}
+
+export interface AgentSession {
+  session: string | null
+  started_at: string
+  ended_at: string
+  calls_n: number
+  errors: number
+  tools: string[]
+  calls: AgentCall[]
+}
+
+export interface AgentReport {
+  since: string | null
+  calls: number
+  errors: number
+  keys: number
+  by_tool: { tool: string; calls: number; errors: number; p50_ms: number }[]
+  top_errors: { tool: string; error: string; n: number }[]
+  retries: number
+  dry_runs: number
+  writes_after_dry_run: number
+  list_properties_rereads: number
+  runs_started: number
+  unused_tools: string[]
+}
+
 export interface ActivityItem {
   id: number
   user_id: number | null

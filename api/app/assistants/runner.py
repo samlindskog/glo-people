@@ -33,7 +33,7 @@ import logfire
 from opentelemetry import context as otel_context
 from sqlalchemy import delete, func, or_, select, update
 
-from app import activity, db, hub
+from app import activity, agent_log, db, hub
 from app import people as people_svc
 from app.assistants.base import REGISTRY, AssistantSpec, ItemSpec, PauseRun
 from app.assistants.context import AssistantDeps
@@ -683,6 +683,7 @@ class _Scheduler:
         async with db.engine().begin() as conn:
             await conn.execute(delete(e).where(e.c.run_id.in_(
                 select(r.c.id).where(r.c.finished_at < cutoff))))
+        await agent_log.prune(get_settings().agent_calls_retention_days)
 
 
 async def _rows(q: Any) -> list[Any]:

@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     run_stale_s: int = 60
     item_max_attempts: int = 3
     run_events_retention_days: int = 30
+    agent_calls_retention_days: int = 90   # the MCP call ledger (agent_log)
+    mcp_log_args: bool = False           # keep full tool arguments in the ledger, not just their shape
     firecrawl_credits_cache_s: int = 60
 
     # Logfire: LOGFIRE_TOKEN is read by the SDK itself; nothing is exported without it.

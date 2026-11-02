@@ -1,4 +1,7 @@
 import type {
+  AgentKeySummary,
+  AgentReport,
+  AgentSession,
   ActivityItem,
   ApiKey,
   AssistantRun,
@@ -118,6 +121,11 @@ export const api = {
     limit?: number
     offset?: number
   }) => request<Page<ActivityItem>>('GET', `/api/activity${qs(params)}`),
+
+  agents: (days = 30) => request<{ since: string; keys: AgentKeySummary[] }>('GET', `/api/activity/agents?days=${days}`),
+  agentReport: (days = 30) => request<AgentReport>('GET', `/api/activity/agents/report?days=${days}`),
+  agentSessions: (keyId: number, days = 30) =>
+    request<{ sessions: AgentSession[] }>('GET', `/api/activity/agents/${keyId}/sessions?days=${days}`),
 
   users: () => request<User[]>('GET', '/api/users'),
   createUser: (username: string, password: string, role: string) =>
