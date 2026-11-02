@@ -211,3 +211,26 @@ async def test_rate_limited_calls_back_off_and_succeed(monkeypatch):
 def test_a_tool_billing_far_above_its_price_is_flagged():
     from app.integrations import firecrawl as fc
     assert fc.overpriced(5) == 15 and fc.overpriced(1) == 11 and fc.overpriced(60) == 120
+
+
+def test_options_describe_their_cost_and_warn_about_a_dear_provider(monkeypatch):
+    from app.integrations import firecrawl as fc
+    monkeypatch.setitem(fc.OBSERVED_PRICES, "people-data-labs/person/enrich", 60)
+    prices = {p["key"]: p for p in budget.provider_prices()}
+    assert prices["fullenrich"] == {"key": "fullenrich", "label": "FullEnrich",
+                                    "credits_per_match": 5, "last_billed": None}
+    assert prices["people-data-labs"]["credits_per_match"] == 60
+    assert prices["people-data-labs"]["last_billed"] == 60
+    d = budget.describe(EnrichOptions())
+    assert [p["key"] for p in d["providers"]] == ["fullenrich"] and d["warnings"] == []
+    assert d["typical_per_item"] == 5 + 2 and d["worst_case_per_item"] == 16
+    assert d["comparable"] == ("providers", ["fullenrich"])
+    assert budget.describe(EnrichOptions(providers=[]))["typical_per_item"] == 2
+    pdl_first = budget.describe(EnrichOptions(providers=["people-data-labs", "fullenrich"]))
+    assert pdl_first["typical_per_item"] == 60 + 2          # gaps: the second is asked rarely
+    assert pdl_first["worst_case_per_item"] == 76
+    assert len(pdl_first["warnings"]) == 1 and "60 credits per match" in pdl_first["warnings"][0]
+    assert "asked for People Data Labs by name" in pdl_first["warnings"][0]
+    both = budget.describe(EnrichOptions(providers=["fullenrich", "people-data-labs"],
+                                         provider_policy="all"))
+    assert both["typical_per_item"] == 67 and both["comparable"][1] == ["fullenrich", "people-data-labs"]

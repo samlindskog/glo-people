@@ -18,6 +18,7 @@ from app import agent_log, auth, fields, importer, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, credits, merge, runner
 from app.assistants.ask import ask
+from app.assistants.enrich import budget as enrich_budget
 from app.assistants.enrich.models import EnrichOptions
 from app.assistants.merge import MergeOptions
 from app.auth import Principal
@@ -73,6 +74,12 @@ Playbook
   a higher one. The runner reserves the worst case per item in flight (reserved_per_item, ~16) and
   only dispatches while spend + reservations fit the cap, so use at least minimum_cap; `reserved`
   on get_credits and get_run is that worst case, not spend — judge cost by credits_per_done.
+  Options for enrich: max_credits, and refresh when the person wants a recent enrichment redone.
+  Never set providers yourself: the default (FullEnrich, 5 credits a match) is the right one;
+  People Data Labs bills 60 a match and is only for when the person asks for it by name. plan_run,
+  start_assistant and get_run show `cost.providers` with the price of each and `warnings` when a
+  dear one is in; get_credits lists every provider's price. A paused run keeps the options it was
+  started with (params.options on get_run); resume_run(options={…}) changes them.
 - Long runs: do not wait inside the call. Note the run id, poll get_run every few minutes and report
   progress.percent, items_per_min, eta_min and credits_used; list_runs shows what is active.
   pause_run / stop_run if the person asks. When it finishes, summarise the items by status.
@@ -308,8 +315,10 @@ async def enrich_person(
     ctx: Context,
     id: Annotated[str, Field(description="Person id")],
     options: Annotated[EnrichOptions | None,
-                       Field(description="max_credits (default 30 for one person), providers, "
-                                         "provider_policy, refresh, max_new_properties")] = None,
+                       Field(description="max_credits (default 30 for one person) and refresh. "
+                                         "Leave providers unset (FullEnrich, 5 credits a match) "
+                                         "unless People Data Labs (60 a match) was asked for by "
+                                         "name.")] = None,
 ) -> dict:
     """Assistant: enrich one person now (requires people:write; costs Firecrawl credits, capped
     by options.max_credits). Resolves their LinkedIn profile through the data providers, reads
@@ -333,7 +342,8 @@ async def enrich_person(
     written = sorted({c["key"] for c in changes if c.get("action") in ("set", "append")})
     keep = ("run_id", "item_id", "status", "error", "credits", "text", "linkedin", "providers",
             "storage", "stored", "not_found", "skipped", "review", "kept")
-    return {**{k: res.get(k) for k in keep if k in res}, "written": written, "changes": changes}
+    return {**{k: res.get(k) for k in keep if k in res}, "written": written, "changes": changes,
+            "warnings": enrich_budget.describe(opts)["warnings"]}
 
 
 @mcp.tool()
@@ -587,13 +597,29 @@ def _item_view(it: dict) -> dict:
     return out
 
 
+def _cost_view(run: dict) -> dict:
+    """What the run's stored options cost (`cost`) and the warnings they carry, for a reader
+    deciding whether to resume or repeat it; empty for an assistant that spends nothing."""
+    spec = REGISTRY.get(run["workflow"])
+    if spec is None or spec.describe_cost is None:
+        return {}
+    try:
+        cost = dict(spec.describe_cost(spec.options_model.model_validate(
+            (run.get("params") or {}).get("options") or {})))
+    except ValueError:
+        return {}
+    cost.pop("comparable", None)
+    return {"warnings": cost.pop("warnings", []), "cost": cost}
+
+
 async def _run_view(run_id: int, events: int = 0) -> dict:
     run = await runner.get_run(run_id)
     if run is None:
         raise ToolError("run not found")
     items = await runner.get_items(run_id, limit=500)
     recent = (await runner.events(run_id, limit=100_000))[-events:] if events else []
-    return {**run, "progress": await runner.progress(run), "items": [_item_view(it) for it in items],
+    return {**run, **_cost_view(run), "progress": await runner.progress(run),
+            "items": [_item_view(it) for it in items],
             "events": [{k: e.get(k) for k in ("id", "ts", "kind", "message", "item_id")}
                        for e in recent]}
 
@@ -616,7 +642,9 @@ async def plan_run(
     how many it would skip because they were enriched within the TTL, and the eligible count; the
     recent cost of one item (credits, model tokens, seconds, from the last 90 days of runs); the
     estimated credits, tokens and minutes; the Firecrawl balance and whether the estimate fits;
-    and a recommended options.max_credits. Writes nothing and costs nothing. Call it before any
+    and a recommended options.max_credits; `cost` names the providers the options would ask with
+    the price of each, and `warnings` says when one of them should not be in (People Data Labs,
+    60 a match, unless asked for by name). Writes nothing and costs nothing. Call it before any
     run over many people and tell the person what it will cost."""
     from app.routers.assistants import RunRequest, plan
     spec = REGISTRY.get(key)
@@ -641,10 +669,10 @@ async def get_credits(ctx: Context) -> dict:
     NOT what they spent: actual spend is on each finished item (`credits`) and on the run
     (`credits_used`, `progress.credits_per_done`; typically 2–7 per person). Enrichment spends
     credits (FullEnrich 5 per match, a site read 1, GitHub 5; People Data Labs 60, only when
-    opted in); nothing else does. Null
-    when no provider key is set."""
+    asked for by name); nothing else does. `prices` lists every data provider with its listed
+    price per match and the last bill seen. `credits` is null when no provider key is set."""
     await _principal(ctx, "people:read")
-    return {"credits": await credits.summary()}
+    return {"credits": await credits.summary(), "prices": enrich_budget.provider_prices()}
 
 
 @mcp.tool()
@@ -668,8 +696,9 @@ async def get_run(ctx: Context, run_id: int,
     """Assistant: a run's state (status, counts, credits, pause reason), its progress (percent,
     items per minute, the estimated minutes left, credits per done item, model tokens so far),
     its items (status, the person each one created or matched, what it wrote, its one-line
-    text) and its latest activity. Poll it every few minutes for a long run and report the
-    progress in plain words."""
+    text), its latest activity, and for enrich the options it runs with (params.options), what
+    they cost (`cost.providers`) and `warnings`. Poll it every few minutes for a long run and
+    report the progress in plain words."""
     await _principal(ctx, "people:read")
     return await _run_view(run_id, events)
 
@@ -688,7 +717,10 @@ async def resume_run(ctx: Context, run_id: int,
                      options: Annotated[dict[str, Any] | None,
                                         Field(description="Options to change, e.g. max_credits")] = None
                      ) -> dict:
-    """Assistant: continue a paused run, optionally with other options (requires people:write)."""
+    """Assistant: continue a paused run, optionally with other options (requires people:write).
+    A paused run keeps the options it was started with — read get_run's params.options, cost and
+    warnings first; pass options to change them (a higher max_credits, or providers=["fullenrich"]
+    for a run that was started with a dear provider)."""
     principal = await _principal(ctx, "people:write")
     try:
         ok = await runner.resume(run_id, options, principal)

@@ -138,23 +138,38 @@ async def progress(run: dict) -> dict[str, Any]:
             "eta_min": round(eta) if eta is not None else None}
 
 
-async def history_averages(workflow: str, days: int = 90) -> dict[str, Any]:
+async def history_averages(workflow: str, days: int = 90, *,
+                           comparable: tuple[str, list[str]] | None = None,
+                           sample: int = 2000) -> dict[str, Any]:
     """What one finished item of this assistant cost lately: credits, model tokens and seconds,
-    averaged over the done items of the last `days` days (skipped and failed items excluded)."""
+    averaged over the newest `sample` done items of the last `days` days (skipped and failed
+    items excluded). `comparable=(field, keys)` keeps only the items whose `result[field]` names
+    exactly those keys — an enrichment with other providers costs something else."""
     i = db.workflow_run_items
     cutoff = _now() - timedelta(days=days)
     secs = func.extract("epoch", i.c.finished_at - i.c.started_at)
     tok = (func.coalesce(i.c.result["tokens"]["input"].astext.cast(Integer), 0)
            + func.coalesce(i.c.result["tokens"]["output"].astext.cast(Integer), 0))
-    q = select(func.count(), func.avg(i.c.credits), func.avg(tok), func.avg(secs)).where(
+    cols = [i.c.credits, tok, secs] + ([i.c.result[comparable[0]]] if comparable else [])
+    q = select(*cols).where(
         i.c.workflow == workflow, i.c.status == "done", i.c.finished_at >= cutoff,
-        i.c.started_at.is_not(None))
+        i.c.started_at.is_not(None)).order_by(i.c.finished_at.desc()).limit(sample)
     async with db.engine().connect() as conn:
-        n, credits_avg, tokens_avg, secs_avg = (await conn.execute(q)).one()
-    return {"items": int(n or 0), "days": days,
-            "credits_per_item": round(float(credits_avg), 2) if credits_avg is not None else None,
-            "tokens_per_item": int(tokens_avg) if tokens_avg is not None else None,
-            "seconds_per_item": round(float(secs_avg), 1) if secs_avg is not None else None}
+        rows = (await conn.execute(q)).all()
+    if comparable:
+        want = set(comparable[1])
+        rows = [r for r in rows if isinstance(r[3], dict) and set(r[3]) == want]
+    n = len(rows)
+    out: dict[str, Any] = {"items": n, "days": days, "credits_per_item": None,
+                           "tokens_per_item": None, "seconds_per_item": None}
+    if comparable:
+        out["with"] = {comparable[0]: list(comparable[1])}
+    if n:
+        out["credits_per_item"] = round(sum(r[0] or 0 for r in rows) / n, 2)
+        out["tokens_per_item"] = int(sum(r[1] or 0 for r in rows) / n)
+        secs_known = [float(r[2]) for r in rows if r[2] is not None]
+        out["seconds_per_item"] = round(sum(secs_known) / len(secs_known), 1) if secs_known else None
+    return out
 
 
 async def recently_done(workflow: str, person_ids: list[str], days: int) -> set[str]:

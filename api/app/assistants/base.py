@@ -64,6 +64,10 @@ class AssistantSpec:
     make_deps: Callable[[int, dict[str, Any], BaseModel, Principal | None], Awaitable[AssistantDeps]]
     run_item: Callable[[AssistantDeps], Awaitable[dict[str, Any]]]
     item_cap: Callable[[BaseModel], int]     # worst-case credits one item may spend
+    # options -> what they mean for cost (the paid services asked with their prices, the typical
+    # and worst case per item, `comparable` = (result field, keys) naming the past items that
+    # cost the same, `warnings` for a choice that should have been asked for); None = free
+    describe_cost: Callable[[BaseModel], dict[str, Any]] | None = None
     scope: Scope = "people"
     permission: str = "people:write"         # what starting a run requires
     details: str = ""                        # the full functionality spec, for the UI's toggle

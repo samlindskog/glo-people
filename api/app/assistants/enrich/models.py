@@ -11,9 +11,10 @@ class EnrichOptions(BaseModel):
     refresh: bool = Field(False, description="Re-run for people enriched recently")
     providers: list[ProviderKey] = Field(
         ["fullenrich"],
-        description="Data providers asked about the LinkedIn URL, in order (FullEnrich 5 credits "
-                    "per match; People Data Labs 60, opt in for its richer record); the first "
-                    "match fills the profile, later matches add facts")
+        description="Data providers asked about the LinkedIn URL, in order. Leave unset: "
+                    "FullEnrich (5 credits per match) is the default; People Data Labs bills 60 "
+                    "per match and is only for when it is asked for by name. The first match "
+                    "fills the profile, later matches add facts")
     provider_policy: Literal["gaps", "all"] = Field(
         "gaps", description="gaps: ask the next provider only when the one before had no record "
                             "or no about text; all: ask every provider and union their facts")

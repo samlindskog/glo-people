@@ -121,7 +121,8 @@ queued ──start──▶ running ──pause / credit cap / account credits�
 running ──all items done──▶ done        running | pausing | paused ──stop──▶ cancelled (in-flight tools stopped, queue skipped)
 ```
 
-Credits: each in-flight item reserves its worst case (`spec.item_cap`); when the run's
+Credits: each in-flight item reserves its worst case (`spec.item_cap`; `spec.describe_cost`
+tells a plan what the options cost and warns about a dear choice); when the run's
 `max_credits` is reached the run pauses with `pause_reason = credit cap` and a resume with a
 higher cap continues it; a Firecrawl 402 requeues the item and pauses every run that spends
 (`account credits`). `done`, `failed` and `credits_used` are kept per item end. The owner

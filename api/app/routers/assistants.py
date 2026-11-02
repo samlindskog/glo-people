@@ -116,8 +116,14 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
     estimates and recommended cap that follow, against the Firecrawl balance."""
     items = await _people_items(body)
     ids = [it["person_id"] for it in items if it.get("person_id")]
-    averages = await runner.history_averages(spec.key)
+    opts = spec.options_model.model_validate(body.options)
+    cost = dict(spec.describe_cost(opts)) if spec.describe_cost else None
+    # past items are comparable only with the same paid services (other providers, other price)
+    averages = await runner.history_averages(spec.key, comparable=cost.pop("comparable", None) if cost else None)
     out: dict[str, Any] = {"assistant": spec.key, "people": len(ids), "averages": averages}
+    if cost is not None:
+        out["warnings"] = cost.pop("warnings", [])
+        out["cost"] = cost
     eligible = len(ids)
     if spec.key == "enrich":
         docs = await people.fetch(ids, projection={"linkedin": 1, "website": 1, "github": 1})
@@ -142,8 +148,9 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
         out.update({"with_linkedin": with_linkedin, "with_site_only": with_site,
                     "nothing_to_work_with": nothing, "already_enriched": len(recent),
                     "eligible": eligible})
-    per_item = averages["credits_per_item"] if averages["credits_per_item"] is not None else (
-        4.0 if spec.key == "enrich" else 0.0)
+    from_history = averages["credits_per_item"] is not None
+    per_item = averages["credits_per_item"] if from_history else (
+        float(cost["typical_per_item"]) if cost else 0.0)
     est_credits = round(eligible * per_item)
     est_tokens = eligible * (averages["tokens_per_item"] or 0)
     secs = averages["seconds_per_item"] or (20.0 if spec.key == "enrich" else 1.0)
@@ -153,7 +160,7 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
     if balance and balance.get("remaining") is not None:
         available = int(balance["remaining"]) - int(balance.get("reserved") or 0)
     recommended = {}
-    reserved_per_item = spec.item_cap(spec.options_model.model_validate(body.options))
+    reserved_per_item = spec.item_cap(opts)
     concurrency = get_settings().assistant_concurrency
     if spec.key == "enrich":
         # the runner reserves the worst case per item in flight: a cap below that for every slot
@@ -163,6 +170,7 @@ async def plan(spec: AssistantSpec, body: RunRequest) -> dict[str, Any]:
             cap = min(cap, max(1, available))
         recommended["max_credits"] = cap
     out.update({"estimate": {"credits": est_credits, "tokens": est_tokens, "minutes": est_minutes,
+                             "basis": "history" if from_history else "listed prices",
                              "concurrency": concurrency, "truncated": len(ids) >= MAX_SELECT},
                 "reserved_per_item": reserved_per_item,
                 "minimum_cap": reserved_per_item * concurrency,

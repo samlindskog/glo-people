@@ -2,7 +2,7 @@
 
 from app.assistants.base import AssistantSpec, register
 from app.assistants.enrich.assistant import ASSISTANT, make_deps, run_item
-from app.assistants.enrich.budget import item_cap
+from app.assistants.enrich.budget import describe, item_cap
 from app.assistants.enrich.models import EnrichOptions
 
 DETAILS = """\
@@ -45,4 +45,5 @@ SPEC = register(AssistantSpec(
     make_deps=make_deps,
     run_item=run_item,
     item_cap=item_cap,
+    describe_cost=describe,
 ))
