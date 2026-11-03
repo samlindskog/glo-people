@@ -10,6 +10,7 @@ Other systems read through the helpers here (`fetch`, `find`, `count`, `find_ids
 registers (e.g. embeddings).
 """
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -133,9 +134,29 @@ async def find_ids(query: dict, limit: int = 0) -> list[str]:
     return [str(d["_id"]) for d in docs]
 
 
-async def coverage() -> dict[str, dict[str, int]]:
+_coverage_cache: tuple[float, dict[str, dict[str, int]]] | None = None
+_coverage_lock = asyncio.Lock()
+
+
+async def coverage(max_age_s: float = 0.0) -> dict[str, dict[str, int]]:
     """Per property: `count` of people whose current value is present (not a tombstone), and how
-    many of those are `unmapped` / `non_normalizable` (typed properties)."""
+    many of those are `unmapped` / `non_normalizable` (typed properties). A full scan of the
+    collection, so a caller that only shows the counts (an agent's catalog prompt) passes
+    `max_age_s` and gets the last result when it is that fresh; concurrent callers share one
+    scan. The default is exact."""
+    global _coverage_cache
+    loop = asyncio.get_running_loop()
+    if max_age_s > 0 and _coverage_cache and loop.time() - _coverage_cache[0] < max_age_s:
+        return _coverage_cache[1]
+    async with _coverage_lock:
+        if max_age_s > 0 and _coverage_cache and loop.time() - _coverage_cache[0] < max_age_s:
+            return _coverage_cache[1]
+        counts = await _coverage()
+        _coverage_cache = (loop.time(), counts)
+        return counts
+
+
+async def _coverage() -> dict[str, dict[str, int]]:
     present = {"$and": [{"$ne": ["$kv.v.v", None]}, {"$ne": ["$kv.v.v", ""]},
                         {"$ne": ["$kv.v.v", []]}]}
     flagged = lambda flag: {"$cond": [{"$and": [present, {"$eq": ["$kv.v.norm.flag", flag]}]},

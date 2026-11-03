@@ -182,7 +182,12 @@ class AsyncFirecrawl:
         if not self.api_key:
             raise NotConfigured("FIRECRAWL_API_KEY is not set")
         for attempt in range(RATE_LIMIT_RETRIES + 1):
-            resp = await self._http().post(path, json=body)
+            try:
+                resp = await self._http().post(path, json=body)
+            except httpx.HTTPError as e:
+                # a transport failure (a page past the read deadline, a reset) is a Firecrawl
+                # error like any other, so an agent tool reports it and the item goes on
+                raise FirecrawlError(f"Firecrawl {path}: {type(e).__name__}: {str(e) or 'no answer within the deadline'}") from e
             if resp.status_code in (502, 503, 504) and attempt < 1:   # a gateway blip: once more
                 log.warning("Firecrawl %s: HTTP %s, retrying once", path, resp.status_code)
                 await asyncio.sleep(2.0)
@@ -221,7 +226,10 @@ class AsyncFirecrawl:
         free). NotConfigured without a key."""
         if not self.api_key:
             raise NotConfigured("FIRECRAWL_API_KEY is not set")
-        resp = await self._http().get("/v2/team/credit-usage")
+        try:
+            resp = await self._http().get("/v2/team/credit-usage")
+        except httpx.HTTPError as e:
+            raise FirecrawlError(f"Firecrawl credit-usage: {type(e).__name__}: {str(e) or 'no answer'}") from e
         try:
             data = resp.json()
         except ValueError:

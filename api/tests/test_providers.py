@@ -208,6 +208,26 @@ async def test_rate_limited_calls_back_off_and_succeed(monkeypatch):
     assert len(calls) == fc.RATE_LIMIT_RETRIES + 1 and sleeps == [2.0, 4.0, 8.0]
 
 
+async def test_a_transport_timeout_is_a_firecrawl_error():
+    """Nine items of the 10,000-person run failed as a bare httpx.ReadTimeout escaping the
+    company agent's page fetch; as a FirecrawlError the tool reports it and the item goes on."""
+    import httpx
+
+    from app.integrations import firecrawl as fc
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("", request=request)
+    client = fc.AsyncFirecrawl(api_key="test")
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(slow), base_url="https://fc.test")
+    try:
+        with pytest.raises(fc.FirecrawlError, match="ReadTimeout.*deadline"):
+            await client._post("/v2/scrape", {"url": "https://slow.example"})
+        with pytest.raises(fc.FirecrawlError, match="credit-usage"):
+            await client.credit_usage()
+    finally:
+        await client.aclose()
+
+
 def test_a_tool_billing_far_above_its_price_is_flagged():
     from app.integrations import firecrawl as fc
     assert fc.overpriced(5) == 15 and fc.overpriced(1) == 11 and fc.overpriced(60) == 120

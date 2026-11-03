@@ -25,6 +25,7 @@ from app.tools.search import (
 
 AGENT_NAME = "planner"
 REQUEST_LIMIT = 4
+COVERAGE_MAX_AGE_S = 60.0     # the counts in the planner's catalog may be this old
 OUTPUT_RETRIES = 2        # validation problems are sent back up to twice
 _sem_defaults = SemanticQuery.model_fields
 
@@ -140,7 +141,7 @@ async def plan_search(question: str, tier: str | None = None,
     """The executable search for a question: the agent's plan folded into a `SearchRequest`
     together with the caller's extra filters and tuning."""
     tuning = tuning or Tuning()
-    catalog = await properties.catalog(await people.coverage())
+    catalog = await properties.catalog(await people.coverage(max_age_s=COVERAGE_MAX_AGE_S))
     cat = {p.key: p for p in catalog}
     lookups = {k: await properties.enum_lookup(k) for k, p in cat.items()
                if p.type in ("enum", "enum_list")}

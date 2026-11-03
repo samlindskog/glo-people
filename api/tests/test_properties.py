@@ -133,6 +133,28 @@ async def test_nearest_property_names():
     assert len(hits[0]) == 2 and hits[0][0][1] >= hits[0][1][1]
 
 
+async def test_coverage_is_shared_when_a_caller_allows_age(writer, monkeypatch):
+    """The storage agent and the planner read the counts dozens of times a minute during a
+    run; they take the last scan when it is fresh enough, while the default stays exact."""
+    from app import people
+    await import_people(writer, "Name,Bio\nAda Okafor,payments\n", "p.csv", "member")
+    assert (await people.coverage())["name"]["count"] == 1
+    assert (await people.coverage(max_age_s=60))["name"]["count"] == 1
+    scans = []
+    real = people._coverage
+
+    async def counting():
+        scans.append(1)
+        return await real()
+    monkeypatch.setattr(people, "_coverage", counting)
+    await import_people(writer, "Name,Bio\nBo Chen,farming\n", "q.csv", "member")
+    assert (await people.coverage(max_age_s=60))["name"]["count"] == 1 and scans == []   # the last scan
+    assert (await people.coverage())["name"]["count"] == 2 and scans == [1]              # exact
+    assert (await people.coverage(max_age_s=60))["name"]["count"] == 2 and scans == [1]  # refreshed by it
+    monkeypatch.setattr(people, "_coverage_cache", None)
+    assert (await people.coverage(max_age_s=60))["name"]["count"] == 2 and scans == [1, 1]
+
+
 async def test_coverage_counts_current_values_only(writer, reader):
     r = await writer.post("/api/people", json={"tier": "member",
                                                "fields": {"name": "Yan", "bio": "long enough bio"}})

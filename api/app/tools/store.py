@@ -110,6 +110,8 @@ Rules:
 
 
 LONG_QUOTE = 40     # a quote this long is located by its start or end, not matched whole
+COVERAGE_MAX_AGE_S = 60.0   # the "N people" counts in the catalog prompt may be this old: the
+                            # scan behind them grew to seconds per call on a 10,000-item run
 
 
 def _evidence_ok(evidence: str, flat_passage: str) -> bool:
@@ -290,7 +292,7 @@ async def store(ctx: ToolContext, passage: str, opts: StoreOptions | None = None
     opts = opts or StoreOptions()
     person = ctx.tx.public()
     ctx.emit("step", f"reading {len(passage)} characters about {person.get('name') or 'the record'}")
-    catalog = await properties.catalog(await people.coverage())
+    catalog = await properties.catalog(await people.coverage(max_age_s=COVERAGE_MAX_AGE_S))
     cat = {p.key: p for p in catalog}
     proposal = await _propose(passage, person, catalog, ctx.emit, frozenset(opts.locked))
 
