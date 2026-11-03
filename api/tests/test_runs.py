@@ -168,6 +168,10 @@ def test_model_and_embedding_requests_have_a_deadline(monkeypatch):
     assert common.configured_model() is m                                   # built once
     monkeypatch.setattr(get_settings(), "agent_model", "anthropic:claude-x")
     assert common.configured_model() == "anthropic:claude-x"                # other names pass through
+    monkeypatch.setattr(get_settings(), "agent_model", "openai:gpt-6-luna")
+    monkeypatch.setattr(get_settings(), "openai_api_key", "")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    assert common.configured_model() == "openai:gpt-6-luna"                 # no key anywhere (CI): as before
     e = embedder.OpenAIEmbedder("test-key", "text-embedding-3-small", 8, 30, 0)
     assert e.client.timeout.read == 30 and e.client.max_retries == 0
 

@@ -3,6 +3,7 @@ usage limits, the dependencies web-reading tools receive, a budgeted page-fetch 
 property catalog rendered for prompts."""
 
 import contextvars
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,20 +43,21 @@ def configured_model() -> Any:
     which held a run on one hung request); any other name is handed to pydantic-ai as it is."""
     global _model_cache
     s = get_settings()
-    key = (s.agent_model, s.model_timeout_s, s.model_max_retries, s.openai_api_key)
+    key = (s.agent_model, s.model_timeout_s, s.model_max_retries,
+           s.openai_api_key or os.environ.get("OPENAI_API_KEY", ""))
     if _model_cache is None or _model_cache[0] != key:
         _model_cache = (key, _build_model(*key))
     return _model_cache[1]
 
 
 def _build_model(name: str, timeout_s: float, retries: int, api_key: str) -> Any:
-    if not name.startswith("openai:"):
-        return name
+    if not name.startswith("openai:") or not api_key:
+        return name          # pydantic-ai's own client; without a key (CI, fakes) as before
     import httpx
     from openai import AsyncOpenAI
     from pydantic_ai.models.openai import OpenAIResponsesModel
     from pydantic_ai.providers.openai import OpenAIProvider
-    client = AsyncOpenAI(api_key=api_key or None, max_retries=retries,
+    client = AsyncOpenAI(api_key=api_key, max_retries=retries,
                          timeout=httpx.Timeout(timeout_s, connect=15.0))
     return OpenAIResponsesModel(name.split(":", 1)[1], provider=OpenAIProvider(openai_client=client))
 
