@@ -6,6 +6,7 @@ The same request model backs REST, MCP, the UI and the plan tool."""
 
 import json
 import re
+from collections.abc import Iterable
 from typing import Annotated, Any, Literal
 
 from bson import ObjectId
@@ -36,10 +37,14 @@ class FieldFilter(BaseModel):
                                          "'exists'; a number or ISO date string for gt/gte/lt/lte.")
 
 
-class FieldQuery(BaseModel):
-    """A passage compared with one embeddable property."""
+EVERY = "*"       # in place of a property key: every embeddable property
 
-    field: str = Field(description="Embeddable property key, e.g. 'bio'")
+
+class FieldQuery(BaseModel):
+    """A passage compared with one embeddable property, or with every one (`*`)."""
+
+    field: str = Field(description="Embeddable property key, e.g. 'bio'; '*' compares the "
+                                   "passage with every embeddable property (best with mode max)")
     query: str = Field(min_length=1, max_length=2000, description="Passage to compare with it")
 
 
@@ -52,7 +57,8 @@ class SemanticQuery(BaseModel):
                                           "property in `fields`")
     fields: list[str] = Field(default_factory=list, max_length=20,
                               description="Embeddable property keys `query` is compared with, "
-                                          "e.g. ['bio'] (see list_properties)")
+                                          "e.g. ['bio'] (see list_properties); ['*'] is every "
+                                          "embeddable property (best with mode max)")
     queries: list[FieldQuery] = Field(default_factory=list, max_length=20,
                                       description="A passage per property, e.g. "
                                                   "[{field: 'bio', query: 'payments founder'}]")
@@ -85,6 +91,19 @@ class SemanticQuery(BaseModel):
         """(property, passage) pairs, one per compared property."""
         return [*((f, self.query) for f in self.fields if self.query),
                 *((q.field, q.query) for q in self.queries)]
+
+    def expanded(self, embeddable: Iterable[str]) -> "SemanticQuery":
+        """The query with `*` replaced by every embeddable property not compared already."""
+        if EVERY not in self.compared_fields():
+            return self
+        named = [f for f in self.compared_fields() if f != EVERY]
+        rest = [k for k in sorted(embeddable) if k not in named]
+        fields_ = [f for f in self.fields if f != EVERY] + (rest if EVERY in self.fields else [])
+        queries = [q for q in self.queries if q.field != EVERY]
+        for q in self.queries:
+            if q.field == EVERY:
+                queries += [FieldQuery(field=k, query=q.query) for k in rest]
+        return self.model_copy(update={"fields": fields_, "queries": queries})
 
 
 class SortSpec(BaseModel):
@@ -287,6 +306,8 @@ async def validate(req: SearchRequest, cat: dict[str, properties.Property]) -> N
     compared properties are embeddable. Filter operators and values are checked in mongo_query."""
     if req.semantic is not None:
         for key in req.semantic.compared_fields():
+            if key == EVERY:
+                continue
             prop = cat.get(key)
             if prop is None:
                 raise ValueError(f"unknown property {key!r} in semantic (see the catalog)")
@@ -315,7 +336,8 @@ async def run_search(req: SearchRequest) -> SearchResponse:
     ids = None
     if req.filters:
         ids = await people.find_ids(query)
-    scored = await semantic_scores(req.semantic, req.tier, ids)
+    sem = req.semantic.expanded(k for k, p in cat.items() if p.embeddable)
+    scored = await semantic_scores(sem, req.tier, ids)
     by_id = {mid: (score, fs) for mid, score, fs in scored}
     total = len(scored)
 

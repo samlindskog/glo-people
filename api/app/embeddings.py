@@ -7,7 +7,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 
 from bson import ObjectId
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app import db, embedder, fields, history, people, properties
@@ -36,10 +36,11 @@ async def embed_queries(texts: list[str]) -> list[list[float]]:
 async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -> int:
     """Bring field_embeddings in line with the current documents of these people.
 
-    Embeds every history entry (passage) of each embeddable field that has no vector yet, and
+    Embeds every history entry (passage) of each embeddable field that has no vector yet,
     deletes rows for passages that no longer apply (person deleted, field removed or no longer
-    embeddable). A removed field (current value is a tombstone) keeps its history but gets no
-    vectors. Returns the number of vectors computed.
+    embeddable), and when only the person's tier changed, rewrites the tier on their rows
+    without calling the embedder. A removed field (current value is a tombstone) keeps its
+    history but gets no vectors. Returns the number of vectors computed.
     """
     ids = [i for i in ids if ObjectId.is_valid(i)]
     if not ids:
@@ -73,12 +74,19 @@ async def sync_people(ids: Iterable[str], only_fields: set[str] | None = None) -
                     for r in await conn.execute(q)}
 
     stale = [k for k in existing if k not in wanted]
-    todo = [(k, v) for k, v in wanted.items() if existing.get(k) != v[0]]
+    retier: dict[str, list] = defaultdict(list)       # the vector stands, the tier moved
+    for k, (tier, _) in wanted.items():
+        if k in existing and existing[k] != tier:
+            retier[tier].append(k)
+    todo = [(k, v) for k, v in wanted.items() if k not in existing]
 
     async with db.engine().begin() as conn:
         if stale:
             await conn.execute(delete(fe).where(
                 tuple_(fe.c.mongo_id, fe.c.field, fe.c.content_hash).in_(stale)))
+        for tier, keys in retier.items():
+            await conn.execute(update(fe).where(
+                tuple_(fe.c.mongo_id, fe.c.field, fe.c.content_hash).in_(keys)).values(tier=tier))
 
     computed = 0
     for start in range(0, len(todo), embedder.BATCH):

@@ -22,6 +22,33 @@ def names(resp):
     return [h["person"]["name"] for h in resp.json()["results"]]
 
 
+async def test_a_passage_against_every_embeddable_property(writer, reader):
+    """`*` stands for every embeddable property: short values (role, company) and the provider
+    profile count too, and the planner's validator accepts it."""
+    from app import properties
+    from app.tools import plan as plan_tool
+    from app.tools.search import FieldQuery, SemanticQuery
+    await import_people(writer, "Name,Role,Company,Bio\nAda Okafor,Head of Partnerships,PayRail,payments\n"
+                                "Bo Chen,Farmer,Leafy,vertical farming\n", "p.csv", "member")
+    cat = {p.key: p for p in await properties.catalog()}
+    assert cat["role"].embeddable and cat["company"].embeddable and cat["enrichment_passage"].embeddable
+    assert not cat["name"].embeddable and not cat["stage"].embeddable
+    r = await reader.post("/api/search", json={"semantic": {"query": "partnerships lead", "fields": ["*"],
+                                                            "mode": "max", "threshold": 0.1}})
+    assert r.status_code == 200, r.text
+    hits = r.json()["results"]
+    assert hits and hits[0]["person"]["name"] == "Ada Okafor"
+    assert "role" in hits[0]["field_scores"] and "*" not in hits[0]["field_scores"]
+    sem = SemanticQuery(queries=[FieldQuery(field="bio", query="x"), FieldQuery(field="*", query="y")])
+    expanded = sem.expanded(["bio", "role", "company"])
+    assert [(q.field, q.query) for q in expanded.queries] == [("bio", "x"), ("company", "y"), ("role", "y")]
+    assert SemanticQuery(query="q", fields=["bio"]).expanded(["bio", "role"]).fields == ["bio"]
+    r = await reader.post("/api/search", json={"semantic": {"query": "q", "fields": ["*", "*"]}})
+    assert r.status_code == 422                                           # compared twice
+    plan = plan_tool.SearchPlan(semantic=[FieldQuery(field="*", query="payments")])
+    assert plan.semantic[0].field == "*"
+
+
 async def test_literal_filters(reader):
     s = lambda body: reader.post("/api/search", json=body)
     assert names(await s({"filters": [{"field": "name", "op": "contains", "value": "a"}]})) == [

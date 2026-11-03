@@ -57,7 +57,10 @@ Playbook
 - Finding someone: find_people first (an email, phone, LinkedIn or GitHub URL, or a name: exact,
   canonical, deterministic; it says matched / ambiguous / nobody). search_people is for descriptions
   ("fintech founders in Lagos"): literal per-property filters (AND) plus semantic similarity over
-  embeddable properties (cosine; default threshold 0.4, 0.35-0.5 is the useful range). Call
+  embeddable properties (cosine; default threshold 0.4, 0.35-0.5 is the useful range): long
+  texts (bio, about, company_description, enrichment_passage = the whole provider profile) and
+  short values most people have (role, company, industry, location); fields ["*"] with mode
+  max compares one passage with all of them. plan_search writes such a request from a question. Call
   list_properties once to see the properties, their types and canonical values. get_person reads one
   record; pass include_history=false unless you need the entries.
 - Adding information: one record → merge_person (matches a person by identifier or unique name, else
@@ -203,6 +206,9 @@ async def search_people(
       semantic={"query":"fintech founder","fields":["bio","one_liner"],"mode":"avg","threshold":0.25}
       semantic={"queries":[{"field":"bio","query":"payments infrastructure"},
                            {"field":"company_description","query":"merchant acquiring"}],"threshold":0.3}
+      semantic={"query":"head of partnerships at a fintech","fields":["*"],"mode":"max","threshold":0.35}
+    Short values (role, company, industry, location) and the whole provider profile
+    (enrichment_passage) are embeddable too; "*" compares a passage with every embeddable property.
     Each result has id, tier, score (semantic only), field_scores and the person's properties
     (plus `norm`, the normalised values of typed properties).
     """

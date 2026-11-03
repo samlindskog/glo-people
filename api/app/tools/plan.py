@@ -14,7 +14,14 @@ from app import people, properties
 from app.agents.common import catalog_prompt, run_agent
 from app.properties import Property
 from app.tools import Emit, silent
-from app.tools.search import FieldFilter, FieldQuery, SearchRequest, SemanticQuery, filter_to_mongo
+from app.tools.search import (
+    EVERY,
+    FieldFilter,
+    FieldQuery,
+    SearchRequest,
+    SemanticQuery,
+    filter_to_mongo,
+)
 
 AGENT_NAME = "planner"
 REQUEST_LIMIT = 4
@@ -38,8 +45,9 @@ class SearchPlan(BaseModel):
     semantic: list[FieldQuery] = Field(
         default_factory=list, max_length=6,
         description="Passages compared by meaning, each with the embeddable property it should "
-                    "be compared with (bio, one_liner, company_description, notes, sectors…). "
-                    "Write the passage as the text you expect to find, not as a question.")
+                    "be compared with (bio, one_liner, company_description, role, company, "
+                    "enrichment_passage…) or '*' for every embeddable property. Write the "
+                    "passage as the text you expect to find, not as a question.")
     filters: list[FieldFilter] = Field(
         default_factory=list, max_length=6,
         description="Literal conditions on typed or text properties (AND). Use canonical enum "
@@ -78,9 +86,14 @@ Decide which properties to search and how:
   product, a need, a background): a few words to one sentence phrased like the text you expect
   to find, on the one or two embeddable properties most likely to hold it (bio and one_liner
   describe the person, company_description the company, notes are internal remarks, sectors
-  are tags). A passage is compared by meaning and drops everyone below a similarity cut-off, so
-  do not add one when a filter already answers the question ("name three founders" is a
-  seniority filter, not a passage).
+  are tags). Short values are compared by meaning too: role for what someone does ("head of
+  partnerships" finds "BD lead"), company, industry, location — these are the properties most
+  people have. enrichment_passage is the whole provider profile in one text: use it for a
+  profile-wide description (background, employers, schools, skills together). The field "*"
+  compares one passage with every embeddable property; pair it with mode max. A passage is
+  compared by meaning and drops everyone below a similarity cut-off, so do not add one when a
+  filter already answers the question ("name three founders" is a seniority filter, not a
+  passage).
 - Never invent properties or values. A request for N people is not a filter. Give at least one
   filter or passage; keep the plan small.""",
 )
@@ -92,6 +105,11 @@ async def _executable(ctx: RunContext[PlannerDeps], plan: SearchPlan) -> SearchP
     problems: list[str] = []
     seen: set[str] = set()
     for q in plan.semantic:
+        if q.field == EVERY:
+            if q.field in seen:
+                problems.append("'*' appears twice; merge the passages")
+            seen.add(q.field)
+            continue
         prop = cat.get(q.field)
         if prop is None:
             problems.append(f"{q.field!r} is not a property")

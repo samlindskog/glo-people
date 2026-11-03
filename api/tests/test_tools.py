@@ -201,7 +201,7 @@ async def test_store_overflow_ignore_and_evidence(people_by_name, writer, reader
     assert "enrichment_passage" not in render_person({"id": "x", "name": "A", "enrichment_passage": "# …",
                                                       "notes": "n", "norm": {}, "norm_flags": {}})
     cat = {p["key"]: p for p in (await reader.get("/api/properties")).json()}
-    assert cat["enrichment_passage"]["type"] == "text" and not cat["enrichment_passage"]["embeddable"]
+    assert cat["enrichment_passage"]["type"] == "text" and cat["enrichment_passage"]["embeddable"]
     assert cat["skills"]["type"] == "list" and cat["skills"]["embeddable"]
     assert cat["about"]["embeddable"] and cat["experience"]["type"] == "text"
 

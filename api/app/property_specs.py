@@ -88,8 +88,9 @@ SPECS: dict[str, Spec] = {
     "company_website": Spec("url", description="The current employer's website"),
     "related_links": Spec("url"),
     # who they are
-    "role": Spec("keyword", description="Current job title, as the person, an upload or a data "
-                                        "provider states it"),
+    "role": Spec("keyword", embed=True,
+                 description="Current job title, as the person, an upload or a data provider "
+                             "states it"),
     # what the enrich assistant files from provider profiles through the storage agent
     "about": Spec("text", description="The person's own profile summary (LinkedIn about text) in "
                                       "their own words; providers drop its line breaks, only "
@@ -103,16 +104,20 @@ SPECS: dict[str, Spec] = {
     "languages": Spec("list", description="Languages they speak"),
     "interests": Spec("list", description="Interests listed on their profiles (topics, causes, "
                                           "hobbies)"),
-    "enrichment_passage": Spec("text", label="Enrichment passage", embed=False,
-                               description="The facts the enrich assistant last handed to the "
-                                           "storage agent, as sent (one line per property, "
-                                           "sectioned by source); an audit record, not searched"),
+    "enrichment_passage": Spec("text", label="Enrichment passage",
+                               description="The whole provider profile as one passage: about, "
+                                           "title, work history, education, skills, languages, "
+                                           "then the site and company notes, sectioned by "
+                                           "source; compare a profile-wide description with it"),
     "seniority": Spec("enum", SENIORITY),
-    "company": Spec("keyword"),
-    "industry": Spec("keyword"),
-    "entity_type": Spec("keyword"),
-    "location": Spec("keyword"),
-    "city": Spec("keyword"),
+    # short values most people have, compared by meaning too (a title, a company, a place)
+    "company": Spec("keyword", embed=True, description="Current employer or own company"),
+    "industry": Spec("keyword", embed=True),
+    "entity_type": Spec("keyword", embed=True,
+                        description="What the record's organisation is (startup, fund, "
+                                    "corporate…) as the upload stated it"),
+    "location": Spec("keyword", embed=True),
+    "city": Spec("keyword", embed=True),
     "region": Spec("enum", REGIONS),
     "linkedin_headline": Spec("text", label="LinkedIn headline"),
     "bio": Spec("text", description="A few sentences about the person: background, what they "

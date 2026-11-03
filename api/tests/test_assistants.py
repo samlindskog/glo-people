@@ -324,7 +324,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
     fl = {f["key"]: f for f in (await reader.get("/api/properties")).json()}
     assert fl["company_description"]["embeddable"] and fl["github_summary"]["embeddable"]
     assert not fl["github"]["embeddable"] and not fl["related_links"]["embeddable"]
-    assert fl["about"]["embeddable"] and not fl["enrichment_passage"]["embeddable"]
+    assert fl["about"]["embeddable"] and fl["enrichment_passage"]["embeddable"]   # the whole profile, searchable
 
 
 async def test_rerun_is_skipped_within_ttl_and_refresh_appends_nothing(writer, reader, people):

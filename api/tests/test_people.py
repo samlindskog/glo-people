@@ -229,6 +229,34 @@ async def test_typed_columns_are_kept_as_entered_and_free_columns_inspected(writ
     assert a["status"]["v"] == "active"                        # enum text as entered
 
 
+async def test_a_tier_change_moves_vectors_without_re_embedding(writer, monkeypatch):
+    """The bulk tier update over thousands of people must not pay the embedder again: the rows
+    keep their vectors and take the new tier."""
+    from sqlalchemy import select
+
+    from app import db as pg
+    from app import people
+    from app.history import Source
+    r = await writer.post("/api/people", json={"tier": "plus_one", "fields": {
+        "name": "Zed", "bio": "builds warehouse robotics", "role": "CTO"}})
+    pid = r.json()["id"]
+
+    calls: list[int] = []
+    real = embedder.FakeEmbedder.embed
+
+    async def counting(self, texts):
+        calls.append(len(texts))
+        return await real(self, texts)
+    monkeypatch.setattr(embedder.FakeEmbedder, "embed", counting)
+    assert await embeddings.sync_people([pid]) == 0 and calls == []              # in step
+    await people.update(None, pid, {}, tier="plus_two", source=Source("ui", "wendy"))
+    async with pg.engine().connect() as conn:
+        rows = (await conn.execute(select(pg.field_embeddings.c.field, pg.field_embeddings.c.tier)
+                                   .where(pg.field_embeddings.c.mongo_id == pid))).all()
+    assert {r.field for r in rows} == {"bio", "role"} and {r.tier for r in rows} == {"plus_two"}
+    assert calls == []                                                         # no embedder call
+
+
 async def test_switching_embedder_reembeds(writer):
     await _import(writer, MEMBERS, "members.csv", "member")
     ids = [str(d["_id"]) async for d in db().people.find({}, {"_id": 1})]
