@@ -98,6 +98,10 @@ Rules:
 - A new property only for a kind of fact that other people could also have and the catalog
   lacks (give a clear key, label and a one-sentence description). One-off remarks, context and
   anything that fits nowhere go to `notes`. Prefer an existing property over a new one.
+- A provider's text (an `about:` line) arrives with its line breaks stripped, so sentences and
+  words can run together ("users.currently", "outerscopealways happy"). Restore the lost
+  space where it is obvious and change nothing else: the wording, spelling and order stay the
+  person's own.
 - `ignored`: greetings, requests, and anything not about this person — copy the passage words
   themselves, do not explain.
 - `evidence`: copy the passage words the write rests on, verbatim. When the passage line is

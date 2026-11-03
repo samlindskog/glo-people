@@ -57,7 +57,7 @@ EXPECTED_PASSAGE = """\
 # Facts from data providers; each line names the property it belongs to.
 # LinkedIn profile (fullenrich/people/match)
 about: Founder of PayRail. Previously Paystack and Stripe.
-title_enriched: CEO & Co-founder
+role: CEO & Co-founder
 experience: CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack (2018–2021)
 education: BSc Computer Science, University of Lagos
 skills: Payments; Fintech
@@ -284,7 +284,7 @@ async def test_full_ladder_writes_history_entries(writer, reader, people):
         "company_description": "Payments infrastructure for merchants across West Africa.",
         # the provider record and the site's one-liner, filed by the storage agent
         "about": "Founder of PayRail. Previously Paystack and Stripe.",
-        "title_enriched": "CEO & Co-founder",
+        "role": "CEO & Co-founder",
         "experience": "CEO & Co-founder at PayRail (2021–present); Product Lead at Paystack "
                       "(2018–2021)",
         "education": "BSc Computer Science, University of Lagos",      # FullEnrich dates no degrees
@@ -474,7 +474,7 @@ async def test_a_second_provider_adds_its_facts_to_the_passage(writer, reader, p
     assert res["stored"]["skills"]["provider"] == ("fullenrich/people/match, "
                                                    "people-data-labs/person/enrich")
     dropped = [s["reason"] for s in res["skipped"] if s["step"] == "storage"]
-    assert dropped == [("people-data-labs/person/enrich also stated about, title_enriched, "
+    assert dropped == [("people-data-labs/person/enrich also stated about, role, "
                         "experience, education; the first source's values were kept")]
     assert model_calls == {"site": 1, "storage": 1}
     # a person PDL does not know: a free miss, FullEnrich's facts are filed as usual

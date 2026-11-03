@@ -44,7 +44,7 @@ def test_pdl_record_maps_to_the_shared_profile():
     assert [x.company for x in p.experience] == ["Payrail", "Paystack", "Stripe"]  # current first
     assert dict(profile.profile_lines(p)) == {
         "about": "Payments builder. Ex-Paystack, ex-Stripe.",
-        "title_enriched": "Chief Executive Officer",
+        "role": "Chief Executive Officer",
         "experience": "Chief Executive Officer at Payrail (2021–present); Product Lead at Paystack "
                       "(2018–2021); Engineer at Stripe (2015–2017)",
         "education": "Bachelors Computer Science, University of Lagos (2010–2014)",
@@ -140,20 +140,20 @@ def test_profile_lines_clean_provider_text():
 def test_profile_lines_use_spec_properties_of_the_right_type():
     from app.property_specs import SPECS
     prof = profile_mod.LinkedInProfile(
-        summary="About.", current_title="CTO",
+        summary="About.Then more.", current_title="CTO",
         experience=[profile_mod.Position(title="CTO", company="Leafy", start="2022", is_current=True),
                     profile_mod.Position(title="Engineer", start="2019-01", end="2021-12"),
                     profile_mod.Position(company="Unknown Co")],
         education=[profile_mod.Education(school="TU Berlin", degree="MSc", field="CS", end="2018")],
         skills=["Python"], interests=["Climate"])
     lines = dict(profile_mod.profile_lines(prof))
-    assert lines == {"about": "About.", "title_enriched": "CTO",
+    assert lines == {"about": "About. Then more.", "role": "CTO",       # a dropped line break restored
                      "experience": "CTO at Leafy (2022–present); Engineer (2019–2021); Unknown Co",
                      "education": "MSc CS, TU Berlin (2018)", "skills": ["Python"],
                      "interests": ["Climate"]}
     for key, value in lines.items():
         assert SPECS[key].type == ("list" if isinstance(value, list) else
-                                   "keyword" if key == "title_enriched" else "text"), key
+                                   "keyword" if key == "role" else "text"), key
     assert profile_mod.profile_lines(profile_mod.LinkedInProfile()) == []
 
 

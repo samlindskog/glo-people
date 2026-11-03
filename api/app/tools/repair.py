@@ -235,7 +235,7 @@ def _evidence(doc: dict) -> tuple[str, str]:
         text = fields.text_of(value)[:EVIDENCE_CLIP.get(key, fields.MAX_TEXT_CHARS)]
         lines.append(f"{key}: {text}")
         folded.append(fields.fold(text))
-        if key in ("email", "emails"):
+        if key == "email":
             for addr in re.findall(r"[^\s;,@]+@", text):
                 folded.append(fields.fold(re.sub(r"[._\-]+", " ", addr[:-1])))
     src = (doc.get("source") or {}).get("file")

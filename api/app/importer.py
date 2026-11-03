@@ -358,8 +358,8 @@ def _corroborates(values: dict[str, Any], doc: dict) -> bool:
         if isinstance(mine, str) and isinstance(theirs, str) and fields.fold(mine) \
                 and fields.fold(mine) == fields.fold(theirs):
             return True
-    mine_domain = _domain(values.get("email") or values.get("emails"))
-    theirs_domain = _domain(history.current(doc.get("email")) or history.current(doc.get("emails")))
+    mine_domain = _domain(values.get("email"))
+    theirs_domain = _domain(history.current(doc.get("email")))
     return bool(mine_domain and mine_domain == theirs_domain)
 
 

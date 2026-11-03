@@ -50,9 +50,9 @@ def test_export_preamble_aliases_and_null_tokens_are_handled():
     assert "phone_number" not in leads.rows[0].values and "phone_number" not in leads.rows[1].values
 
     remapped = importer.parse_csv(LEADS, "leads.csv",
-                                  columns={"title": "title_enriched", "company": "skip", "Phone": "notes"})
+                                  columns={"title": "one_liner", "company": "skip", "Phone": "notes"})
     cols = {c["header"]: c for c in remapped.columns}
-    assert cols["title"]["key"] == "title_enriched" and cols["company"]["role"] == "skip"
+    assert cols["title"]["key"] == "one_liner" and cols["company"]["role"] == "skip"
     assert cols["phone"]["key"] == "notes" and "company" not in remapped.rows[0].values
 
 

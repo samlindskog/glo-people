@@ -286,11 +286,15 @@ def _rev_filter(doc: dict | None) -> dict[str, Any]:
     return {"rev": {"$exists": False}}
 
 
-async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any], *, upsert: bool = False) -> bool:
-    """Apply `to_set` if the document is still at the revision we read; False otherwise. With
-    `upsert` (a new document) the write inserts when nothing is there yet."""
-    res = await db().people.update_one({"_id": oid, **_rev_filter(doc)},
-                                       {"$set": to_set, "$inc": {"rev": 1}}, upsert=upsert)
+async def _cas_write(oid: ObjectId, doc: dict, to_set: dict[str, Any], *, upsert: bool = False,
+                     unset: Iterable[str] = ()) -> bool:
+    """Apply `to_set` (and drop the `unset` keys) if the document is still at the revision we
+    read; False otherwise. With `upsert` (a new document) the write inserts when nothing is
+    there yet."""
+    update: dict[str, Any] = {"$set": to_set, "$inc": {"rev": 1}}
+    if unset:
+        update["$unset"] = {k: "" for k in unset}
+    res = await db().people.update_one({"_id": oid, **_rev_filter(doc)}, update, upsert=upsert)
     return res.matched_count == 1 or res.upserted_id is not None
 
 
@@ -758,11 +762,129 @@ async def merge_documents(principal: Principal | None, keep_id: str, drop_id: st
     return WriteResult(doc, changes)
 
 
+def _ts_key(e: dict) -> datetime:
+    """An entry's time for ordering a replay; one without a time (legacy) counts as oldest."""
+    ts = e.get("ts")
+    if not isinstance(ts, datetime):
+        return datetime.min.replace(tzinfo=UTC)
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+
+def _replay_order(dst: Any, src: Any) -> list[dict]:
+    """Both histories merged by time. On the same time the destination's own entry counts as
+    the newer (it stays shown within a class): one upload wrote both keys at once, and the
+    property the record already showed is the one the person saw."""
+    tagged = [(e, 0) for e in history.entries(src)] + [(e, 1) for e in history.entries(dst)]
+    tagged.sort(key=lambda t: (_ts_key(t[0]), t[1]))
+    return [e for e, _ in tagged]
+
+
+async def fold_property(src_key: str, dst_key: str, *, dry_run: bool = True, page: int = 500,
+                        sample: int = 20) -> dict[str, Any]:
+    """Fold one property into another on every document holding it: the entries of both
+    histories are replayed in time order through `history.append`, so the shown value follows
+    the rules every write follows (an agent's title outranks an upload's, newest wins within a
+    class with the destination's own entry newer on a tie, a repeated value lands once), the
+    source key is dropped, the normalised values
+    follow and the write observers hear of it. The data half of retiring a property whose
+    meaning another one carries (`title_enriched` → `role`, `emails` → `email`); the catalog
+    half is `properties.remove`. With `dry_run` nothing is written. Reports the documents
+    folded, how many had no destination value (`filled`) or one already (`merged`), how many
+    show another value now, and samples."""
+    if src_key == dst_key or not fields.valid_key(src_key) or not fields.valid_key(dst_key) \
+            or src_key in fields.SYSTEM_FIELDS or dst_key in fields.SYSTEM_FIELDS:
+        raise PersonError(f"cannot fold {src_key!r} into {dst_key!r}")
+    report: dict[str, Any] = {"documents": 0, "filled": 0, "merged": 0, "shown_changed": 0,
+                              "samples": []}
+    last = None
+    while True:
+        query: dict[str, Any] = {src_key: {"$exists": True}}
+        if last is not None:
+            query["_id"] = {"$gt": last}
+        ids = await find_ids(query, limit=page)
+        if not ids:
+            return report
+        last = ObjectId(ids[-1])
+        for doc in await fetch(ids):
+            now = datetime.now(UTC)
+            src_prop, dst_prop = doc.get(src_key), doc.get(dst_key)
+            before = history.current(dst_prop)
+            merged = None
+            for e in _replay_order(dst_prop, src_prop):
+                src = Source(**e["src"]) if isinstance(e.get("src"), dict) else Source("legacy")
+                new = history.append(merged, e.get("v"), src, e.get("ts") or now,
+                                     bool(e.get("derived")))
+                if new is not None:
+                    merged = new
+            after = history.current(merged)
+            report["documents"] += 1
+            report["filled" if dst_prop is None else "merged"] += 1
+            if not history.same(before, after):
+                report["shown_changed"] += 1
+                if len(report["samples"]) < sample:
+                    report["samples"].append({"id": str(doc["_id"]),
+                                              "name": history.current(doc.get("name")),
+                                              "from": history.jsonable(before),
+                                              "to": history.jsonable(after)})
+            elif merged is not None and history.is_prop(dst_prop) and "norm" in dst_prop:
+                merged = {**merged, "norm": dst_prop["norm"]}      # the text stands: so does its key
+            if dry_run:
+                continue
+            to_set: dict[str, Any] = {"updated_at": now}
+            if merged is not None and merged != dst_prop:
+                to_set[dst_key] = merged
+            base = {k: v for k, v in doc.items() if k != src_key}
+            await _normalize_into(base, to_set, now)
+            if not await _cas_write(doc["_id"], doc, to_set, unset=(src_key,)):
+                raise ConflictError(f"person {doc['_id']} is being modified concurrently; retry")
+            await _after_write(WriteInfo(str(doc["_id"]), Source("system", "fold"), (dst_key,)))
+
+
+async def rewrite_values(key: str, fn: Callable[[str], str], *, dry_run: bool = True,
+                         source: Source | None = None, page: int = 500, sample: int = 20
+                         ) -> dict[str, Any]:
+    """Apply `fn` to the shown text of `key` on every document holding it and record each
+    changed result as a derived entry of `source`: a mechanical repair of what is shown, which
+    the history keeps the original of and a later human value still outranks. With `dry_run`
+    nothing is written."""
+    if not fields.valid_key(key) or key in fields.SYSTEM_FIELDS:
+        raise PersonError(f"invalid field key {key!r}")
+    source = source or Source("system", "rewrite")
+    report: dict[str, Any] = {"documents": 0, "changed": 0, "samples": []}
+    last = None
+    while True:
+        query: dict[str, Any] = {key: {"$exists": True}}
+        if last is not None:
+            query["_id"] = {"$gt": last}
+        ids = await find_ids(query, limit=page)
+        if not ids:
+            return report
+        last = ObjectId(ids[-1])
+        for doc in await fetch(ids, projection={key: 1, "name": 1}):
+            report["documents"] += 1
+            current = history.current(doc.get(key))
+            if not isinstance(current, str):
+                continue
+            new = fn(current)
+            if new == current:
+                continue
+            report["changed"] += 1
+            if len(report["samples"]) < sample:
+                report["samples"].append({"id": str(doc["_id"]), "name": history.current(doc.get("name")),
+                                          "from": current, "to": new})
+            if dry_run:
+                continue
+            tx = await Transaction.open(str(doc["_id"]))
+            if tx is not None:
+                await tx.set_values({key: new}, source, derived=[key])
+                await tx.commit(None)
+
+
 async def duplicate_groups() -> list[dict[str, Any]]:
     """Documents that share a canonical identity value (a LinkedIn URL, an email): one group per
     value, `ids` oldest first with each one's name and folded name, for a dedup pass to judge."""
     groups: dict[str, dict[str, Any]] = {}
-    for key in ("linkedin", "email", "emails"):
+    for key in ("linkedin", "email"):
         pipeline = [
             {"$match": {f"{key}.norm.v": {"$exists": True, "$ne": None}}},
             {"$unwind": f"${key}.norm.v"},

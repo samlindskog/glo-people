@@ -34,14 +34,14 @@ MAX_ENUM_VALUE_CHARS = 40          # a canonical enum value is a short label
 
 # The keys that describe who a person is, for an agent's judgement (the repair agent's evidence,
 # the normaliser's context); long texts are shown by their opening.
-DESCRIBES_PERSON = ("linkedin", "email", "emails", "github", "website", "company", "role",
-                    "linkedin_headline", "title_enriched", "one_liner", "bio", "intro_bio", "about",
+DESCRIBES_PERSON = ("linkedin", "email", "github", "website", "company", "role",
+                    "linkedin_headline", "one_liner", "bio", "intro_bio", "about",
                     "experience", "sectors", "company_description", "notes", "entity_type",
                     "location")
 DESCRIBE_CLIP = {"about": 600, "experience": 400, "notes": 800, "bio": 800,
                  "company_description": 400}
 AUDIT_KEYS = frozenset({"enrichment_passage"})    # records of what was filed: never a fact to re-file
-IDENTITY_KEYS = ("email", "emails", "phone_number", "phones", "linkedin", "github")
+IDENTITY_KEYS = ("email", "phone_number", "linkedin", "github")
 
 
 @dataclass(frozen=True)
@@ -80,9 +80,7 @@ SPECS: dict[str, Spec] = {
     "first_name": Spec("keyword"),
     "last_name": Spec("keyword"),
     "email": Spec("contact"),
-    "emails": Spec("contact"),
     "phone_number": Spec("contact"),
-    "phones": Spec("contact"),
     "linkedin": Spec("url", label="LinkedIn"),
     "github": Spec("url", label="GitHub"),
     "instagram": Spec("url"),
@@ -90,12 +88,12 @@ SPECS: dict[str, Spec] = {
     "company_website": Spec("url", description="The current employer's website"),
     "related_links": Spec("url"),
     # who they are
-    "role": Spec("keyword"),
-    "title_enriched": Spec("keyword", label="Title (enriched)",
-                           description="Current job title as a data provider states it"),
+    "role": Spec("keyword", description="Current job title, as the person, an upload or a data "
+                                        "provider states it"),
     # what the enrich assistant files from provider profiles through the storage agent
-    "about": Spec("text", description="The person's own profile summary (LinkedIn about text), "
-                                      "verbatim"),
+    "about": Spec("text", description="The person's own profile summary (LinkedIn about text) in "
+                                      "their own words; providers drop its line breaks, only "
+                                      "the lost spacing is restored"),
     "experience": Spec("text", description="Work history: title at company (years), one position "
                                            "per clause, most recent first"),
     "education": Spec("text", description="Education: degree, institution (years), one school "

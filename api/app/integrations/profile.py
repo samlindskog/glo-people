@@ -138,10 +138,10 @@ def profile_lines(profile: LinkedInProfile) -> list[Line]:
     the current title, the work history and education as one clause per entry, and the list
     properties. Empty values are skipped; the keys are all spec properties."""
     lines: list[Line] = []
-    if about := _clean(profile.summary):
+    if about := fields.respace(_clean(profile.summary)):     # providers drop its line breaks
         lines.append(("about", about))
     if title := _clean(profile.current_title):
-        lines.append(("title_enriched", title))
+        lines.append(("role", title))
     if positions := fields.distinct(map(position_text, profile.experience)):
         lines.append(("experience", "; ".join(positions)))
     if schools := fields.distinct(map(education_text, profile.education)):

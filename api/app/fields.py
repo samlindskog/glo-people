@@ -24,10 +24,12 @@ NULL_TOKENS = frozenset({"null", "none", "n/a", "na", "nan", "-", "\u2014", "\u2
 HEADER_ALIASES = {
     "url": "linkedin", "linkedin_url": "linkedin", "profile": "linkedin", "profile_url": "linkedin",
     "linkedin_profile": "linkedin",
-    "email_address": "email", "e_mail": "email", "mail": "email",
+    "email_address": "email", "e_mail": "email", "mail": "email", "emails": "email",
+    "email_addresses": "email",
     "position": "role", "title": "role", "job_title": "role",
     "connected_on": "linkedin_connected",
     "phone": "phone_number", "mobile": "phone_number", "telephone": "phone_number",
+    "phones": "phone_number", "phone_numbers": "phone_number",
     "mongo_id": "id", "uuid": "id", "external_id": "id", "record_id": "id",
 }
 RESERVED_PREFIX = "col_"      # a CSV header that slugifies to a system key becomes col_<key>
@@ -75,6 +77,31 @@ def clean(text: Any, *, keep_lines: bool = False) -> str:
         lines = [" ".join(line.split()) for line in raw.splitlines()]
         return "\n".join(line for line in lines if line).strip()
     return " ".join(raw.split())
+
+
+_LOST_BREAK = re.compile(r"(?<=[A-Za-z][.!?])(?=[A-Z][a-z])")
+
+
+def respace(text: str) -> str:
+    """A space restored where a data provider dropped a line break between two sentences: a
+    letter, sentence punctuation and a capitalised word run together ("users.Currently at",
+    "GSB.What"). Only the unambiguous case: a lower-case word after the period could
+    be a domain, so it is left alone, and so is any token that holds an address or a path (an
+    email, a URL)."""
+    out = []
+    for tok in text.split(" "):
+        if "@" in tok or "/" in tok or tok.lower().startswith(("http", "www.")):
+            out.append(tok)
+        else:
+            out.append(_LOST_BREAK.sub(" ", tok))
+    return " ".join(out)
+
+
+def repair_text(text: str) -> str:
+    """A stored text brought to the form `clean` gives new ones, line breaks kept, plus the
+    spacing a provider dropped (`respace`): the mechanical repair of texts stored before the
+    cleaning existed or filed from a provider that strips line breaks."""
+    return respace(clean(text, keep_lines=True))
 
 
 def distinct(items: Iterable[Any], key: Callable[[Any], Any] = fold) -> list:

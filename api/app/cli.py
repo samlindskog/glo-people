@@ -32,6 +32,7 @@ from app.assistants.base import REGISTRY
 from app.assistants.embed import EmbedOptions
 from app.assistants.merge import MergeOptions
 from app.assistants.reparse import ReparseOptions
+from app.history import Source
 from app.permissions import is_role, roles
 
 
@@ -184,6 +185,46 @@ async def dedupe(apply: bool) -> None:
             merged += 1
             print(f"    merged {drop} into {keep}: {', '.join(c.key for c in res.changes) or 'nothing new'}")
     print(f"{merged} merged, {listed} listed" + ("" if apply else " (dry run; --yes to merge the same-name groups)"))
+
+
+async def fold_property(src: str, dst: str, yes: bool, sample: int = 20) -> None:
+    """Fold a property into another and retire it: its entries replayed into the other's history
+    under the usual trust rules (people.fold_property), then the field's vectors and registry
+    entry removed. Reports first; writes only with --yes. Idempotent: nothing to fold is fine."""
+    if properties.spec(src) is not None:
+        sys.exit(f"{src} is defined in property_specs.py; remove it from the code first")
+    await mongo.ensure_indexes()
+    wiring.register_write_hooks()
+    holders = await people.count({src: {"$exists": True}})
+    print(f"{src} -> {dst}: {holders} document(s) hold {src}")
+    rep = await people.fold_property(src, dst, dry_run=not yes, sample=sample)
+    print(f"{rep['documents']} folded: {rep['filled']} had no {dst}, {rep['merged']} had one; "
+          f"{rep['shown_changed']} show another value" + ("" if yes else " (dry run)"))
+    for row in rep["samples"]:
+        print(f"  - {row['name']} ({row['id']}): {row['from']!r} -> {row['to']!r}")
+    if not yes:
+        print("dry run; add --yes to fold and retire")
+        return
+    await embeddings.delete_field(src)
+    removed = await properties.remove(src)
+    print(f"{src}: registry entry {'deleted' if removed else 'absent'}")
+
+
+async def repair_text(key: str, yes: bool, sample: int = 20) -> None:
+    """Bring a text property's stored values to the cleaned form (entities decoded, spacers
+    removed) with the sentence spacing a data provider dropped restored (fields.repair_text),
+    as a derived system entry per changed value. Reports first; writes only with --yes.
+    Idempotent."""
+    await mongo.ensure_indexes()
+    wiring.register_write_hooks()
+    rep = await people.rewrite_values(key, fields.repair_text, dry_run=not yes,
+                                      source=Source("system", "repair_text"), sample=sample)
+    print(f"{key}: {rep['documents']} document(s) read, {rep['changed']} repaired"
+          + ("" if yes else " (dry run)"))
+    for row in rep["samples"]:
+        print(f"  - {row['name']} ({row['id']}): {row['from'][:160]!r} -> {row['to'][:160]!r}")
+    if not yes and rep["changed"]:
+        print("dry run; add --yes to write")
 
 
 async def embed(only: list[str] | None) -> None:
@@ -466,6 +507,16 @@ def main() -> None:
     dp = sub.add_parser("drop-property", help="delete properties (documents, vectors, registry)")
     dp.add_argument("keys", nargs="+")
     dp.add_argument("--yes", action="store_true", help="without it: list the holders only")
+    fp = sub.add_parser("fold-property", help="fold a property into another (entries replayed "
+                                              "into its history under the trust rules) and retire it")
+    fp.add_argument("src")
+    fp.add_argument("dst")
+    fp.add_argument("--yes", action="store_true", help="without it: report only")
+    rp = sub.add_parser("repair-text", help="clean a text property's stored values (entities, "
+                                            "spacers) and restore the sentence spacing a data "
+                                            "provider dropped")
+    rp.add_argument("--key", default="about")
+    rp.add_argument("--yes", action="store_true", help="without it: report only")
     rr = sub.add_parser("run", help="what happened in one run: outcomes, skipped reasons, "
                                     "what the storage agent filed, failures")
     rr.add_argument("run_id", type=int)
@@ -511,6 +562,10 @@ def main() -> None:
                     await migrate_history(args.dry_run)
                 case "drop-property":
                     await drop_property(args.keys, args.yes)
+                case "fold-property":
+                    await fold_property(args.src, args.dst, args.yes)
+                case "repair-text":
+                    await repair_text(args.key, args.yes)
                 case "run":
                     await run_report(args.run_id, args.items, args.events)
                 case "providers":

@@ -211,33 +211,33 @@ def test_storage_check_evidence_locked_and_confirmations():
     from app.tools.store import NewProperty, Proposal, Write, check
     cat = {k: Property(key=k, type="text", label=k, description="", embeddable=True,
                        normalisable=False, filter_ops=[], source="spec")
-           for k in ("about", "company", "title_enriched", "notes")}
+           for k in ("about", "company", "role", "notes")}
     passage = ("about: Currently a medical student, but I’ve always had one too many shoes I "
                "wanted to have the foot in. I found that defining myself a Renaissance woman "
                "would make it all more cohesive… and it does in some sense.\n"
-               "title_enriched: Research Assistant")
+               "role: Research Assistant")
     # a curly apostrophe copied as a straight one, and a long quote shortened at its end
     ok = Proposal(writes=[Write(key="about", value="x", evidence="Currently a medical student, "
                                 "but I've always had one too many shoes I wanted"),
-                          Write(key="title_enriched", value="Research Assistant",
-                                evidence="title_enriched: Research Assistant")])
+                          Write(key="role", value="Research Assistant",
+                                evidence="role: Research Assistant")])
     assert check(ok, cat, passage) == []
     made_up = Proposal(writes=[Write(key="notes", value="x", evidence="Studied at Oxford")])
     assert check(made_up, cat, passage)[0] == "notes: evidence must be copied verbatim from the passage"
     # locked keys may be confirmed, never written; confirmations need a current value
     locked = frozenset({"company"})
-    bad = Proposal(writes=[Write(key="company", value="ICLUB", evidence="title_enriched: Research")],
-                   confirmed=["title_enriched"],
+    bad = Proposal(writes=[Write(key="company", value="ICLUB", evidence="role: Research")],
+                   confirmed=["role"],
                    new_properties=[NewProperty(key="hat_size", label="Hat size",
                                                description="d", value="7")])
     problems = check(bad, cat, passage, current={"about": "old"}, locked=locked)
     assert problems[0].startswith("company is set by the caller")
-    assert "title_enriched has no current value" in problems[1]
-    fine = Proposal(confirmed=["company", "about"], ignored=["title_enriched: not a job title"])
+    assert "role has no current value" in problems[1]
+    fine = Proposal(confirmed=["company", "about"], ignored=["role: not a job title"])
     assert check(fine, cat, passage, current={"about": "old"}, locked=locked) == []
     # a labelled line anchors its fact: its evidence is not re-checked word by word
     anchored = Proposal(writes=[Write(key="about", value="x", evidence="about: a paraphrase")],
-                        ignored=["title_enriched: not a title"])
+                        ignored=["role: not a title"])
     assert check(anchored, cat, passage) == []
     assert check(Proposal(writes=[Write(key="notes", value="x", evidence="a paraphrase")]),
                  cat, passage)[0] == "notes: evidence must be copied verbatim from the passage"
@@ -251,10 +251,10 @@ def test_storage_check_evidence_locked_and_confirmations():
     # every labelled line must be filed, confirmed or set aside
     partial = Proposal(writes=[Write(key="about", value="x", evidence="about")])
     assert check(partial, cat, passage) == [("these labelled lines were neither filed, confirmed nor "
-                                             "ignored: title_enriched (write each, confirm it, or list "
+                                             "ignored: role (write each, confirm it, or list "
                                              "its label under ignored with the reason)")]
     accounted = Proposal(writes=[Write(key="about", value="x", evidence="about")],
-                         ignored=["title_enriched: not a job title"])
+                         ignored=["role: not a job title"])
     assert check(accounted, cat, passage) == []
     # an empty answer to a non-empty passage is not an answer
     assert check(Proposal(), cat, passage)[0].startswith("the proposal is empty")

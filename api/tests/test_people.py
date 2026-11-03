@@ -39,7 +39,7 @@ async def test_import_registry_and_coercion(writer):
 
     fl = {f["key"]: f for f in (await writer.get("/api/properties")).json()}
     assert fl["sectors"]["type"] == "list" and fl["mrr"]["type"] == "number"
-    assert fl["bio"]["embeddable"] and not fl["emails"]["embeddable"]
+    assert fl["bio"]["embeddable"] and not fl["email"]["embeddable"]
     assert not fl["mrr"]["embeddable"] and fl["brand_new_column"]["embeddable"]
     assert fl["name"]["count"] == 3 and fl["brand_new_column"]["count"] == 1
     assert "id" not in fl
@@ -48,7 +48,7 @@ async def test_import_registry_and_coercion(writer):
     assert ada["tier"] == "member" and ada["mrr"]["v"] == "$12,000"
     assert ada["mrr"]["norm"]["v"] == 12000 and ada["rev"] == 1
     assert ada["sectors"]["v"] == ["fintech", "payments"]
-    assert ada["emails"]["v"] == ["ada@x.io", "ada2@x.io"]
+    assert ada["email"]["v"] == ["ada@x.io", "ada2@x.io"]           # "Emails" is an alias of email
     assert ada["source"] == {"file": "members.csv", "source_id": "m1", "row": 2}
     assert ada["schema_version"] == 2 and len(ada["bio"]["h"]) == 1
     assert ada["bio"]["h"][0]["src"] == {"kind": "import", "by": "members.csv", "ref": "row 2"}
@@ -100,7 +100,7 @@ async def test_embeddings_created_per_field(writer):
     from app import db as pg
     async with pg.engine().connect() as conn:
         rows = (await conn.execute(select(pg.field_embeddings.c.field))).scalars().all()
-    assert rows.count("bio") == 3 and "emails" not in rows and "mrr" not in rows
+    assert rows.count("bio") == 3 and "email" not in rows and "mrr" not in rows
 
 
 async def test_person_crud_and_reembed(writer, reader):
