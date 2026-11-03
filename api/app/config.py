@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     firecrawl_api_url: str = "https://api.firecrawl.dev"
     firecrawl_max_age_s: int = 172_800   # reuse Firecrawl's cached copy of a page up to 2 days old
     agent_model: str = "openai:gpt-6-luna"
+    # Every model and embedding request has a deadline and a retry count (the OpenAI client's
+    # own defaults are 600 s and two retries: one hung request held a 500-person run at 499
+    # until it was stopped), and every assistant item has a deadline as the backstop for
+    # whatever hangs inside it.
+    model_timeout_s: int = 120
+    model_max_retries: int = 1
+    item_timeout_s: int = 900
     fake_agents: bool = False            # deterministic stand-ins for every agent (e2e, demos)
     auto_review: bool = True             # review people after human and API writes (assistants/auto_review)
     enrich_ttl_days: int = 90

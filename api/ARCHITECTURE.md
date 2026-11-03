@@ -128,7 +128,10 @@ higher cap continues it; a Firecrawl 402 requeues the item and pauses every run 
 (`account credits`). `done`, `failed` and `credits_used` are kept per item end. The owner
 heartbeats every `run_heartbeat_s`; the API adopts a run whose worker is gone (none, stale beyond
 `run_stale_s`, or any `api:` worker at startup), requeueing its running items (`attempts`; an
-item interrupted `item_max_attempts` times fails). Shutdown cancels in-flight items (their tool
+item interrupted `item_max_attempts` times fails). An item still running after `item_timeout_s` fails as `timed out`
+(nothing written: tools stop on cancellation), and every model and embedding request has
+its own deadline and retry count (`model_timeout_s`, `model_max_retries`), so one hung
+request cannot hold a run. Shutdown cancels in-flight items (their tool
 invocations roll back), requeues them and releases the runs, so a deploy loses nothing. Every
 tool event during an item is persisted with the item and published on the in-process hub;
 `runner.subscribe` replays then follows (polling the table for a run another process owns).

@@ -300,8 +300,10 @@ class _RunState:
     pausing: bool = False
     item_events: dict[int, int] = field(default_factory=dict)
     cancelled: list[int] = field(default_factory=list)     # items whose task we cancelled
-    # The starter's context (its agent overrides, settings): items run inside a copy of it, as
-    # they did when a request spawned them; adopted runs use the scheduler's own.
+    # The starter's context (its agent overrides, settings): every item task runs inside its
+    # own copy of it, as it would had a request spawned it, so what an item sets (its usage
+    # counter, its trace, CURRENT_ITEM) never leaks into another item running beside it;
+    # adopted runs use the scheduler's own.
     context: contextvars.Context | None = None
 
     @property
@@ -444,7 +446,8 @@ class _Scheduler:
                 item = st.queue.popleft()
                 if not await self._claim(item["id"]):
                     continue
-                task = asyncio.create_task(self._run_item(st, item), context=st.context,
+                task = asyncio.create_task(self._run_item(st, item),
+                                           context=st.context.copy() if st.context else None,
                                            name=f"item:{st.run_id}:{item['id']}")
                 st.inflight[item["id"]] = task
                 task.add_done_callback(lambda _: self.wake.set())
@@ -545,7 +548,10 @@ class _Scheduler:
                 self.emit(run_id, "step", f"{item.get('label') or item_id}: started", item_id)
                 usage: dict[str, int] = {}
                 agent_common.USAGE.set(usage)
-                result = await st.spec.run_item(deps)
+                # the backstop for whatever hangs inside an item (a request past every client
+                # deadline, a lock): the item fails, the run goes on
+                result = await asyncio.wait_for(st.spec.run_item(deps),
+                                                get_settings().item_timeout_s or None)
                 result = {**result, "credits": credits(),
                           "calls": getattr(deps.budget, "calls", None), "tokens": usage or None}
                 span.set_attribute("credits", credits())
@@ -562,6 +568,11 @@ class _Scheduler:
             self.emit(run_id, "note", f"{item.get('label') or item_id}: {e}; back in the queue",
                       item_id)
             await self._pause(st, reason, cascade=reason == "account credits")
+        except TimeoutError:
+            limit = get_settings().item_timeout_s
+            log.error("assistant %s item %s timed out after %s s", st.spec.key, item_id, limit)
+            await self._mark(st, item, "failed", result=partial(), credits=credits(),
+                             error=f"timed out after {limit} s", trace_id=trace_id)
         except Exception as e:
             log.exception("assistant %s item %s failed", st.spec.key, item_id)
             await self._mark(st, item, "failed", result=partial(),

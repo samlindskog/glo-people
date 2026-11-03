@@ -39,10 +39,14 @@ class FakeEmbedder:
 
 
 class OpenAIEmbedder:
-    def __init__(self, api_key: str, model: str, dims: int) -> None:
+    def __init__(self, api_key: str, model: str, dims: int, timeout_s: float = 120,
+                 retries: int = 1) -> None:
+        import httpx
         from openai import AsyncOpenAI
 
-        self.client = AsyncOpenAI(api_key=api_key)
+        # a deadline on every request: a write hook that hangs holds the write and its item
+        self.client = AsyncOpenAI(api_key=api_key, max_retries=retries,
+                                  timeout=httpx.Timeout(timeout_s, connect=15.0))
         self.model = model
         self.dims = dims
 
@@ -60,7 +64,8 @@ def embedder():
     if _embedder is None:
         s = get_settings()
         if s.embedding_provider == "openai" and s.openai_api_key:
-            _embedder = OpenAIEmbedder(s.openai_api_key, s.embedding_model, s.embedding_dims)
+            _embedder = OpenAIEmbedder(s.openai_api_key, s.embedding_model, s.embedding_dims,
+                                       s.model_timeout_s, s.model_max_retries)
         else:
             if s.embedding_provider == "openai":
                 log.warning("OPENAI_API_KEY not set; using the fake hashing embedder")

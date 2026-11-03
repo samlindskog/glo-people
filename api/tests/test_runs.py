@@ -113,6 +113,65 @@ async def test_stop_cancels_in_flight_tools_and_skips_the_queue(people_by_name, 
     assert (await writer.post(f"/api/assistants/runs/{run_id}/resume")).status_code == 409
 
 
+async def test_an_item_that_never_answers_times_out_and_the_run_goes_on(people_by_name, writer,
+                                                                        reader, monkeypatch):
+    """One hung model request held a 500-person run at 499: the item's deadline fails the item
+    (nothing written) and the run finishes."""
+    monkeypatch.setattr(get_settings(), "assistant_concurrency", 1)
+    monkeypatch.setattr(get_settings(), "item_timeout_s", 0.5)
+    cy = people_by_name["Cy"]
+    before = await db().people.find_one({"_id": people._oid(cy)})
+    gate = Gate()                                           # never released: no answer, ever
+    with normalize_tool.agent.override(model=FunctionModel(gate.model)):
+        run_id = await _start(writer, [cy])
+        run = await runner.wait(run_id)
+    assert run["status"] == "done" and run["failed"] == 1 and run["done"] == 0
+    item = (await reader.get(f"/api/assistants/runs/{run_id}")).json()["items"][0]
+    assert item["status"] == "failed" and item["error"] == "timed out after 0.5 s"
+    assert await db().people.find_one({"_id": people._oid(cy)}) == before   # stopped before a write
+    assert any("timed out" in e["message"] for e in await runner.events(run_id))
+
+
+async def test_items_in_flight_run_in_separate_contexts(people_by_name, writer, monkeypatch):
+    """Two items beside each other must not share one context: their usage counters, traces and
+    CURRENT_ITEM are contextvars, and a shared context mixed them (an item's spans appeared under
+    another item's trace on prod)."""
+    monkeypatch.setattr(get_settings(), "assistant_concurrency", 2)
+    cy, ada = people_by_name["Cy"], people_by_name["Ada"]
+    await people.update(None, ada, {"stage": "Pre-seed w/o revenue"}, source=Source("ui", "wendy"))
+    gate = Gate()
+
+    async def both_waiting():
+        return gate.calls >= 2
+    with normalize_tool.agent.override(model=FunctionModel(gate.model)):
+        try:
+            run_id = await _start(writer, [cy, ada])
+            await _until(both_waiting)
+            st = runner.scheduler().runs[run_id]
+            contexts = [t.get_context() for t in st.inflight.values()]
+            assert len(contexts) == 2 and contexts[0] is not contexts[1]
+            assert all(c is not st.context for c in contexts)
+        finally:
+            gate.release.set()
+    run = await runner.wait(run_id)
+    assert run["status"] == "done" and run["done"] == 2
+
+
+def test_model_and_embedding_requests_have_a_deadline(monkeypatch):
+    from app import embedder
+    from app.agents import common
+    monkeypatch.setattr(get_settings(), "openai_api_key", "test-key")
+    monkeypatch.setattr(get_settings(), "agent_model", "openai:gpt-6-luna")
+    m = common.configured_model()
+    assert type(m).__name__ == "OpenAIResponsesModel" and m.model_name == "gpt-6-luna"
+    assert m.client.timeout.read == 120 and m.client.max_retries == 1       # not the SDK's 600 s / 2
+    assert common.configured_model() is m                                   # built once
+    monkeypatch.setattr(get_settings(), "agent_model", "anthropic:claude-x")
+    assert common.configured_model() == "anthropic:claude-x"                # other names pass through
+    e = embedder.OpenAIEmbedder("test-key", "text-embedding-3-small", 8, 30, 0)
+    assert e.client.timeout.read == 30 and e.client.max_retries == 0
+
+
 async def test_pause_lets_in_flight_items_finish_then_resumes(people_by_name, writer, reader,
                                                                monkeypatch):
     monkeypatch.setattr(get_settings(), "assistant_concurrency", 1)

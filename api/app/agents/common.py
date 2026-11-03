@@ -32,6 +32,34 @@ class AgentDeps:
             await self.firecrawl.aclose()
 
 
+_model_cache: tuple[tuple[Any, ...], Any] | None = None
+
+
+def configured_model() -> Any:
+    """The model every agent runs on, built once per process: for an `openai:` name an
+    OpenAIResponsesModel over a client with this app's request deadline and retry count
+    (`model_timeout_s`, `model_max_retries`; the SDK's own defaults are 600 s and two retries,
+    which held a run on one hung request); any other name is handed to pydantic-ai as it is."""
+    global _model_cache
+    s = get_settings()
+    key = (s.agent_model, s.model_timeout_s, s.model_max_retries, s.openai_api_key)
+    if _model_cache is None or _model_cache[0] != key:
+        _model_cache = (key, _build_model(*key))
+    return _model_cache[1]
+
+
+def _build_model(name: str, timeout_s: float, retries: int, api_key: str) -> Any:
+    if not name.startswith("openai:"):
+        return name
+    import httpx
+    from openai import AsyncOpenAI
+    from pydantic_ai.models.openai import OpenAIResponsesModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+    client = AsyncOpenAI(api_key=api_key or None, max_retries=retries,
+                         timeout=httpx.Timeout(timeout_s, connect=15.0))
+    return OpenAIResponsesModel(name.split(":", 1)[1], provider=OpenAIProvider(openai_client=client))
+
+
 def model_settings() -> dict[str, Any]:
     model = get_settings().agent_model
     if model.startswith("openai"):
@@ -66,7 +94,7 @@ async def run_agent(agent: Agent, prompt: str, deps: Any = None,
         from app.agents import fakes
         model: Any = fakes.model_for(agent)
     else:
-        model = get_settings().agent_model
+        model = configured_model()
     kwargs: dict[str, Any] = {"deps": deps, "model": model,
                               "usage_limits": UsageLimits(request_limit=request_limit),
                               "model_settings": model_settings()}
