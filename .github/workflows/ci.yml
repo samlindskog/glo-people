@@ -78,6 +78,8 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -nodes -subj /CN=stub -days 1 \
             -keyout /tmp/nginx-stub/certs/origin.key -out /tmp/nginx-stub/certs/origin.pem 2>/dev/null
           cp /tmp/nginx-stub/certs/origin.pem /tmp/nginx-stub/certs/aop-ca.pem
+          cp /tmp/nginx-stub/certs/origin.pem /tmp/nginx-stub/certs/glojobs-origin.pem
+          cp /tmp/nginx-stub/certs/origin.key /tmp/nginx-stub/certs/glojobs-origin.key
           echo "set_real_ip_from 127.0.0.1;" > /tmp/nginx-stub/cloudflare-realip.conf
           echo "ssl_verify_client off;" > /tmp/nginx-stub/aop.conf
           docker run --rm -v /tmp/nginx-stub/certs:/etc/nginx/certs:ro \

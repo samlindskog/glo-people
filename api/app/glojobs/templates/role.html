@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block body %}
+<main id="main" class="wrap job">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="{{ home }}">{{ board.title }}</a><span aria-hidden="true">/</span><a href="{{ home }}?company={{ job.company_slug }}">{{ company.name }}</a></nav>
+  <header class="job-head">
+    <p class="job-co"><a href="{{ home }}?company={{ job.company_slug }}">{{ company.name }}</a></p>
+    <h1 class="job-title">{{ job.title }}</h1>
+    <dl class="facts">
+      <div><dt>Location</dt><dd>{{ job.location or "To be confirmed" }}</dd></div>
+      <div><dt>Type</dt><dd>{{ job.type or "To be confirmed" }}</dd></div>
+      <div><dt>Pay</dt><dd>{{ job.comp or "Shared during the process" }}</dd></div>
+    </dl>
+  </header>
+  <div class="job-grid{% if not more %} job-grid-solo{% endif %}">
+    <article class="prose">
+      {% if company.about_html %}
+      <h2>About {{ company.name }}</h2>
+      {{ company.about_html | safe }}
+      {% if company.web %}<p class="co-link"><a href="https://{{ company.web }}" rel="noopener">{{ company.web }}</a></p>{% endif %}
+      {% endif %}
+      {% if job.html %}
+      <h2>The role</h2>
+      {{ job.html | safe }}
+      {% elif job.summary %}
+      <h2>The role</h2>
+      <p>{{ job.summary }}</p>
+      {% endif %}
+      {% if job.source_url %}<p class="co-link"><a href="{{ job.source_url }}" rel="noopener">Full posting</a></p>{% endif %}
+    </article>
+    {% if more %}
+    <aside class="side">
+      <section class="more" aria-labelledby="more-h">
+        <h2 id="more-h">More at {{ company.name }}</h2>
+        <ul>
+          {% for m in more %}
+          <li><a href="{{ base }}/{{ board.id }}/roles/{{ m.slug }}"><span>{{ m.title }}</span><span class="more-where">{{ m.short_location }}</span></a></li>
+          {% endfor %}
+        </ul>
+      </section>
+    </aside>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}

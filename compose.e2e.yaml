@@ -14,6 +14,7 @@ services:
       LOGFIRE_TOKEN: ""
       LOGFIRE_ENVIRONMENT: e2e
       DEV_AUTO_LOGIN: "0"
+      GLOJOBS_PUBLIC_URL: http://localhost:8081/glojobs
     ports: !override ["127.0.0.1:8001:8000"]
 
   nginx:

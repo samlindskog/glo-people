@@ -506,3 +506,95 @@ export interface AssistantRunItem {
 export interface AssistantRunDetail extends AssistantRun {
   items: AssistantRunItem[]
 }
+
+// --- glojobs.app boards --------------------------------------------------------------------------
+
+export type BoardKind = 'jobs' | 'talent' | 'both'
+export const BOARD_KINDS: { value: BoardKind; label: string }[] = [
+  { value: 'jobs', label: 'Jobs' },
+  { value: 'talent', label: 'People' },
+  { value: 'both', label: 'Jobs and people' },
+]
+
+export interface BoardCompany {
+  slug: string
+  name: string
+  web: string
+  line: string
+  about_html: string
+  created_at: string
+  updated_at: string
+  /** Tags the sanitiser dropped (on a write). */
+  stripped?: string[]
+}
+
+export interface BoardJob {
+  slug: string
+  company_slug: string
+  company_name?: string
+  title: string
+  location: string
+  type: string
+  comp: string
+  summary: string
+  html: string
+  status: 'open' | 'closed'
+  source_url: string
+  created_at: string
+  updated_at: string
+  updated_by: number | null
+  stripped?: string[]
+  boards?: BoardRef[]
+}
+
+export interface BoardTalent {
+  slug: string
+  person_id: string | null
+  name: string
+  headline: string
+  location: string
+  summary: string
+  html: string
+  status: 'active' | 'hidden'
+  created_at: string
+  updated_at: string
+  updated_by: number | null
+  stripped?: string[]
+  boards?: BoardRef[]
+}
+
+export interface BoardRef {
+  id: string
+  person_id: string
+  person_name: string
+  kind: BoardKind
+  url: string
+}
+
+export interface Board {
+  id: string
+  person_id: string
+  person_name: string
+  kind: BoardKind
+  title: string | null
+  intro_html: string
+  job_slugs: string[]
+  talent_slugs: string[]
+  enabled: boolean
+  views: number
+  last_viewed_at: string | null
+  created_at: string
+  updated_at: string
+  created_by: number | null
+  url: string
+  job_count: number
+  talent_count: number
+  stripped?: string[]
+}
+
+/** GET /api/boards/:id — the board with its items as the page shows them. */
+export interface BoardDetail extends Board {
+  jobs: BoardJob[]
+  companies: (BoardCompany & { jobs: BoardJob[] })[]
+  talent: BoardTalent[]
+}

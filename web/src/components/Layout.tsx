@@ -8,6 +8,7 @@ const NAV: { to: string; label: string; permission: Permission }[] = [
   { to: '/people', label: 'People', permission: 'people:read' },
   { to: '/properties', label: 'Properties', permission: 'people:read' },
   { to: '/assistants', label: 'Assistants', permission: 'people:read' },
+  { to: '/boards', label: 'Boards', permission: 'people:read' },
   { to: '/history', label: 'History', permission: 'searches:read_own' },
   { to: '/accounts', label: 'Accounts', permission: 'accounts:manage' },
 ]

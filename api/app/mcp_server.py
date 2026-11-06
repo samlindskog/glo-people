@@ -14,7 +14,7 @@ from pydantic import Field
 from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import agent_log, auth, fields, importer, properties
+from app import agent_log, auth, boards, fields, importer, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, credits, merge, runner
 from app.assistants.ask import ask
@@ -45,7 +45,10 @@ log = logging.getLogger(__name__)
 
 WRITE_TOOLS = frozenset({"create_person", "merge_person", "merge_people", "enrich_person", "update_person", "delete_person",
                          "store_about_person", "normalize_person", "start_assistant", "pause_run",
-                         "resume_run", "stop_run"})
+                         "resume_run", "stop_run",
+                         "upsert_board_company", "upsert_board_job", "delete_board_job",
+                         "upsert_board_talent", "delete_board_talent", "create_board",
+                         "update_board", "delete_board"})
 
 INSTRUCTIONS = """\
 The GLO people database: people in tiers ('member', 'plus_one', 'plus_two'), each a document of
@@ -100,6 +103,17 @@ Playbook
   outrank the shown value is recorded and reported as `kept`; get_person marks the shown entry
   (`shown`, `why`). normalize_person re-parses one record and repairs its identity data.
 - Before any bulk write, dry_run; after one, read the run's items (get_run) and summarise counts.
+- Boards (glojobs.app): a board is one person's private page — reachable only by its UUID link —
+  listing open roles, people, or both, drawn from a shared catalogue. Catalogue first:
+  upsert_board_company (slug, name, site, one-liner, about as HTML), then upsert_board_job (the
+  description as HTML: h2 headings, p, ul/li; the tool returns `stripped` for anything it had to
+  drop — scripts, styles, images are never shown), upsert_board_talent (person_id alone drafts
+  name, headline, location and bio from the record; pass fields to override). Then create_board
+  (person_id, or `person` = {name, email, …} when the person is not in the database yet — matched
+  or created like merge_person) with kind jobs | talent | both and the slug lists; it returns the
+  url to hand over. update_board changes the lists (job_slugs replaces; add_jobs / remove_jobs
+  edit in place), the title, the intro, or disables the link. list_board_jobs / list_board_talent
+  show the catalogue; get_board shows a board with its items resolved and how often it was opened.
 Pass `agent` when you write on behalf of another automated agent: the entry stays attributed to your
 key (kind "mcp") with that name in its reference."""
 
@@ -757,6 +771,264 @@ async def delete_person(ctx: Context, id: str) -> dict:
         raise ToolError(str(e)) from e
     if not deleted:
         raise ToolError("person not found")
+    return {"deleted": id}
+
+
+# --- glojobs.app boards --------------------------------------------------------------------------
+
+def _board_error(e: Exception) -> ToolError:
+    return ToolError(str(e))
+
+
+@mcp.tool()
+async def list_board_companies(ctx: Context) -> list[dict]:
+    """Tool: the companies of the glojobs.app job catalogue (slug, name, site, one-liner)."""
+    await _principal(ctx, "people:read")
+    return await boards.list_companies()
+
+
+@mcp.tool()
+async def upsert_board_company(
+    ctx: Context,
+    slug: Annotated[str, Field(description="URL key, e.g. 'fastlane'; lower case and hyphens")],
+    name: str,
+    web: Annotated[str, Field(description="The site's host, e.g. usefastlane.ai")] = "",
+    line: Annotated[str, Field(description="One line under the name on the board")] = "",
+    about_html: Annotated[str, Field(description="A paragraph or two about the company as HTML "
+                                                 "(p, ul/li, strong, a); shown on every role page")] = "",
+) -> dict:
+    """Tool: create or replace a company of the job catalogue (requires people:write). Returns
+    the stored row and `stripped`: tags the sanitiser dropped from the about text."""
+    await _principal(ctx, "people:write")
+    try:
+        return await boards.upsert_company(slug, name=name, web=web, line=line, about_html=about_html)
+    except boards.BoardError as e:
+        raise _board_error(e) from e
+
+
+@mcp.tool()
+async def list_board_jobs(ctx: Context, company: str | None = None,
+                          status: Annotated[str | None, Field(description="open | closed")] = None,
+                          q: Annotated[str | None, Field(description="Text in the title, company, "
+                                                                     "location or summary")] = None
+                          ) -> list[dict]:
+    """Tool: the glojobs.app job catalogue (every job's slug, company, title, location, type,
+    pay, summary and status; the HTML body too)."""
+    await _principal(ctx, "people:read")
+    return await boards.list_jobs(company, status, q)
+
+
+@mcp.tool()
+async def get_board_job(ctx: Context, slug: str) -> dict:
+    """Tool: one job of the catalogue with the boards that list it."""
+    await _principal(ctx, "people:read")
+    job = await boards.get_job(slug)
+    if not job:
+        raise ToolError("job not found")
+    return {**job, "boards": await boards.boards_listing("job_slugs", slug)}
+
+
+@mcp.tool()
+async def upsert_board_job(
+    ctx: Context,
+    company: Annotated[str, Field(description="The company's slug (upsert_board_company first)")],
+    title: str,
+    slug: Annotated[str | None, Field(description="URL key; default '<company>-<title>' slugified. "
+                                                  "Pass the existing slug to replace a job")] = None,
+    location: str = "",
+    type: Annotated[str, Field(description="Full-time, Internship, Contract, …")] = "",
+    comp: Annotated[str, Field(description="Pay as shown, e.g. '$150K–$275K base + equity'")] = "",
+    summary: Annotated[str, Field(description="One or two sentences for the list and link "
+                                              "previews")] = "",
+    html: Annotated[str, Field(description="The job description as HTML: h2 section headings "
+                                           "(What you'll do, What we're looking for, "
+                                           "Compensation), p, ul/li, strong, a. Scripts, "
+                                           "styles, images and attributes other than href are "
+                                           "dropped and reported in `stripped`")] = "",
+    status: Annotated[str, Field(description="open | closed; a closed job leaves every board")] = "open",
+    source_url: Annotated[str, Field(description="The original posting, linked from the page")] = "",
+) -> dict:
+    """Tool: create or replace a job of the catalogue (requires people:write). Returns the stored
+    row and `stripped` (tags dropped from the HTML)."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        return await boards.upsert_job(slug, company=company, title=title, location=location,
+                                       type=type, comp=comp, summary=summary, html=html,
+                                       status=status, source_url=source_url,
+                                       user_id=principal.user_id)
+    except boards.BoardError as e:
+        raise _board_error(e) from e
+
+
+@mcp.tool()
+async def delete_board_job(ctx: Context, slug: str) -> dict:
+    """Tool: delete a job from the catalogue and from every board (requires people:write)."""
+    await _principal(ctx, "people:write")
+    if not await boards.delete_job(slug):
+        raise ToolError("job not found")
+    return {"deleted": slug}
+
+
+@mcp.tool()
+async def list_board_talent(ctx: Context,
+                            status: Annotated[str | None, Field(description="active | hidden")] = None,
+                            q: str | None = None, person_id: str | None = None) -> list[dict]:
+    """Tool: the glojobs.app talent catalogue (people shown on talent boards: slug, name,
+    headline, location, summary, HTML profile, the linked person_id)."""
+    await _principal(ctx, "people:read")
+    return await boards.list_talent(status, q, person_id)
+
+
+@mcp.tool()
+async def get_board_talent(ctx: Context, slug: str) -> dict:
+    """Tool: one talent entry with the boards that list it."""
+    await _principal(ctx, "people:read")
+    row = await boards.get_talent(slug)
+    if not row:
+        raise ToolError("talent not found")
+    return {**row, "boards": await boards.boards_listing("talent_slugs", slug)}
+
+
+@mcp.tool()
+async def upsert_board_talent(
+    ctx: Context,
+    slug: Annotated[str | None, Field(description="URL key; default the name slugified. Pass the "
+                                                  "existing slug to replace an entry")] = None,
+    person_id: Annotated[str | None, Field(description="The glo-people record; every field left "
+                                                       "out is drafted from it (name, role at "
+                                                       "company, location, one-liner, bio and "
+                                                       "about as the profile)")] = None,
+    name: str | None = None,
+    headline: Annotated[str | None, Field(description="Role at company")] = None,
+    location: str | None = None,
+    summary: Annotated[str | None, Field(description="One or two sentences for the card")] = None,
+    html: Annotated[str | None, Field(description="The profile as HTML: h2, p, ul/li, strong, a")] = None,
+    status: Annotated[str | None, Field(description="active | hidden")] = None,
+) -> dict:
+    """Tool: create or replace a talent entry (requires people:write). Returns the stored row
+    and `stripped`."""
+    principal = await _principal(ctx, "people:write")
+    try:
+        return await boards.upsert_talent(slug, name=name, person_id=person_id, headline=headline,
+                                          location=location, summary=summary, html=html,
+                                          status=status, user_id=principal.user_id)
+    except boards.BoardError as e:
+        raise _board_error(e) from e
+
+
+@mcp.tool()
+async def delete_board_talent(ctx: Context, slug: str) -> dict:
+    """Tool: delete a talent entry from the catalogue and from every board (requires
+    people:write)."""
+    await _principal(ctx, "people:write")
+    if not await boards.delete_talent(slug):
+        raise ToolError("talent not found")
+    return {"deleted": slug}
+
+
+@mcp.tool()
+async def list_boards(ctx: Context, person_id: str | None = None) -> list[dict]:
+    """Tool: every glojobs.app board (or one person's): id, person, kind, title, url, item
+    counts, views and when it was last opened."""
+    await _principal(ctx, "people:read")
+    return await boards.list_boards(person_id)
+
+
+@mcp.tool()
+async def get_board(ctx: Context, id: str) -> dict:
+    """Tool: one board with its items resolved (open jobs grouped by company, active talent),
+    its url, views and last_viewed_at."""
+    await _principal(ctx, "people:read")
+    try:
+        row = await boards.get_board(id)
+    except boards.NotFound:
+        row = None
+    if not row:
+        raise ToolError("board not found")
+    return await boards.resolve(row)
+
+
+@mcp.tool()
+async def create_board(
+    ctx: Context,
+    kind: Annotated[str, Field(description="jobs | talent | both")],
+    person_id: Annotated[str | None, Field(description="Whose page it is (find_people first)")] = None,
+    person: Annotated[dict[str, Any] | None,
+                      Field(description="Instead of person_id: a record {name, email, company, "
+                                        "role, …} matched to an existing person by identifier "
+                                        "or unique name, else created (as merge_person does)")] = None,
+    title: Annotated[str | None, Field(description="Page title; default 'Roles picked for "
+                                                   "<first name>'")] = None,
+    intro_html: Annotated[str, Field(description="A short note at the top as HTML (p, strong, a)")] = "",
+    job_slugs: Annotated[list[str] | None, Field(description="Jobs in display order")] = None,
+    talent_slugs: Annotated[list[str] | None, Field(description="Talent in display order")] = None,
+    tier: Annotated[fields.Tier, Field(description="Tier for a person `person` creates")] = "plus_two",
+) -> dict:
+    """Tool: a new board for a person (requires people:write). Returns the board with its public
+    url (hand that to the person) and `stripped` for the intro."""
+    principal = await _principal(ctx, "people:write")
+    if not person_id and not person:
+        raise ToolError("pass person_id or person")
+    if person and not person_id:
+        try:
+            res = await merge.merge_one(person, MergeOptions(tier=tier, agent=False, review=False),
+                                        principal, Source.for_mcp(principal))
+        except (ValueError, TypeError) as e:
+            raise ToolError(str(e)) from e
+        person_id = res.get("person_id")
+        if not person_id:
+            raise ToolError(f"could not match or create the person: {res.get('text') or res}")
+    try:
+        return await boards.create_board(person_id=person_id, kind=kind, title=title,
+                                         intro_html=intro_html, job_slugs=job_slugs,
+                                         talent_slugs=talent_slugs, user_id=principal.user_id)
+    except boards.BoardError as e:
+        raise _board_error(e) from e
+
+
+@mcp.tool()
+async def update_board(
+    ctx: Context,
+    id: str,
+    kind: Annotated[str | None, Field(description="jobs | talent | both")] = None,
+    title: Annotated[str | None, Field(description="'' clears it back to the default")] = None,
+    intro_html: str | None = None,
+    job_slugs: Annotated[list[str] | None, Field(description="Replaces the job list")] = None,
+    talent_slugs: Annotated[list[str] | None, Field(description="Replaces the talent list")] = None,
+    add_jobs: list[str] | None = None,
+    remove_jobs: list[str] | None = None,
+    add_talent: list[str] | None = None,
+    remove_talent: list[str] | None = None,
+    enabled: Annotated[bool | None, Field(description="false turns the link off (404) without "
+                                                      "deleting the board")] = None,
+    person_id: Annotated[str | None, Field(description="Move the board to another person")] = None,
+) -> dict:
+    """Tool: change a board (requires people:write): its lists (replace, or add / remove in
+    place), kind, title, intro, person or enabled flag. Returns the board."""
+    await _principal(ctx, "people:write")
+    try:
+        row = await boards.update_board(id, kind=kind, title=title, intro_html=intro_html,
+                                        job_slugs=job_slugs, talent_slugs=talent_slugs,
+                                        add_jobs=add_jobs, remove_jobs=remove_jobs,
+                                        add_talent=add_talent, remove_talent=remove_talent,
+                                        enabled=enabled, person_id=person_id)
+    except boards.BoardError as e:
+        raise _board_error(e) from e
+    if not row:
+        raise ToolError("board not found")
+    return row
+
+
+@mcp.tool()
+async def delete_board(ctx: Context, id: str) -> dict:
+    """Tool: delete a board; its link stops working (requires people:write)."""
+    await _principal(ctx, "people:write")
+    try:
+        ok = await boards.delete_board(id)
+    except boards.NotFound:
+        ok = False
+    if not ok:
+        raise ToolError("board not found")
     return {"deleted": id}
 
 

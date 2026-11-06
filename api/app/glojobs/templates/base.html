@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · {{ site.name }}</title>
+<meta name="description" content="{{ description }}">
+<meta name="robots" content="noindex">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{{ site.name }}">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ description }}">
+<meta name="twitter:card" content="summary">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="{{ base }}/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="{{ base }}/static/fonts/bricolage-grotesque-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{ base }}/static/styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top wrap">
+  <a class="mark" href="{{ home }}"><span class="mark-glo">GLO</span><span class="mark-sub">Hiring</span></a>
+</header>
+{% block body %}{% endblock %}
+<footer class="foot wrap"><div class="foot-in">
+  <p>{% block foot_line %}Open roles at startups hiring through GLO.{% endblock %}</p>
+  <p>Questions: <a href="mailto:{{ site.contact_email }}">{{ site.contact_email }}</a>{% if site.community_url %} <span class="sep" aria-hidden="true"></span> <a href="{{ site.community_url }}" rel="noopener">About GLO</a>{% endif %}</p>
+  {% if updated %}<p class="foot-date">Updated {{ updated }}</p>{% endif %}
+</div></footer>
+{% block script %}{% endblock %}
+</body>
+</html>

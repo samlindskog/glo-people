@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     # Refused at startup when COOKIE_SECURE is on (prod).
     dev_auto_login: bool = False
 
+    # glojobs.app: where the public boards are reachable. The API serves them under /glojobs/;
+    # prod's nginx maps the host root onto that prefix, dev reaches them through the prefix.
+    glojobs_public_url: str = "http://localhost:8080/glojobs"
+    glojobs_contact_email: str = "team@glocommunity.com"
+    glojobs_community_url: str = "https://www.joinglocommunity.com"
+
     session_days: int = 14
     cookie_secure: bool = False
     login_max_failures: int = 10

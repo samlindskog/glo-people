@@ -14,6 +14,9 @@ x-api-env: &api-env
   LOGFIRE_ENVIRONMENT: ${LOGFIRE_ENVIRONMENT:-dev}
   LOGFIRE_INCLUDE_CONTENT: ${LOGFIRE_INCLUDE_CONTENT:-true}
   LOGFIRE_PROJECT_URL: ${LOGFIRE_PROJECT_URL:-}
+  # glojobs.app: the public boards. The API serves them under /glojobs/; in dev nginx proxies that
+  # prefix, in prod the glojobs.app host maps onto it (compose.prod.yaml sets the real url).
+  GLOJOBS_PUBLIC_URL: ${GLOJOBS_PUBLIC_URL:-http://localhost:8080/glojobs}
 
 services:
   postgres:

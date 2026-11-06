@@ -15,7 +15,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.config import get_settings
@@ -184,6 +184,76 @@ workflow_run_events = Table(
     Column("message", Text, nullable=False),
     Column("data", JSONB, nullable=False, server_default="{}"),
     Index("ix_workflow_run_events_run", "run_id", "id"),
+)
+
+# --- glojobs.app boards: the shared catalogue of jobs and talent, and the per-person pages ------
+
+board_companies = Table(
+    "board_companies",
+    metadata,
+    Column("slug", String(80), primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("web", Text, nullable=False, server_default=""),       # host, e.g. usefastlane.ai
+    Column("line", Text, nullable=False, server_default=""),      # one-liner under the name
+    Column("about_html", Text, nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+board_jobs = Table(
+    "board_jobs",
+    metadata,
+    Column("slug", String(120), primary_key=True),
+    Column("company_slug", String(80), ForeignKey("board_companies.slug", ondelete="RESTRICT"),
+           nullable=False),
+    Column("title", Text, nullable=False),
+    Column("location", Text, nullable=False, server_default=""),
+    Column("type", Text, nullable=False, server_default=""),
+    Column("comp", Text, nullable=False, server_default=""),
+    Column("summary", Text, nullable=False, server_default=""),
+    Column("html", Text, nullable=False, server_default=""),
+    Column("status", String(16), nullable=False, server_default="open"),   # open | closed
+    Column("source_url", Text, nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Index("ix_board_jobs_company", "company_slug"),
+)
+
+board_talent = Table(
+    "board_talent",
+    metadata,
+    Column("slug", String(120), primary_key=True),
+    Column("person_id", String(24)),                                  # a glo-people record
+    Column("name", Text, nullable=False),
+    Column("headline", Text, nullable=False, server_default=""),     # role at company
+    Column("location", Text, nullable=False, server_default=""),
+    Column("summary", Text, nullable=False, server_default=""),
+    Column("html", Text, nullable=False, server_default=""),
+    Column("status", String(16), nullable=False, server_default="active"),  # active | hidden
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Index("ix_board_talent_person", "person_id"),
+)
+
+boards = Table(
+    "boards",
+    metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),              # the public path
+    Column("person_id", String(24), nullable=False),                  # whose page it is
+    Column("kind", String(8), nullable=False),                        # jobs | talent | both
+    Column("title", Text),
+    Column("intro_html", Text, nullable=False, server_default=""),
+    Column("job_slugs", ARRAY(Text), nullable=False, server_default="{}"),
+    Column("talent_slugs", ARRAY(Text), nullable=False, server_default="{}"),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("views", Integer, nullable=False, server_default="0"),
+    Column("last_viewed_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("created_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
+    Index("ix_boards_person", "person_id"),
 )
 
 _engine: AsyncEngine | None = None

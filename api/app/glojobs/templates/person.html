@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block body %}
+<main id="main" class="wrap job">
+  <nav class="crumbs" aria-label="Breadcrumb"><a href="{{ home }}">{{ board.title }}</a><span aria-hidden="true">/</span><a href="{{ home }}#people-h">People</a></nav>
+  <header class="job-head">
+    {% if person.headline %}<p class="job-co">{{ person.headline }}</p>{% endif %}
+    <h1 class="job-title">{{ person.name }}</h1>
+    <dl class="facts">
+      <div><dt>Location</dt><dd>{{ person.location or "To be confirmed" }}</dd></div>
+      {% if person.summary %}<div><dt>In short</dt><dd>{{ person.summary }}</dd></div>{% endif %}
+    </dl>
+  </header>
+  <div class="job-grid{% if not more %} job-grid-solo{% endif %}">
+    <article class="prose">
+      {% if person.html %}{{ person.html | safe }}{% else %}<p>{{ person.summary }}</p>{% endif %}
+    </article>
+    {% if more %}
+    <aside class="side">
+      <section class="more" aria-labelledby="more-h">
+        <h2 id="more-h">More people</h2>
+        <ul>
+          {% for m in more %}
+          <li><a href="{{ base }}/{{ board.id }}/people/{{ m.slug }}"><span>{{ m.name }}</span><span class="more-where">{{ m.headline }}</span></a></li>
+          {% endfor %}
+        </ul>
+      </section>
+    </aside>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}
+{% block foot_line %}People from the GLO community.{% endblock %}

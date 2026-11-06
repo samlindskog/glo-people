@@ -8,12 +8,14 @@ from app import assistants, auth, db, mongo, observability, properties, wiring
 from app import people as people_svc
 from app.assistants import runner
 from app.config import get_settings
+from app.glojobs import router as glojobs_router
 from app.mcp_server import build_app as build_mcp_app
 from app.mcp_server import mcp
 from app.permissions import load_contract
 from app.routers import accounts
 from app.routers import assistants as assistants_router
 from app.routers import auth as auth_router
+from app.routers import boards as boards_router
 from app.routers import credits as credits_router
 from app.routers import invocations as invocations_router
 from app.routers import people as people_router
@@ -83,6 +85,11 @@ api.include_router(properties_router.router)
 api.include_router(search_router.router)
 api.include_router(accounts.router)
 api.include_router(assistants_router.router)
+api.include_router(boards_router.router)
+# glojobs.app: the public boards (no auth; the UUID is the secret) and their stylesheet, fonts
+# and script. The mount goes first so /glojobs/static/... never reaches the board routes.
+api.mount("/glojobs/static", glojobs_router.static_files, name="glojobs-static")
+api.include_router(glojobs_router.router)
 observability.instrument_app(api)
 
 

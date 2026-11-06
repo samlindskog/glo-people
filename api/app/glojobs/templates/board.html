@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% set n_jobs = board.jobs | length %}
+{% set n_people = board.talent | length %}
+{% set show_jobs = board.kind != "talent" %}
+{% set show_people = board.kind != "jobs" %}
+{% block body %}
+<main id="main" class="wrap">
+  <section class="hero">
+    <h1 class="hero-title">{{ board.title }}</h1>
+    <p class="hero-sub">
+      {%- if show_jobs and show_people -%}
+        {{ n_jobs }} open role{{ "" if n_jobs == 1 else "s" }} at {{ board.companies | length }} compan{{ "y" if board.companies | length == 1 else "ies" }} and {{ n_people }} {{ "person" if n_people == 1 else "people" }}, picked for you by GLO.
+      {%- elif show_jobs -%}
+        {{ n_jobs }} open role{{ "" if n_jobs == 1 else "s" }} at {{ board.companies | length }} compan{{ "y" if board.companies | length == 1 else "ies" }} hiring through GLO.
+      {%- else -%}
+        {{ n_people }} {{ "person" if n_people == 1 else "people" }} from the GLO community.
+      {%- endif -%}
+    </p>
+    {% if board.intro_html %}<div class="intro prose">{{ board.intro_html | safe }}</div>{% endif %}
+    {% if show_jobs and n_jobs %}
+    <div class="picks" role="group" aria-label="Filter by company">
+      <button type="button" class="pick" data-filter="all" aria-pressed="true"><span class="pick-name">All</span><sup>{{ n_jobs }}</sup></button>
+      {% for c in board.companies %}
+      <button type="button" class="pick" data-filter="{{ c.slug }}" aria-pressed="false"><span class="pick-name">{{ c.name }}</span><sup>{{ c.jobs | length }}</sup></button>
+      {% endfor %}
+    </div>
+    <div class="find">
+      <label class="find-label" for="q">Search roles</label>
+      <input id="q" type="search" placeholder="Try “engineer”, “New York” or “equity”" autocomplete="off">
+      <p class="find-status" id="status" aria-live="polite" data-total="{{ n_jobs }}">Showing all {{ n_jobs }} roles</p>
+    </div>
+    {% endif %}
+  </section>
+
+  {% if show_jobs %}
+  <div class="roster">
+    {% if show_people and n_jobs %}<div class="part"><h2 class="part-title">Roles</h2></div>{% endif %}
+    {% for c in board.companies %}
+    <section class="co" id="{{ c.slug }}" data-company="{{ c.slug }}" aria-labelledby="h-{{ c.slug }}">
+      <div class="co-head">
+        <h2 class="co-name" id="h-{{ c.slug }}">{{ c.name }}</h2>
+        {% if c.line %}<p class="co-line">{{ c.line }}</p>{% endif %}
+        {% if c.web %}<a class="co-site" href="https://{{ c.web }}" rel="noopener">{{ c.web }}</a>{% endif %}
+      </div>
+      <ul class="roles">
+        {% for r in c.jobs %}
+        <li class="role" data-company="{{ c.slug }}" data-search="{{ r.search }}">
+          <a href="{{ base }}/{{ board.id }}/roles/{{ r.slug }}">
+            <span class="role-title">{{ r.title }}</span>
+            <span class="role-where">{{ r.short_location }}</span>
+            <span class="role-pay">{{ r.comp }}</span>
+          </a>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+    {% endfor %}
+    {% if n_jobs %}
+    <div class="empty" id="empty" hidden>
+      <p>No roles match <strong id="empty-q"></strong>. Try a different word or company.</p>
+      <button type="button" class="btn btn-quiet" id="clear">Show all {{ n_jobs }} roles</button>
+    </div>
+    {% else %}
+    <div class="empty"><p>No open roles on this page right now. Check back soon.</p></div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if show_people %}
+  <section class="part" aria-labelledby="people-h">
+    <h2 class="part-title" id="people-h">People</h2>
+    {% if n_people %}
+    <ul class="people">
+      {% for t in board.talent %}
+      <li class="person">
+        <a href="{{ base }}/{{ board.id }}/people/{{ t.slug }}">
+          <span class="person-name">{{ t.name }}</span>
+          {% if t.headline %}<span class="person-head">{{ t.headline }}</span>{% endif %}
+          {% if t.location %}<span class="person-where">{{ t.location }}</span>{% endif %}
+          {% if t.summary %}<p class="person-sum">{{ t.summary }}</p>{% endif %}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="part-sub">No one on this page right now.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+</main>
+{% endblock %}
+{% block script %}{% if show_jobs and n_jobs %}<script src="{{ base }}/static/board.js"></script>{% endif %}{% endblock %}

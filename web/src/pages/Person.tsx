@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router'
 import { api } from '../api'
 import { useAuth } from '../auth'
 import { InvocationPanel, useInvocation } from '../components/Invocation'
+import BoardsPanel from '../components/BoardsPanel'
 import { ErrorNote, PageHeader } from '../components/Layout'
 import PersonEditor from '../components/PersonEditor'
 import StoreBox from '../components/StoreBox'
@@ -149,6 +150,8 @@ export default function PersonPage() {
           />
         </div>
       )}
+
+      <BoardsPanel personId={id} />
 
       <p className="mt-4 text-xs text-slate-400">
         {p.source && `Imported from ${p.source.file} (row ${p.source.row}) · `}

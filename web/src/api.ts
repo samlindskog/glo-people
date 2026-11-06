@@ -8,6 +8,12 @@ import type {
   AssistantRunDetail,
   AssistantRunItem,
   AssistantSpec,
+  Board,
+  BoardCompany,
+  BoardDetail,
+  BoardJob,
+  BoardKind,
+  BoardTalent,
   Credits,
   FieldFilter,
   ImportPreview,
@@ -143,6 +149,72 @@ export const api = {
     request<ApiKey>('POST', `/api/users/${userId}/api-keys`, { name }),
   revokeUserKey: (userId: number, id: number) =>
     request<void>('DELETE', `/api/users/${userId}/api-keys/${id}`),
+
+  // glojobs.app boards: the catalogue of companies, jobs and talent, and the per-person pages
+  boardCompanies: () => request<BoardCompany[]>('GET', '/api/boards/companies'),
+  putBoardCompany: (slug: string, body: { name: string; web: string; line: string; about_html: string }) =>
+    request<BoardCompany>('PUT', `/api/boards/companies/${encodeURIComponent(slug)}`, body),
+  deleteBoardCompany: (slug: string) => request<void>('DELETE', `/api/boards/companies/${encodeURIComponent(slug)}`),
+  boardJobs: (params: { company?: string; status?: string; q?: string } = {}) =>
+    request<BoardJob[]>('GET', `/api/boards/jobs${qs(params)}`),
+  boardJob: (slug: string) => request<BoardJob>('GET', `/api/boards/jobs/${encodeURIComponent(slug)}`),
+  putBoardJob: (
+    slug: string,
+    body: {
+      company: string
+      title: string
+      location: string
+      type: string
+      comp: string
+      summary: string
+      html: string
+      status: 'open' | 'closed'
+      source_url: string
+    },
+  ) => request<BoardJob>('PUT', `/api/boards/jobs/${encodeURIComponent(slug)}`, body),
+  deleteBoardJob: (slug: string) => request<void>('DELETE', `/api/boards/jobs/${encodeURIComponent(slug)}`),
+  boardTalent: (params: { status?: string; q?: string; person_id?: string } = {}) =>
+    request<BoardTalent[]>('GET', `/api/boards/talent${qs(params)}`),
+  boardTalentOne: (slug: string) => request<BoardTalent>('GET', `/api/boards/talent/${encodeURIComponent(slug)}`),
+  boardTalentDraft: (personId: string) => request<BoardTalent>('GET', `/api/boards/talent/draft${qs({ person_id: personId })}`),
+  putBoardTalent: (
+    slug: string,
+    body: {
+      person_id: string | null
+      name: string
+      headline: string
+      location: string
+      summary: string
+      html: string
+      status: 'active' | 'hidden'
+    },
+  ) => request<BoardTalent>('PUT', `/api/boards/talent/${encodeURIComponent(slug)}`, body),
+  deleteBoardTalent: (slug: string) => request<void>('DELETE', `/api/boards/talent/${encodeURIComponent(slug)}`),
+  boardPreview: (html: string) => request<{ html: string; stripped: string[] }>('POST', '/api/boards/preview', { html }),
+  boards: (personId?: string) => request<Board[]>('GET', `/api/boards${qs({ person_id: personId })}`),
+  board: (id: string) => request<BoardDetail>('GET', `/api/boards/${id}`),
+  createBoard: (body: {
+    person_id: string
+    kind: BoardKind
+    title: string | null
+    intro_html: string
+    job_slugs: string[]
+    talent_slugs: string[]
+    enabled: boolean
+  }) => request<Board>('POST', '/api/boards', body),
+  updateBoard: (
+    id: string,
+    body: Partial<{
+      person_id: string
+      kind: BoardKind
+      title: string | null
+      intro_html: string
+      job_slugs: string[]
+      talent_slugs: string[]
+      enabled: boolean
+    }>,
+  ) => request<Board>('PATCH', `/api/boards/${id}`, body),
+  deleteBoard: (id: string) => request<void>('DELETE', `/api/boards/${id}`),
 
   // assistants: runs that persist, pause, resume and stop
   assistants: () => request<AssistantSpec[]>('GET', '/api/assistants'),

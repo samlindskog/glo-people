@@ -7,6 +7,10 @@ import Layout from './components/Layout'
 import './index.css'
 import AccountsPage from './pages/Accounts'
 import AssistantsPage from './pages/Assistants'
+import BoardEditorPage from './pages/BoardEditor'
+import BoardJobsPage from './pages/BoardJobs'
+import BoardTalentPage from './pages/BoardTalent'
+import BoardsPage from './pages/Boards'
 import HistoryPage from './pages/History'
 import LoginPage from './pages/Login'
 import PeoplePage from './pages/People'
@@ -39,6 +43,11 @@ createRoot(document.getElementById('root')!).render(
               <Route path="/properties" element={<RequireAuth permission="people:read"><PropertiesPage /></RequireAuth>} />
               <Route path="/assistants" element={<RequireAuth permission="people:read"><AssistantsPage /></RequireAuth>} />
               <Route path="/assistants/:runId" element={<RequireAuth permission="people:read"><AssistantsPage /></RequireAuth>} />
+              <Route path="/boards" element={<RequireAuth permission="people:read"><BoardsPage /></RequireAuth>} />
+              <Route path="/boards/new" element={<RequireAuth permission="people:write"><BoardEditorPage /></RequireAuth>} />
+              <Route path="/boards/jobs" element={<RequireAuth permission="people:read"><BoardJobsPage /></RequireAuth>} />
+              <Route path="/boards/talent" element={<RequireAuth permission="people:read"><BoardTalentPage /></RequireAuth>} />
+              <Route path="/boards/:id" element={<RequireAuth permission="people:read"><BoardEditorPage /></RequireAuth>} />
               <Route path="/history" element={<RequireAuth permission="searches:read_own"><HistoryPage /></RequireAuth>} />
               <Route path="/accounts" element={<RequireAuth permission="accounts:manage"><AccountsPage /></RequireAuth>} />
               <Route path="*" element={<p className="text-sm text-slate-500">Page not found.</p>} />
