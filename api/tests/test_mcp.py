@@ -9,6 +9,15 @@ HEADERS = {"Accept": "application/json, text/event-stream",
            "Content-Type": "application/json", "MCP-Protocol-Version": "2025-06-18"}
 
 
+def body(r):
+    """The JSON-RPC message of a response: plain JSON, or the data line of an SSE stream (the
+    2025-era wire streams every response in SSE mode; the 2026 wire streams only long calls)."""
+    if r.headers.get("content-type", "").startswith("text/event-stream"):
+        lines = [ln[5:].strip() for ln in r.text.splitlines() if ln.startswith("data:")]
+        return json.loads(lines[-1])
+    return r.json()
+
+
 async def rpc(client, key, method, params=None, id_=1):
     h = {**HEADERS, "Authorization": f"Bearer {key}"} if key else HEADERS
     r = await client.post("/mcp", headers=h,
@@ -29,7 +38,7 @@ async def call(client, key, tool, args):
     """Returns (is_error, payload) where payload is the tool's JSON result."""
     r = await rpc(client, key, "tools/call", {"name": tool, "arguments": args}, 2)
     assert r.status_code == 200, r.text
-    result = r.json()["result"]
+    result = body(r)["result"]
     if "structuredContent" in result:
         data = result["structuredContent"]
         data = data.get("result", data) if isinstance(data, dict) and len(data) == 1 else data
@@ -64,7 +73,7 @@ async def test_tool_visibility_by_role(client_factory, keys):
     for key, expect_write in ((w, True), (r, False)):
         await init(c, key)
         resp = await rpc(c, key, "tools/list", id_=2)
-        tools = {t["name"] for t in resp.json()["result"]["tools"]}
+        tools = {t["name"] for t in body(resp)["result"]["tools"]}
         assert {"search_people", "get_person", "list_properties"} <= tools
         assert ("create_person" in tools) is expect_write
         assert ("merge_person" in tools) is expect_write
@@ -120,3 +129,39 @@ async def test_update_records_source_and_history(client_factory, keys):
     assert len(res["history"]["bio"]) == 2
     _, got = await call(c, w, "get_person", {"id": res["id"]})
     assert [e["v"] for e in got["history"]["bio"]] == ["one", "two"]
+
+
+async def test_transport_streams_long_calls(client_factory, keys):
+    """A long tool call answers as an SSE stream with keepalive pings (Cloudflare drops a proxied
+    response after 100 s without bytes), so a client must accept text/event-stream. On the 2026
+    wire Claude speaks, a quick call still answers plain JSON; the 2025 wire streams every
+    response."""
+    w, _ = keys
+    c = await client_factory()
+    await init(c, w)
+    r = await c.post("/mcp", headers={**HEADERS, "Accept": "application/json",
+                                      "Authorization": f"Bearer {w}"},
+                     json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+    assert r.status_code == 406
+    r = await rpc(c, w, "tools/list", id_=3)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    assert "list_properties" in {t["name"] for t in body(r)["result"]["tools"]}
+    r = await c.post("/mcp", headers={**HEADERS, "MCP-Protocol-Version": "2026-07-28",
+                                      "MCP-Method": "tools/list", "Authorization": f"Bearer {w}"},
+                     json={"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {
+                         "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                   "io.modelcontextprotocol/clientCapabilities": {}}}})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/json")
+    assert "list_properties" in {t["name"] for t in r.json()["result"]["tools"]}
+
+
+async def test_no_call_blocks_past_the_wait_cap(client_factory, keys):
+    """Claude Code gives a tool call 60 s by default: start_assistant refuses a longer wait."""
+    w, _ = keys
+    c = await client_factory()
+    await init(c, w)
+    err, data = await call(c, w, "start_assistant", {
+        "key": "normalize", "where": [{"field": "name", "op": "exists", "value": True}],
+        "options": {"enrich": False}, "wait_seconds": 120})
+    assert err and "50" in str(data)

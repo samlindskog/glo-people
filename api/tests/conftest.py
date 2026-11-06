@@ -135,3 +135,11 @@ async def writer(client_factory):
 @pytest.fixture
 async def reader(client_factory):
     return await client_factory("rita", "reader")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_coverage():
+    """list_properties serves coverage counts up to a minute old; a test starts with none cached."""
+    from app import people
+    people._coverage_cache = None
+    yield

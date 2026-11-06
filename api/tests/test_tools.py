@@ -17,7 +17,7 @@ from app.tools import invoke
 from app.tools import plan as plan_tool
 from app.tools import repair as repair_tool
 from tests.conftest import import_people
-from tests.test_mcp import call, init
+from tests.test_mcp import body, call, init
 
 CSV = """ID,Name,Bio,MRR,Stage,Notes
 1,Ada,payments infrastructure for merchants,"$12,000",seed,met at demo day
@@ -518,10 +518,10 @@ async def test_mcp_tools(people_by_name, writer, reader, client_factory):
     rk = (await reader.post("/api/api-keys", json={"name": "r"})).json()["key"]
     c = await client_factory()
     await init(c, rk)
-    tools = {t["name"] for t in (await c.post("/mcp", headers={
+    tools = {t["name"] for t in body(await c.post("/mcp", headers={
         "Accept": "application/json, text/event-stream", "Content-Type": "application/json",
         "MCP-Protocol-Version": "2025-06-18", "Authorization": f"Bearer {rk}"},
-        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})).json()["result"]["tools"]}
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))["result"]["tools"]}
     assert {"search_people", "plan_search", "ask_people", "list_properties"} <= tools
     assert not {"store_about_person", "normalize_person", "apply_store_proposal"} & tools  # reader
 

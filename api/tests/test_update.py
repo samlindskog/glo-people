@@ -115,7 +115,7 @@ async def test_mcp_follow_up_after_an_upload(writer, client_factory):
     err, run = await call(c, key, "start_assistant", {
         "key": "merge", "records": [{"name": "Dee Evans", "email": "dee@y.io", "stage": "seed"},
                                     {"name": "Ed Fox", "email": "ed@y.io"}],
-        "options": {"review": False}, "wait_seconds": 60})
+        "options": {"review": False}, "wait_seconds": 50})
     assert not err, run
     assert run["status"] == "done" and len(run["items"]) == 2
     first = run["items"][0]
@@ -130,7 +130,7 @@ async def test_mcp_follow_up_after_an_upload(writer, client_factory):
 
     err, upd = await call(c, key, "start_assistant", {
         "key": "update", "from_run": run["id"], "options": {"tier": "plus_one", "review": False},
-        "wait_seconds": 60})
+        "wait_seconds": 50})
     assert not err, upd
     assert upd["status"] == "done" and {it["person_id"] for it in upd["items"]} == \
         {it["person_id"] for it in run["items"]}

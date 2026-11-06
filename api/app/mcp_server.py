@@ -94,7 +94,9 @@ Playbook
   record kind, broken names; free), "enrich" (data providers and sites; costs credits — always pass
   options.max_credits), "update" (the same values or tier on all of them, e.g. options={"tier":
   "plus_two"}; dry_run first). where=[filters] selects by properties instead; person_ids by id.
-  wait_seconds lets a small run finish inside the call; otherwise follow it with get_run.
+  wait_seconds (at most 50) lets a small run finish inside the call; otherwise follow it with
+  get_run. No call blocks longer than 50 s: merge_person and start_assistant hand back the run
+  (status running, run_id) and get_run finishes the story.
 - Fixing a value: update_person appends the right value (null removes); to restore an earlier value,
   write it again — the history keeps every version with its source. Which entry is shown follows
   the trust of its source: a person's own edit (ui, api, mcp — yours) outranks an assistant's
@@ -164,6 +166,11 @@ class GloMCP(MCPServer):
 
 mcp = GloMCP(name="glo-people", instructions=INSTRUCTIONS)
 
+# The longest a tool call blocks on a run. Claude Code allows a tool call 60 s unless the user
+# raises MCP_TOOL_TIMEOUT; claude.ai allows 240 s. A run still going after this comes back as
+# `running` with its run_id, and the agent follows it with get_run.
+MAX_WAIT_S = 50
+
 
 async def _principal_from_request(request: Any) -> Principal | None:
     state = getattr(request, "state", None)
@@ -191,7 +198,8 @@ async def list_properties(ctx: Context) -> list[dict]:
     """List every property on people records: key, label, type, canonical values (enum types),
     coverage count, and whether it is embeddable (usable in search_people semantic.fields)."""
     await _principal(ctx, "people:read")
-    props = await properties.catalog(await people_svc.coverage())
+    # The coverage scan reads every document (5-7 s on prod); the counts may be a minute old.
+    props = await properties.catalog(await people_svc.coverage(max_age_s=store_tool.COVERAGE_MAX_AGE_S))
     return [p.model_dump(mode="json") for p in props]
 
 
@@ -321,11 +329,12 @@ async def merge_person(
     items appended, typed values normalised); long prose and unknown keys go to the storage
     agent. Several plausible people: nothing is written and the candidates are returned
     (status 'skipped'). Returns the match, what was written and filed, the review and every
-    change; a dry run returns the match and the plan."""
+    change; a dry run returns the match and the plan. A merge still going after 50 s comes back
+    with status 'running' and its run_id: get_run shows the rest."""
     principal = await _principal(ctx, "people:write")
     try:
         return await merge.merge_one(record, options or MergeOptions(), principal,
-                                     Source.for_mcp(principal))
+                                     Source.for_mcp(principal), timeout=MAX_WAIT_S)
     except (ValueError, TypeError) as e:
         raise ToolError(str(e)) from e
 
@@ -561,7 +570,7 @@ async def start_assistant(
     tier: fields.Tier | None = None,
     options: Annotated[dict[str, Any] | None, Field(description="Per the options schema")] = None,
     label: Annotated[str | None, Field(description="A name for the run")] = None,
-    wait_seconds: Annotated[int, Field(ge=0, le=120,
+    wait_seconds: Annotated[int, Field(ge=0, le=MAX_WAIT_S,
                                        description="Block up to this long for the run to finish "
                                                    "and return it done, with its items")] = 0,
 ) -> dict:
@@ -972,7 +981,7 @@ async def create_board(
     if person and not person_id:
         try:
             res = await merge.merge_one(person, MergeOptions(tier=tier, agent=False, review=False),
-                                        principal, Source.for_mcp(principal))
+                                        principal, Source.for_mcp(principal), timeout=MAX_WAIT_S)
         except (ValueError, TypeError) as e:
             raise ToolError(str(e)) from e
         person_id = res.get("person_id")
@@ -1067,7 +1076,11 @@ def build_app() -> ASGIApp:
     starlette_app = mcp.streamable_http_app(
         streamable_http_path="/",
         stateless_http=True,
-        json_response=True,
+        # A call that finishes within the SDK's 15 s window still gets a plain JSON reply; a
+        # longer one commits to an SSE stream with a keepalive ping every 15 s. Cloudflare cuts a
+        # proxied response after 100 s without bytes and nginx after 300 s, which is what a
+        # 120 s merge_person looked like from Claude: "the MCP timed out".
+        json_response=False,
         # Auth is a bearer key, not ambient cookies, so DNS-rebinding protection adds nothing and
         # would reject the public hostname.
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),

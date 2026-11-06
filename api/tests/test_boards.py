@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app import boards, db, safe_html
 from tests.conftest import import_people
-from tests.test_mcp import call, init, rpc
+from tests.test_mcp import body, call, init, rpc
 
 JD = """<h2>What you'll do</h2>
 <ul><li>Ship the product</li><li>Talk to <strong>customers</strong></li></ul>
@@ -275,7 +275,7 @@ async def test_mcp_board_tools(client_factory, mcp_keys, ada):
     w, r = mcp_keys
     c = await client_factory()
     await init(c, r)
-    tools = {t["name"] for t in (await rpc(c, r, "tools/list", id_=2)).json()["result"]["tools"]}
+    tools = {t["name"] for t in body(await rpc(c, r, "tools/list", id_=2))["result"]["tools"]}
     assert {"list_board_jobs", "get_board", "list_boards"} <= tools
     assert not {"upsert_board_job", "create_board", "delete_board"} & tools
 

@@ -134,19 +134,19 @@ async def test_dev_auto_login(client_factory, reader, monkeypatch):
 async def test_a_key_follows_its_users_current_role(writer, client_factory):
     """Permissions are derived from the user's role at every request, so promoting or demoting a
     user changes what their existing keys may do at once (and deactivating them kills the keys)."""
-    from tests.test_mcp import call, init, rpc
+    from tests.test_mcp import body, call, init, rpc
     rex_client = await client_factory("rex", "reader")
     rex = next(u for u in (await writer.get("/api/users")).json() if u["username"] == "rex")
     key = (await rex_client.post("/api/api-keys", json={"name": "rex-key"})).json()["key"]
     c = await client_factory()
     await init(c, key)
-    tools = {t["name"] for t in (await rpc(c, key, "tools/list")).json()["result"]["tools"]}
+    tools = {t["name"] for t in body(await rpc(c, key, "tools/list"))["result"]["tools"]}
     assert "create_person" not in tools
     err, _ = await call(c, key, "create_person", {"tier": "member", "fields": {"name": "Zed"}})
     assert err                                                             # a reader's key
 
     assert (await writer.patch(f"/api/users/{rex['id']}", json={"role": "writer"})).status_code == 200
-    tools = {t["name"] for t in (await rpc(c, key, "tools/list")).json()["result"]["tools"]}
+    tools = {t["name"] for t in body(await rpc(c, key, "tools/list"))["result"]["tools"]}
     assert "create_person" in tools                                        # the same key, now a writer's
     err, person = await call(c, key, "create_person", {"tier": "member", "fields": {"name": "Zed"}})
     assert not err and person["name"] == "Zed"
