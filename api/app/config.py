@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # prod's nginx maps the host root onto that prefix, dev reaches them through the prefix.
     glojobs_public_url: str = "http://localhost:8080/glojobs"
     glojobs_contact_email: str = "team@glocommunity.com"
-    glojobs_community_url: str = "https://www.joinglocommunity.com"
+    glojobs_community_url: str = "https://glocommunity.com/"
 
     session_days: int = 14
     cookie_secure: bool = False
