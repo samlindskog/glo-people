@@ -13,13 +13,13 @@ LEVELS: dict[str, int] = {
                      "config", "db", "mongo", "auth", "permissions", "activity", "agent_log", "observability",
                      "integrations", "hub", "safe_html"], 0),
     # 1 — stores
-    **dict.fromkeys(["properties", "people", "embeddings", "importer", "boards"], 1),
+    **dict.fromkeys(["properties", "people", "embeddings", "importer", "boards", "ops"], 1),
     # 2 — tools and the agent plumbing they share
     **dict.fromkeys(["tools", "agents"], 2),
     # 3 — assistants (per-person assistants, their runner, ask)
     "assistants": 3,
     # 4 — surfaces
-    **dict.fromkeys(["routers", "mcp_server", "cli", "main", "wiring", "glojobs"], 4),
+    **dict.fromkeys(["routers", "mcp_server", "ops_mcp", "cli", "main", "wiring", "glojobs"], 4),
 }
 
 # Imports allowed between different packages of the same level (importer → imported). Inside one

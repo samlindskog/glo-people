@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-boards-link prod-migrate prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-boards-link prod-migrate ops-health ops-tunnel-key prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -99,6 +99,16 @@ prod-embed:
 
 prod-boards-link:   ## refresh the people the boards refer to; link talent entries by name (--create: make the rest)
 	ssh -t $(PROD_SSH) sudo docker exec -it glo-people-api-1 python -m app.cli boards-link $(ARGS)
+
+# The ops tunnel (deploy/ops-tunnel.sh): the laptop's key pair for it, and the health of prod
+# over it. The MCP itself is registered in Claude Code: claude mcp add --transport http glo-ops http://10.89.0.1:8800/ops/mcp
+ops-tunnel-key:     ## make the laptop's WireGuard key pair for the ops tunnel (prints the public key)
+	@umask 077; test -f "$$HOME/.config/glo-people/ops-tunnel.key" || { mkdir -p "$$HOME/.config/glo-people"; wg genkey > "$$HOME/.config/glo-people/ops-tunnel.key"; }
+	@echo "laptop public key: $$(wg pubkey < "$$HOME/.config/glo-people/ops-tunnel.key")"
+	@echo "laptop private key is in ~/.config/glo-people/ops-tunnel.key (paste into WireGuard.app)"
+
+ops-health:         ## prod's build, uptime, schema and databases, over the ops tunnel
+	curl -s -m 5 http://10.89.0.1:8800/ops/health | python3 -m json.tool
 
 # The dev stack holds the primary copy of the people data (the live imports land there first).
 # prod-push-data replaces prod's `people` and `fields` collections with dev's — after taking a

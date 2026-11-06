@@ -5,7 +5,6 @@ import logging
 import time
 from typing import Annotated, Any, Literal
 
-import logfire
 from fastapi import HTTPException
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -14,7 +13,7 @@ from pydantic import Field
 from pydantic_ai.exceptions import AgentRunError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app import agent_log, auth, boards, fields, importer, properties
+from app import agent_log, auth, boards, fields, importer, ops, properties
 from app import people as people_svc
 from app.assistants import REGISTRY, credits, merge, runner
 from app.assistants.ask import ask
@@ -120,6 +119,7 @@ class GloMCP(MCPServer):
     the agent saw, how long it took."""
 
     async def _handle_list_tools(self, ctx, params):
+        ops.note(method="tools/list")
         result = await super()._handle_list_tools(ctx, params)
         principal = await _principal_from_request(ctx.request)
         if principal is None or not principal.can("people:write"):
@@ -132,25 +132,24 @@ class GloMCP(MCPServer):
         session = headers.get("x-agent-session") or headers.get("mcp-session-id")
         principal = await _principal_from_request(request)
         t0 = time.monotonic()
-        with logfire.span("mcp {tool}", tool=params.name, api_key_id=getattr(principal, "api_key_id", None),
-                          session=session) as span:
-            result = await super()._handle_call_tool(ctx, params)
-            is_error = bool(getattr(result, "is_error", False))
-            error = None
-            payload: Any = None
-            if is_error:
+        ops.note(tool=params.name, api_key_id=getattr(principal, "api_key_id", None), session=session)
+        result = await super()._handle_call_tool(ctx, params)
+        is_error = bool(getattr(result, "is_error", False))
+        error = None
+        payload: Any = None
+        if is_error:
+            content = getattr(result, "content", None) or []
+            error = getattr(content[0], "text", None) if content else "error"
+        else:
+            payload = getattr(result, "structured_content", None)
+            if payload is None:                       # a tool answering plain JSON text
                 content = getattr(result, "content", None) or []
-                error = getattr(content[0], "text", None) if content else "error"
-            else:
-                payload = getattr(result, "structured_content", None)
-                if payload is None:                       # a tool answering plain JSON text
-                    content = getattr(result, "content", None) or []
-                    text = getattr(content[0], "text", None) if content else None
-                    try:
-                        payload = json.loads(text) if text else None
-                    except ValueError:
-                        payload = None
-            span.set_attribute("ok", not is_error)
+                text = getattr(content[0], "text", None) if content else None
+                try:
+                    payload = json.loads(text) if text else None
+                except ValueError:
+                    payload = None
+        ops.note(ok=not is_error)
         await agent_log.record(agent_log.Call(
             tool=params.name, principal=principal, session=session, args=params.arguments or {},
             ok=not is_error, error=error, duration_ms=int((time.monotonic() - t0) * 1000),

@@ -9,7 +9,8 @@ services:
       LOGFIRE_INCLUDE_CONTENT: "false"
       ASSISTANT_CONCURRENCY: ${ASSISTANT_CONCURRENCY:-6}   # items in flight across all runs
       GLOJOBS_PUBLIC_URL: https://glojobs.app
-    ports: ["127.0.0.1:8000:8000"]
+    # 8000: nginx (host network) proxies to it; udp/5140: nginx's access log over syslog (app.ops)
+    ports: ["127.0.0.1:8000:8000", "127.0.0.1:5140:5140/udp"]
     restart: unless-stopped
 
   nginx:

@@ -68,7 +68,7 @@ jobs:
         run: |
           TAG=${GITHUB_SHA::12}
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          docker build -f api/Dockerfile --target prod -t glo-people-api:$TAG .
+          docker build -f api/Dockerfile --target prod --build-arg GIT_SHA=$TAG -t glo-people-api:$TAG .
           docker build -f web/Dockerfile -t glo-people-web:$TAG .
       - name: Check the nginx config
         # The image's config includes files that exist only on the server (certs, the Cloudflare

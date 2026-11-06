@@ -12,6 +12,8 @@ COPY shared /shared
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 FROM base AS prod
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 RUN uv sync --frozen --no-dev
 COPY shared /shared
 COPY api/app ./app

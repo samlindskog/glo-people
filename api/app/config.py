@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     glojobs_contact_email: str = "team@glocommunity.com"
     glojobs_community_url: str = "https://glocommunity.com/"
 
+    # Owned operational telemetry (app.ops): the request and app logs in Postgres, read over the
+    # ops MCP on the tunnel. GIT_SHA is baked into the image by CI; nginx ships its access log to
+    # the API over syslog/UDP on ops_syslog_port (0 switches the listener off).
+    git_sha: str = "dev"
+    ops_retention_days: int = 30
+    ops_syslog_port: int = 5140
+
     session_days: int = 14
     cookie_secure: bool = False
     login_max_failures: int = 10

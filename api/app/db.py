@@ -187,6 +187,42 @@ workflow_run_events = Table(
     Index("ix_workflow_run_events_run", "run_id", "id"),
 )
 
+# --- owned operational telemetry (app.ops): every request and every warning, kept for a while ----
+
+request_log = Table(
+    "request_log",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("source", String(8), nullable=False),                      # api | nginx
+    Column("host", Text, nullable=False, server_default=""),
+    Column("method", String(8), nullable=False),
+    Column("path", Text, nullable=False),
+    Column("route", Text, nullable=False, server_default=""),         # the template, for grouping
+    Column("status", Integer, nullable=False),
+    Column("duration_ms", Integer, nullable=False),
+    Column("client_ip", String(64), nullable=False, server_default=""),
+    Column("user_agent", Text, nullable=False, server_default=""),
+    Column("request_id", String(32)),                                 # X-Request-Id; nginx: cf-ray
+    Column("attrs", JSONB, nullable=False, server_default="{}"),
+    Index("ix_request_log_ts", "ts"),
+    Index("ix_request_log_request", "request_id"),
+)
+
+app_log = Table(
+    "app_log",
+    metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("ts", DateTime(timezone=True), nullable=False),
+    Column("level", String(8), nullable=False),
+    Column("logger", Text, nullable=False),
+    Column("message", Text, nullable=False),
+    Column("traceback", Text),
+    Column("request_id", String(32)),
+    Index("ix_app_log_ts", "ts"),
+    Index("ix_app_log_request", "request_id"),
+)
+
 # --- glojobs.app boards: the shared catalogue of jobs and talent, and the per-person pages ------
 
 # The people the boards refer to, mirrored from their Mongo documents so the board tables can hold
