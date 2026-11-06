@@ -9,6 +9,7 @@ it through the prefix. `settings.glojobs_public_url` carries the base path the l
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import logfire
@@ -75,17 +76,28 @@ def lost() -> HTMLResponse:
                   home=base_path() or "/", updated="")
 
 
-async def _board(board_id: str) -> dict | None:
+async def _board(board_id: str, span: Any) -> dict | None:
+    """The resolved board, or None with the reason on the span: every public page is a Logfire
+    span (`outcome`, and for a page served: whose board, its kind and what it held), so a 404 in a
+    trace says whether the link was malformed, unknown, switched off, or pointed at a slug the
+    board does not list."""
     try:
         board = await boards.get_board(board_id)
     except boards.NotFound:
+        span.set_attribute("outcome", "not_a_uuid")
         return None
-    if not board or not board["enabled"]:
+    if not board:
+        span.set_attribute("outcome", "unknown")
+        return None
+    if not board["enabled"]:
+        span.set_attribute("outcome", "disabled")
         return None
     resolved = await boards.resolve(board)
     resolved["jobs"] = [_prepare(j) for j in resolved["jobs"]]
     for c in resolved["companies"]:
         c["jobs"] = [_prepare(j) for j in c["jobs"]]
+    span.set_attributes({"outcome": "ok", "person_id": board["person_id"], "kind": board["kind"],
+                         "jobs": len(resolved["jobs"]), "talent": len(resolved["talent"])})
     return resolved
 
 
@@ -104,8 +116,8 @@ async def robots() -> Response:
 
 @router.get("/{board_id}", response_class=HTMLResponse)
 async def board_page(board_id: str) -> HTMLResponse:
-    with logfire.span("glojobs board", board_id=board_id):
-        board = await _board(board_id)
+    with logfire.span("glojobs board", board_id=board_id) as span:
+        board = await _board(board_id, span)
         if board is None:
             return lost()
         await boards.record_view(board["id"])
@@ -122,12 +134,16 @@ async def board_page(board_id: str) -> HTMLResponse:
 
 @router.get("/{board_id}/roles/{slug}", response_class=HTMLResponse)
 async def role_page(board_id: str, slug: str) -> HTMLResponse:
-    with logfire.span("glojobs role", board_id=board_id, slug=slug):
-        board = await _board(board_id)
-        if board is None or board["kind"] == "talent":
+    with logfire.span("glojobs role", board_id=board_id, slug=slug) as span:
+        board = await _board(board_id, span)
+        if board is None:
+            return lost()
+        if board["kind"] == "talent":
+            span.set_attribute("outcome", "wrong_kind")
             return lost()
         job = next((j for j in board["jobs"] if j["slug"] == slug), None)
         if job is None:
+            span.set_attribute("outcome", "not_listed")
             return lost()
         company = next(c for c in board["companies"] if c["slug"] == job["company_slug"])
         more = [j for j in company["jobs"] if j["slug"] != slug]
@@ -140,12 +156,16 @@ async def role_page(board_id: str, slug: str) -> HTMLResponse:
 
 @router.get("/{board_id}/people/{slug}", response_class=HTMLResponse)
 async def person_page(board_id: str, slug: str) -> HTMLResponse:
-    with logfire.span("glojobs person", board_id=board_id, slug=slug):
-        board = await _board(board_id)
-        if board is None or board["kind"] == "jobs":
+    with logfire.span("glojobs person", board_id=board_id, slug=slug) as span:
+        board = await _board(board_id, span)
+        if board is None:
+            return lost()
+        if board["kind"] == "jobs":
+            span.set_attribute("outcome", "wrong_kind")
             return lost()
         person = next((t for t in board["talent"] if t["slug"] == slug), None)
         if person is None:
+            span.set_attribute("outcome", "not_listed")
             return lost()
         more = [t for t in board["talent"] if t["slug"] != slug]
         desc = ". ".join(p for p in (person["headline"], person["location"],
