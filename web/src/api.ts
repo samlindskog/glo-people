@@ -13,6 +13,7 @@ import type {
   BoardDetail,
   BoardJob,
   BoardKind,
+  BoardPresence,
   BoardTalent,
   Credits,
   FieldFilter,
@@ -22,6 +23,7 @@ import type {
   Me,
   Page,
   Person,
+  PersonMatch,
   PlanResult,
   Property,
   RunStatus,
@@ -151,6 +153,9 @@ export const api = {
     request<void>('DELETE', `/api/users/${userId}/api-keys/${id}`),
 
   // glojobs.app boards: the catalogue of companies, jobs and talent, and the per-person pages
+  /** Who a record is, deterministically: an identifier (email, phone, LinkedIn, GitHub) or a unique name decides. */
+  findPeople: (params: { name?: string; email?: string; phone?: string; linkedin?: string; github?: string }) =>
+    request<PersonMatch>('GET', `/api/people/find${qs(params)}`),
   boardCompanies: () => request<BoardCompany[]>('GET', '/api/boards/companies'),
   putBoardCompany: (slug: string, body: { name: string; web: string; line: string; about_html: string }) =>
     request<BoardCompany>('PUT', `/api/boards/companies/${encodeURIComponent(slug)}`, body),
@@ -192,6 +197,7 @@ export const api = {
   deleteBoardTalent: (slug: string) => request<void>('DELETE', `/api/boards/talent/${encodeURIComponent(slug)}`),
   boardPreview: (html: string) => request<{ html: string; stripped: string[] }>('POST', '/api/boards/preview', { html }),
   boards: (personId?: string) => request<Board[]>('GET', `/api/boards${qs({ person_id: personId })}`),
+  boardPresence: (personId: string) => request<BoardPresence>('GET', `/api/boards/presence/${personId}`),
   board: (id: string) => request<BoardDetail>('GET', `/api/boards/${id}`),
   createBoard: (body: {
     person_id: string

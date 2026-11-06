@@ -14,6 +14,7 @@ from sqlalchemy import (
     Table,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -188,6 +189,20 @@ workflow_run_events = Table(
 
 # --- glojobs.app boards: the shared catalogue of jobs and talent, and the per-person pages ------
 
+# The people the boards refer to, mirrored from their Mongo documents so the board tables can hold
+# real foreign keys: a row appears when a board or talent entry first names the person (the store
+# upserts it inside the same transaction), follows the person's writes through the write observer
+# (`boards.sync_person`), is re-keyed on a merge and goes on a delete — taking the person's boards
+# and talent entry with it (ON DELETE CASCADE). Not every person has a row; only referenced ones.
+people = Table(
+    "people",
+    metadata,
+    Column("id", String(24), primary_key=True),                      # the Mongo document id
+    Column("name", Text, nullable=False, server_default=""),
+    Column("tier", String(16), nullable=False, server_default=""),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
 board_companies = Table(
     "board_companies",
     metadata,
@@ -224,7 +239,7 @@ board_talent = Table(
     "board_talent",
     metadata,
     Column("slug", String(120), primary_key=True),
-    Column("person_id", String(24)),                                  # a glo-people record
+    Column("person_id", String(24), ForeignKey("people.id", ondelete="CASCADE")),  # the record
     Column("name", Text, nullable=False),
     Column("headline", Text, nullable=False, server_default=""),     # role at company
     Column("location", Text, nullable=False, server_default=""),
@@ -235,13 +250,17 @@ board_talent = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_by", Integer, ForeignKey("users.id", ondelete="SET NULL")),
     Index("ix_board_talent_person", "person_id"),
+    # one entry per person; legacy rows with no person stay until `cli boards-link` links them
+    Index("ux_board_talent_person", "person_id", unique=True,
+          postgresql_where=text("person_id IS NOT NULL")),
 )
 
 boards = Table(
     "boards",
     metadata,
     Column("id", UUID(as_uuid=True), primary_key=True),              # the public path
-    Column("person_id", String(24), nullable=False),                  # whose page it is
+    Column("person_id", String(24), ForeignKey("people.id", ondelete="CASCADE"),
+           nullable=False),                                           # whose page it is
     Column("kind", String(8), nullable=False),                        # jobs | talent | both
     Column("title", Text),
     Column("intro_html", Text, nullable=False, server_default=""),

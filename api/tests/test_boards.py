@@ -20,7 +20,7 @@ JD = """<h2>What you'll do</h2>
 @pytest.fixture(autouse=True)
 async def _clean_boards():
     async with db.engine().begin() as conn:
-        await conn.execute(text("TRUNCATE boards, board_talent, board_jobs, board_companies CASCADE"))
+        await conn.execute(text("TRUNCATE boards, board_talent, board_jobs, board_companies, people CASCADE"))
     yield
 
 
@@ -130,7 +130,7 @@ async def test_talent_draft_and_upsert(writer, ada):
     assert row["summary"] == "Hi" and row["person_id"] == ada and row["status"] == "active"
     assert (await writer.get("/api/boards/talent?person_id=" + ada)).json()[0]["slug"] == "ada-okafor"
     r = await writer.put("/api/boards/talent/no-one", json={"html": "<p>x</p>"})
-    assert r.status_code == 422 and "needs a name" in r.text
+    assert r.status_code == 422 and "linked to a glo-people record" in r.text
     assert (await writer.get("/api/boards/talent/draft?person_id=000000000000000000000000")).status_code == 404
 
 
@@ -301,9 +301,27 @@ async def test_mcp_board_tools(client_factory, mcp_keys, ada):
                       headers={"Authorization": f"Bearer {w}"})).json()
     assert bo["decision"] == "matched" and bo["person_id"] == board["person_id"]
 
-    # the same record again matches the same person
+    # the same record again: the person exists, the error names the id to pass, nothing is made
     err, again = await call(c, w, "create_board", {"kind": "jobs", "person": {"name": "Bo Chen", "email": "bo@x.io"}})
+    assert err and f"person_id {board['person_id']}" in str(again) and "email" in str(again)
+    err, again = await call(c, w, "create_board", {"kind": "jobs", "person_id": board["person_id"]})
     assert not err and again["person_id"] == board["person_id"]
+
+    # a talent entry from a record, the guide, and where a person is on glojobs.app
+    err, cy = await call(c, w, "upsert_board_talent", {"person": {"name": "Cy Park", "email": "cy@x.io"},
+                                                        "summary": "Growth lead"})
+    assert not err and cy["person_id"] and cy["slug"] == "cy-park" and cy["name"] == "Cy Park"
+    err, dup = await call(c, w, "upsert_board_talent", {"person": {"name": "Cy Park", "email": "cy@x.io"}})
+    assert err and f"person_id {cy['person_id']}" in str(dup)
+    err, guide = await call(c, r, "boards_guide", {})
+    assert not err and "catalogue" in guide["guide"] and "person_id" in guide["guide"]
+    err, p = await call(c, r, "get_person", {"id": board["person_id"], "include_history": False})
+    assert not err and [b["id"] for b in p["glojobs"]["boards"]] == [again["id"], board["id"]]
+    assert p["glojobs"]["boards"][0]["url"].endswith(again["id"]) and p["glojobs"]["listed_on"] == []
+    err, p = await call(c, r, "get_person", {"id": ada, "include_history": False})
+    assert not err and p["glojobs"]["boards"] == []
+    assert p["glojobs"]["listed_on"][0]["slug"] == "ada-okafor"
+    assert p["glojobs"]["listed_on"][0]["boards"][0]["url"].endswith(f"/{board['id']}/people/ada-okafor")
 
     err, got = await call(c, w, "get_board", {"id": board["id"]})
     assert not err and [j["slug"] for j in got["jobs"]] == ["fastlane-founding-engineer"]
@@ -317,9 +335,163 @@ async def test_mcp_board_tools(client_factory, mcp_keys, ada):
     assert err and "person_id or person" in str(res)
     err, lst = await call(c, w, "list_boards", {"person_id": board["person_id"]})
     assert not err and len(lst) == 2
+    err, got = await call(c, w, "get_board", {"id": board["id"]})
+    assert not err and got["talent"][0]["url"].endswith(f"/{board['id']}/people/ada-okafor")
     err, res = await call(c, w, "delete_board", {"id": board["id"]})
     assert not err and res == {"deleted": board["id"]}
     err, res = await call(c, w, "delete_board_job", {"slug": "fastlane-founding-engineer"})
     assert not err
     err, res = await call(c, w, "get_board_job", {"slug": "fastlane-founding-engineer"})
     assert err
+
+
+# --- every entry and board is a person --------------------------------------------------------------
+
+async def shadow(person_id: str) -> dict | None:
+    async with db.engine().connect() as conn:
+        row = (await conn.execute(text("SELECT name, tier FROM people WHERE id = :id"),
+                                  {"id": person_id})).first()
+    return dict(row._mapping) if row else None
+
+
+async def test_talent_needs_a_person_and_has_one_entry(writer, ada):
+    r = await writer.put("/api/boards/talent/no-one", json={"name": "No One", "html": "<p>x</p>"})
+    assert r.status_code == 422 and "linked to a glo-people record" in r.text
+
+    # a record nobody matches creates the person, mirrors them and links the entry
+    r = await writer.put("/api/boards/talent/bo-chen", json={
+        "person": {"name": "Bo Chen", "email": "bo@x.io", "company": "Leafy"}, "tier": "member"})
+    assert r.status_code == 200, r.text
+    bo = r.json()["person_id"]
+    found = (await writer.get("/api/people/find?email=bo@x.io")).json()
+    assert found["decision"] == "matched" and found["person_id"] == bo
+    assert (await writer.get(f"/api/people/{bo}")).json()["tier"] == "member"
+    assert await shadow(bo) == {"name": "Bo Chen", "tier": "member"}
+
+    # the same record again: already there, 409 names the id, nothing is written
+    r = await writer.put("/api/boards/talent/bo-chen-2", json={"person": {"name": "Bo Chen", "email": "bo@x.io"}})
+    assert r.status_code == 409, r.text
+    d = r.json()["detail"]
+    assert d["error"] == "person_exists" and d["person_id"] == bo and "email" in d["keys"]
+    assert "pass person_id=" + bo in d["message"]
+    assert (await writer.get("/api/boards/talent/bo-chen-2")).status_code == 404
+
+    # two people share a name and the record has nothing to tell them apart
+    for co in ("Acme", "Globex"):
+        assert (await writer.post("/api/people", json={"tier": "member", "fields": {"name": "Sam Lee", "company": co}})).status_code == 201
+    r = await writer.put("/api/boards/talent/sam-lee", json={"person": {"name": "Sam Lee"}})
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "person_ambiguous"
+    assert len(r.json()["detail"]["candidates"]) == 2
+    r = await writer.put("/api/boards/talent/sam-lee", json={"person": {"name": "Sam Lee", "company": "Acme"}})
+    assert r.status_code == 409 and r.json()["detail"]["error"] == "person_exists"   # the company tells
+    assert r.json()["detail"]["keys"] == ["name"]
+
+    # one entry per person: a second slug is refused with the existing one; the same slug replaces
+    r = await writer.put("/api/boards/talent/ada-2", json={"person_id": ada})
+    assert r.status_code == 200
+    r = await writer.put("/api/boards/talent/ada-okafor", json={"person_id": ada})
+    assert r.status_code == 422 and "already has the talent entry 'ada-2'" in r.text
+    r = await writer.put("/api/boards/talent/ada-2", json={"person_id": ada, "summary": "Hi"})
+    assert r.status_code == 200 and r.json()["summary"] == "Hi"
+    assert await shadow(ada) == {"name": "Ada Okafor", "tier": "member"}
+
+    # another person's slug cannot be taken over; a legacy row with no person can be linked
+    ned = (await writer.post("/api/people", json={"tier": "member", "fields": {"name": "Ned New"}})).json()["id"]
+    r = await writer.put("/api/boards/talent/ada-2", json={"person_id": ned})
+    assert r.status_code == 422 and "Ada Okafor's entry" in r.text and ada in r.text
+    assert (await writer.get("/api/boards/talent/ada-2")).json()["person_id"] == ada
+    async with db.engine().begin() as conn:
+        await conn.execute(text("INSERT INTO board_talent (slug, name) VALUES ('legacy', 'Old Row')"))
+    r = await writer.put("/api/boards/talent/legacy", json={"person": {"name": "Lee Legacy"}})
+    assert r.status_code == 200 and r.json()["name"] == "Lee Legacy" and r.json()["person_id"]
+
+    # a record with a key the catalog lacks is refused, not half-created
+    r = await writer.put("/api/boards/talent/x", json={"person": {"name": "Xi Lu", "shoe_size": "9"}})
+    assert r.status_code == 422 and "unknown property" in r.text
+    assert (await writer.get("/api/people/find?name=Xi%20Lu")).json()["decision"] == "new"
+
+
+async def test_boards_from_a_record_and_the_guide(writer, reader, ada):
+    r = await writer.post("/api/boards", json={"kind": "jobs", "person": {"name": "Bo Chen", "email": "bo@x.io"}})
+    assert r.status_code == 201, r.text
+    board = r.json()
+    r = await writer.post("/api/boards", json={"kind": "jobs", "person": {"name": "Bo Chen", "email": "bo@x.io"}})
+    assert r.status_code == 409 and r.json()["detail"]["person_id"] == board["person_id"]
+    assert (await writer.post("/api/boards", json={"kind": "jobs"})).status_code == 422
+
+    guide = (await reader.get("/api/boards/guide")).json()["guide"]
+    assert "upsert_board_company" in guide and "person_id" in guide
+
+    await writer.put("/api/boards/talent/ada-okafor", json={"person_id": ada})
+    await writer.patch(f"/api/boards/{board['id']}", json={"kind": "both", "talent_slugs": ["ada-okafor"]})
+    pres = (await reader.get(f"/api/boards/presence/{ada}")).json()
+    assert pres["boards"] == []
+    assert pres["listed_on"][0]["slug"] == "ada-okafor"
+    assert pres["listed_on"][0]["boards"][0]["url"].endswith(f"/{board['id']}/people/ada-okafor")
+    pres = (await reader.get(f"/api/boards/presence/{board['person_id']}")).json()
+    assert [b["id"] for b in pres["boards"]] == [board["id"]] and pres["boards"][0]["url"] == board["url"]
+    got = (await reader.get(f"/api/boards/{board['id']}")).json()
+    assert got["talent"][0]["url"] == f"{board['url']}/people/ada-okafor"
+    listing = (await reader.get("/api/boards/talent/ada-okafor")).json()["boards"][0]
+    assert listing["url"].endswith("/people/ada-okafor") and listing["board_url"] == board["url"]
+
+
+async def test_people_changes_follow_through_to_the_boards(writer, reader, ada):
+    await catalogue(writer)
+    await writer.put("/api/boards/talent/ada-okafor", json={"person_id": ada})
+    board = (await writer.post("/api/boards", json={
+        "kind": "both", "person": {"name": "Bo Chen", "email": "bo@x.io"},
+        "job_slugs": ["fastlane-founding-engineer"], "talent_slugs": ["ada-okafor"]})).json()
+    bo = board["person_id"]
+
+    # the mirrored row follows a write to the person
+    r = await writer.patch(f"/api/people/{bo}", json={"fields": {"name": "Bo Chen Jr"}, "tier": "plus_one"})
+    assert r.status_code == 200, r.text
+    assert await shadow(bo) == {"name": "Bo Chen Jr", "tier": "plus_one"}
+
+    # a merge: the dropped person's board and entry move to the kept one, who keeps their own entry
+    bo2 = (await writer.post("/api/boards", json={"kind": "talent", "person": {"name": "Bo Chen", "linkedin": "https://linkedin.com/in/bochen"}})).json()
+    assert bo2["person_id"] != bo
+    await writer.put("/api/boards/talent/bo-two", json={"person_id": bo2["person_id"]})
+    assert (await writer.post(f"/api/people/{bo}/merge/{bo2['person_id']}")).status_code == 200
+    assert await shadow(bo2["person_id"]) is None
+    assert (await reader.get(f"/api/boards/{bo2['id']}")).json()["person_id"] == bo
+    assert (await reader.get("/api/boards/talent/bo-two")).json()["person_id"] == bo   # moved: Bo had none
+    assert (await writer.post("/api/boards", json={"kind": "jobs", "person_id": bo})).status_code == 201
+
+    # a merge where both have an entry: the kept person's stays, the dropped one's goes
+    cy = (await writer.put("/api/boards/talent/cy", json={"person": {"name": "Cy Park", "email": "cy@x.io"}})).json()
+    await writer.patch(f"/api/boards/{board['id']}", json={"add_talent": ["cy"]})
+    assert (await writer.post(f"/api/people/{bo}/merge/{cy['person_id']}")).status_code == 200
+    assert (await reader.get("/api/boards/talent/cy")).status_code == 404
+    assert (await reader.get("/api/boards/talent/bo-two")).json()["person_id"] == bo
+    assert "cy" not in (await reader.get(f"/api/boards/{board['id']}")).json()["talent_slugs"]
+
+    # a deleted person: their entry leaves every board's list, their boards go
+    assert (await writer.delete(f"/api/people/{ada}")).status_code == 204
+    assert (await reader.get("/api/boards/talent/ada-okafor")).status_code == 404
+    assert (await reader.get(f"/api/boards/{board['id']}")).json()["talent_slugs"] == []
+    assert (await writer.delete(f"/api/people/{bo}")).status_code == 204
+    assert (await reader.get(f"/api/boards/{board['id']}")).status_code == 404
+    assert (await reader.get(f"/api/boards/{bo2['id']}")).status_code == 404
+    assert (await reader.get("/api/boards/talent/bo-two")).status_code == 404
+    assert await shadow(bo) is None
+
+
+async def test_boards_link_audits_the_mirror(writer, ada):
+    await writer.put("/api/boards/talent/ada-okafor", json={"person_id": ada})
+    # a legacy entry with no person, and a mirrored person who vanished behind the store's back
+    async with db.engine().begin() as conn:
+        await conn.execute(text("INSERT INTO board_talent (slug, name) VALUES ('bo-chen', 'Bo Chen'), ('zed', 'Zed Q')"))
+        await conn.execute(text("INSERT INTO people (id) VALUES ('000000000000000000000001')"))
+        await conn.execute(text("INSERT INTO boards (id, person_id, kind) VALUES (gen_random_uuid(), '000000000000000000000001', 'jobs')"))
+    assert (await writer.post("/api/people", json={"tier": "member", "fields": {"name": "Bo Chen"}})).status_code == 201
+    rep = await boards.audit_people()
+    assert rep["refreshed"] == 1 and rep["gone"] == ["000000000000000000000001"]
+    assert [r["slug"] for r in rep["linked"]] == ["bo-chen"] and [r["slug"] for r in rep["unlinked"]] == ["zed"]
+    assert (await writer.get("/api/boards/talent/bo-chen")).json()["person_id"] == rep["linked"][0]["person_id"]
+    assert (await writer.get("/api/boards")).json() == []
+    rep = await boards.audit_people(create=True, source=boards.Source("system", "cli", "boards-link"))
+    assert [r["slug"] for r in rep["created"]] == ["zed"]
+    zed = (await writer.get("/api/boards/talent/zed")).json()["person_id"]
+    assert (await writer.get(f"/api/people/{zed}")).json()["name"] == "Zed Q"

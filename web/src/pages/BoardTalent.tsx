@@ -21,7 +21,8 @@ interface Draft {
 const EMPTY: Draft = { slug: '', person: null, name: '', headline: '', location: '', summary: '', html: '', status: 'active' }
 
 /** /boards/talent — the shared talent catalogue: the people a talent board can show, each with
- * an HTML profile, optionally drafted from their glo-people record. */
+ * an HTML profile drafted from their glo-people record. Every entry is one person's: the record
+ * is picked (or created) first, and the entry is what glojobs.app shows of them. */
 export default function BoardTalentPage() {
   const { can } = useAuth()
   const editable = can('people:write')
@@ -85,10 +86,11 @@ export default function BoardTalentPage() {
     setError(null)
     try {
       const { slug, person, ...rest } = draft
+      if (!person) throw new Error('Pick the glo-people record this entry is for first (or create one). Every entry belongs to a person.')
       const key = slug.trim() || slugify(rest.name)
       if (isNew && (await slugTaken(api.boardTalentOne, key)))
         throw new Error(`An entry with the slug ${key} already exists. Edit that one, or give this one its own slug.`)
-      const res = await api.putBoardTalent(key, { ...rest, person_id: person?.id ?? null })
+      const res = await api.putBoardTalent(key, { ...rest, person_id: person.id })
       setIsNew(false)
       setDraft({ ...draft, slug: res.slug })
       setNote(res.stripped?.length ? `Saved ${res.name}. Dropped: ${res.stripped.map((t) => `<${t}>`).join(', ')}` : `Saved ${res.name}.`)
@@ -137,7 +139,7 @@ export default function BoardTalentPage() {
 
       {draft && (
         <form onSubmit={save} className="card mb-4 space-y-3 p-4" data-testid="talent-form">
-          <Field label="From a glo-people record" hint="Picking a person fills the blank fields from their record and links the entry to it.">
+          <Field label="glo-people record" hint="Required: the person this entry is. Picking them fills the blank fields from their record; only what you save here is shown publicly.">
             <PersonPicker value={draft.person} onChange={(p) => void fromPerson(p)} canCreate={editable} />
           </Field>
           <div className="grid gap-3 sm:grid-cols-3">

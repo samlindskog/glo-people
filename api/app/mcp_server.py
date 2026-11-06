@@ -106,16 +106,10 @@ Playbook
   (`shown`, `why`). normalize_person re-parses one record and repairs its identity data.
 - Before any bulk write, dry_run; after one, read the run's items (get_run) and summarise counts.
 - Boards (glojobs.app): a board is one person's private page — reachable only by its UUID link —
-  listing open roles, people, or both, drawn from a shared catalogue. Catalogue first:
-  upsert_board_company (slug, name, site, one-liner, about as HTML), then upsert_board_job (the
-  description as HTML: h2 headings, p, ul/li; the tool returns `stripped` for anything it had to
-  drop — scripts, styles, images are never shown), upsert_board_talent (person_id alone drafts
-  name, headline, location and bio from the record; pass fields to override). Then create_board
-  (person_id, or `person` = {name, email, …} when the person is not in the database yet — matched
-  or created like merge_person) with kind jobs | talent | both and the slug lists; it returns the
-  url to hand over. update_board changes the lists (job_slugs replaces; add_jobs / remove_jobs
-  edit in place), the title, the intro, or disables the link. list_board_jobs / list_board_talent
-  show the catalogue; get_board shows a board with its items resolved and how often it was opened.
+  listing open roles, people, or both, drawn from a shared catalogue. Call boards_guide once
+  before touching them: it explains the catalogue-first order, how every talent entry and board
+  is linked to a glo-people person (person_id, or a record that is matched before anything is
+  created), the URLs (every board and item carries `url`), and what HTML survives.
 Pass `agent` when you write on behalf of another automated agent: the entry stays attributed to your
 key (kind "mcp") with that name in its reference."""
 
@@ -256,7 +250,8 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
                      ) -> dict:
     """Fetch one person by id: the shown field values plus, by default, `history`
     ({field: [{v, ts, src, derived?, shown?, why?}], oldest first}; the entry marked `shown` is
-    the one the value comes from)."""
+    the one the value comes from), and `glojobs`: their boards (`boards`, each with its url) and
+    the talent entry that lists them (`listed_on`, with their page url on every board)."""
     await _principal(ctx, "people:read")
     try:
         person = await people_svc.get(id, include_history=include_history)
@@ -264,7 +259,7 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
         raise ToolError(str(e)) from e
     if not person:
         raise ToolError("person not found")
-    return person
+    return {**person, "glojobs": await boards.presence(person["id"])}
 
 
 @mcp.tool()
@@ -790,6 +785,16 @@ def _board_error(e: Exception) -> ToolError:
 
 
 @mcp.tool()
+async def boards_guide(ctx: Context) -> dict:
+    """Tool: read this before working with the glojobs.app boards — what a board is, the order of
+    calls (catalogue, then board), how talent entries and boards are linked to glo-people people
+    (person_id, or a record matched before anything is created), the URL scheme, what HTML
+    survives."""
+    await _principal(ctx, "people:read")
+    return {"guide": boards.GUIDE}
+
+
+@mcp.tool()
 async def list_board_companies(ctx: Context) -> list[dict]:
     """Tool: the companies of the glojobs.app job catalogue (slug, name, site, one-liner)."""
     await _principal(ctx, "people:read")
@@ -907,6 +912,12 @@ async def upsert_board_talent(
                                                        "out is drafted from it (name, role at "
                                                        "company, location, one-liner, bio and "
                                                        "about as the profile)")] = None,
+    person: Annotated[dict[str, Any] | None,
+                      Field(description="Instead of person_id: a record {name, email, company, "
+                                        "role, location, …}. Matched by identifier or unique "
+                                        "name first: a match is an error naming the person_id "
+                                        "to pass; only a stranger is created")] = None,
+    tier: Annotated[fields.Tier, Field(description="Tier for a person `person` creates")] = "plus_two",
     name: str | None = None,
     headline: Annotated[str | None, Field(description="Role at company")] = None,
     location: str | None = None,
@@ -914,13 +925,16 @@ async def upsert_board_talent(
     html: Annotated[str | None, Field(description="The profile as HTML: h2, p, ul/li, strong, a")] = None,
     status: Annotated[str | None, Field(description="active | hidden")] = None,
 ) -> dict:
-    """Tool: create or replace a talent entry (requires people:write). Returns the stored row
+    """Tool: create or replace a talent entry (requires people:write). Every entry is one
+    glo-people person's: pass person_id, or person (see boards_guide). Returns the stored row
     and `stripped`."""
     principal = await _principal(ctx, "people:write")
     try:
-        return await boards.upsert_talent(slug, name=name, person_id=person_id, headline=headline,
-                                          location=location, summary=summary, html=html,
-                                          status=status, user_id=principal.user_id)
+        return await boards.upsert_talent(slug, name=name, person_id=person_id, person=person,
+                                          headline=headline, location=location, summary=summary,
+                                          html=html, status=status, user_id=principal.user_id,
+                                          principal=principal, source=Source.for_mcp(principal),
+                                          tier=tier)
     except boards.BoardError as e:
         raise _board_error(e) from e
 
@@ -964,8 +978,9 @@ async def create_board(
     person_id: Annotated[str | None, Field(description="Whose page it is (find_people first)")] = None,
     person: Annotated[dict[str, Any] | None,
                       Field(description="Instead of person_id: a record {name, email, company, "
-                                        "role, …} matched to an existing person by identifier "
-                                        "or unique name, else created (as merge_person does)")] = None,
+                                        "role, …}. Matched by identifier or unique name first: "
+                                        "a match is an error naming the person_id to pass; "
+                                        "only a stranger is created")] = None,
     title: Annotated[str | None, Field(description="Page title; default 'Roles picked for "
                                                    "<first name>'")] = None,
     intro_html: Annotated[str, Field(description="A short note at the top as HTML (p, strong, a)")] = "",
@@ -976,21 +991,12 @@ async def create_board(
     """Tool: a new board for a person (requires people:write). Returns the board with its public
     url (hand that to the person) and `stripped` for the intro."""
     principal = await _principal(ctx, "people:write")
-    if not person_id and not person:
-        raise ToolError("pass person_id or person")
-    if person and not person_id:
-        try:
-            res = await merge.merge_one(person, MergeOptions(tier=tier, agent=False, review=False),
-                                        principal, Source.for_mcp(principal), timeout=MAX_WAIT_S)
-        except (ValueError, TypeError) as e:
-            raise ToolError(str(e)) from e
-        person_id = res.get("person_id")
-        if not person_id:
-            raise ToolError(f"could not match or create the person: {res.get('text') or res}")
     try:
-        return await boards.create_board(person_id=person_id, kind=kind, title=title,
+        return await boards.create_board(person_id=person_id, person=person, kind=kind, title=title,
                                          intro_html=intro_html, job_slugs=job_slugs,
-                                         talent_slugs=talent_slugs, user_id=principal.user_id)
+                                         talent_slugs=talent_slugs, user_id=principal.user_id,
+                                         principal=principal, source=Source.for_mcp(principal),
+                                         tier=tier)
     except boards.BoardError as e:
         raise _board_error(e) from e
 

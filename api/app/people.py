@@ -37,13 +37,16 @@ NORMALIZE_SRC = Source("system", "normalize")
 class WriteInfo:
     """What a commit did, reported to the write observers (`on_write`): the person, who wrote (the
     source of the transaction's first op), the keys whose value was set, appended or removed,
-    whether the person was created by this write, and whether it was deleted instead."""
+    whether the person was created by this write, and whether it was deleted instead — and, when
+    the delete is a merge, `merged_into`: the person that now stands for the deleted one, so an
+    observer re-keys what it holds before the id is gone."""
 
     person_id: str
     src: Source | None
     keys: tuple[str, ...] = ()
     is_new: bool = False
     deleted: bool = False
+    merged_into: str | None = None
 
 
 WriteHook = Callable[[WriteInfo], Awaitable[None]]
@@ -775,7 +778,7 @@ async def merge_documents(principal: Principal | None, keep_id: str, drop_id: st
     await db().people.delete_one({"_id": drop["_id"]})
     keys = tuple(sorted(k for k in to_set if k not in ("updated_at",)))
     await _after_write(WriteInfo(keep_id, Source("system", "merge"), keys))
-    await _after_write(WriteInfo(drop_id, None, deleted=True))
+    await _after_write(WriteInfo(drop_id, None, deleted=True, merged_into=keep_id))
     await activity.record("person.merge", principal, keep_id,
                           {"dropped": drop_id, "keys": list(keys)})
     doc = await get(keep_id)

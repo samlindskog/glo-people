@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from app import (
     assistants,
     auth,
+    boards,
     db,
     embeddings,
     fields,
@@ -399,6 +400,21 @@ async def migrate_history(dry_run: bool) -> None:
     print(f"{'would migrate' if dry_run else 'migrated'} {n} people documents to field history")
 
 
+async def boards_link(create: bool, tier: str) -> None:
+    rep = await boards.audit_people(create=create, tier=tier,
+                                    source=Source("system", "cli", "boards-link"))
+    print(f"refreshed {rep['refreshed']} mirrored people; {len(rep['gone'])} gone "
+          f"(their boards and entries went with them): {', '.join(rep['gone']) or '-'}")
+    for key in ("linked", "created"):
+        for row in rep[key]:
+            print(f"{key:8} {row['slug']:40} -> {row['person_id']}")
+    for row in rep["ambiguous"]:
+        names = "; ".join(f"{c['person_id']} {c.get('name', '')}" for c in row["candidates"])
+        print(f"ambiguous {row['slug']:39} {names}")
+    for row in rep["unlinked"]:
+        print(f"unlinked {row['slug']:40} {row.get('error') or 'nobody matches (use --create)'}")
+
+
 async def list_properties() -> None:
     await properties.sync_specs()
     for p in await properties.catalog(await people.coverage()):
@@ -498,6 +514,12 @@ def main() -> None:
     em = sub.add_parser("embed", help="sync property-name vectors and backfill passage vectors")
     em.add_argument("--field", action="append", help="only these fields (repeatable)")
     sub.add_parser("properties", help="the property catalog with coverage")
+    bl = sub.add_parser("boards-link", help="refresh the people the boards refer to (gone people "
+                                            "take their boards along) and link talent entries "
+                                            "that have no person by name")
+    bl.add_argument("--create", action="store_true",
+                    help="create a person for an entry nobody matches (else: reported)")
+    bl.add_argument("--tier", default="plus_two", choices=fields.TIERS)
     cl = sub.add_parser("classify", help="suggest property_specs entries from the data")
     cl.add_argument("--all", action="store_true", help="include properties that have a spec")
     nz = sub.add_parser("normalize", help="(re)parse the normalised values of typed properties")
@@ -554,6 +576,8 @@ def main() -> None:
                     await embed(args.field)
                 case "properties":
                     await list_properties()
+                case "boards-link":
+                    await boards_link(args.create, args.tier)
                 case "classify":
                     await classify(args.all)
                 case "normalize":

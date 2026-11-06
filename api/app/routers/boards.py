@@ -7,8 +7,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from app import activity, boards, safe_html
+from app import activity, boards, fields, safe_html
 from app.auth import Principal, require
+from app.history import Source
 
 router = APIRouter(prefix="/api/boards", tags=["boards"])
 
@@ -37,6 +38,8 @@ class JobIn(BaseModel):
 
 class TalentIn(BaseModel):
     person_id: str | None = None
+    person: dict[str, Any] | None = None      # instead of person_id: a record, see ensure_person
+    tier: fields.Tier = "plus_two"            # for a person `person` creates
     name: str | None = None
     headline: str | None = None
     location: str | None = None
@@ -46,7 +49,9 @@ class TalentIn(BaseModel):
 
 
 class BoardCreate(BaseModel):
-    person_id: str
+    person_id: str | None = None
+    person: dict[str, Any] | None = None      # instead of person_id: a record, see ensure_person
+    tier: fields.Tier = "plus_two"
     kind: boards.Kind
     title: str | None = None
     intro_html: str = ""
@@ -72,6 +77,9 @@ class Preview(BaseModel):
 def _error(e: Exception) -> HTTPException:
     if isinstance(e, boards.NotFound):
         return HTTPException(status.HTTP_404_NOT_FOUND, str(e))
+    if isinstance(e, boards.PersonExists | boards.PersonAmbiguous):
+        # the record names someone already there (or several): the detail carries the ids
+        return HTTPException(status.HTTP_409_CONFLICT, e.detail())
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e))
 
 
@@ -173,9 +181,13 @@ async def get_talent(slug: str, _: Reader) -> dict:
 
 @router.put("/talent/{slug}")
 async def put_talent(slug: str, body: TalentIn, principal: Writer) -> dict:
-    """Tool: create or replace a talent entry; fields left null are drafted from `person_id`."""
+    """Tool: create or replace a talent entry; fields left null are drafted from the person's
+    record. `person_id` links the entry, or `person` (a record) is matched or created: a match
+    answers 409 with the person_id to pass (`person_exists`), several matches 409 with the
+    candidates (`person_ambiguous`)."""
     try:
-        row = await boards.upsert_talent(slug, **body.model_dump(), user_id=principal.user_id)
+        row = await boards.upsert_talent(slug, **body.model_dump(), user_id=principal.user_id,
+                                         principal=principal, source=Source.for_rest(principal))
     except boards.BoardError as e:
         raise _error(e) from e
     await activity.record("board_talent.put", principal, row["slug"], {"person_id": row["person_id"]})
@@ -191,6 +203,20 @@ async def delete_talent(slug: str, principal: Writer) -> None:
 
 
 # --- boards -------------------------------------------------------------------------------------
+
+@router.get("/guide")
+async def guide(_: Reader) -> dict:
+    """Tool: the guide an agent reads before working with the boards (the model, the order of
+    calls, how people are linked, the URLs, what HTML survives)."""
+    return {"guide": boards.GUIDE}
+
+
+@router.get("/presence/{person_id}")
+async def presence(person_id: str, _: Reader) -> dict:
+    """Tool: where a person is on glojobs.app: their own boards, and the talent entry that lists
+    them with every board showing it and their page URL there."""
+    return await boards.presence(person_id)
+
 
 @router.post("/preview")
 async def preview(body: Preview, _: Reader) -> dict:
@@ -210,9 +236,11 @@ async def list_boards(_: Reader, person_id: str | None = None) -> list[dict]:
 
 @router.post("", status_code=201)
 async def create_board(body: BoardCreate, principal: Writer) -> dict:
-    """Tool: a new board for a person; returns it with its public url."""
+    """Tool: a new board for a person (`person_id`, or `person` matched or created as for a
+    talent entry); returns it with its public url."""
     try:
-        row = await boards.create_board(**body.model_dump(), user_id=principal.user_id)
+        row = await boards.create_board(**body.model_dump(), user_id=principal.user_id,
+                                        principal=principal, source=Source.for_rest(principal))
     except boards.BoardError as e:
         raise _error(e) from e
     await activity.record("board.create", principal, row["id"],

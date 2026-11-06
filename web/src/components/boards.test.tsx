@@ -59,6 +59,7 @@ test('SlugList adds, reorders and removes items, and the add list excludes what 
 test('PersonPicker offers to create the person when nobody matches, and uses the new record', async () => {
   const user = userEvent.setup()
   vi.spyOn(api, 'search').mockResolvedValue({ total: 0, page: 1, limit: 8, results: [], search_id: null })
+  const find = vi.spyOn(api, 'findPeople').mockResolvedValue({ decision: 'new', person_id: null, tier: null, keys: [], candidates: [] })
   const create = vi.spyOn(api, 'createPerson').mockResolvedValue({ id: 'abc123', tier: 'plus_two', name: 'Zed Nobody', norm: {}, norm_flags: {} })
   const picked: PickedPerson[] = []
 
@@ -89,6 +90,52 @@ test('PersonPicker offers to create the person when nobody matches, and uses the
   await user.click(within(form).getByRole('button', { name: 'Create and use' }))
 
   expect(await screen.findByTestId('picked-person')).toHaveTextContent('Zed Nobody')
+  expect(find).toHaveBeenCalledWith({ name: 'Zed Nobody', email: 'zed@x.io' })
   expect(create).toHaveBeenCalledWith('plus_two', { name: 'Zed Nobody', email: 'zed@x.io' })
   expect(picked).toEqual([{ id: 'abc123', name: 'Zed Nobody' }])
+})
+
+test('PersonPicker refuses to create a double: a record the database already holds is offered instead', async () => {
+  const user = userEvent.setup()
+  vi.spyOn(api, 'search').mockResolvedValue({ total: 0, page: 1, limit: 8, results: [], search_id: null })
+  vi.spyOn(api, 'findPeople').mockResolvedValue({
+    decision: 'matched',
+    person_id: 'bo1',
+    tier: 'identifier',
+    keys: ['email'],
+    candidates: [{ person_id: 'bo1', name: 'Bo Chen', tier: 'member', keys: ['email'] }],
+  })
+  const create = vi.spyOn(api, 'createPerson')
+  const picked: PickedPerson[] = []
+
+  function Host() {
+    const [value, setValue] = useState<PickedPerson | null>(null)
+    return (
+      <PersonPicker
+        value={value}
+        onChange={(p) => {
+          if (p) picked.push(p)
+          setValue(p)
+        }}
+      />
+    )
+  }
+  render(
+    <MemoryRouter>
+      <Host />
+    </MemoryRouter>,
+  )
+  await user.type(screen.getByLabelText('Person'), 'Bo')
+  await user.click(screen.getByRole('button', { name: 'Create a person' }))
+  const form = screen.getByTestId('create-person')
+  await user.clear(within(form).getByLabelText('Name'))
+  await user.type(within(form).getByLabelText('Name'), 'Bo Chen')
+  await user.type(within(form).getByLabelText('Email'), 'bo@x.io')
+  await user.click(within(form).getByRole('button', { name: 'Create and use' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Already in glo-people (matched by email)')
+  expect(create).not.toHaveBeenCalled()
+  await user.click(within(screen.getByTestId('existing-people')).getByRole('button', { name: 'Use Bo Chen' }))
+  expect(await screen.findByTestId('picked-person')).toHaveTextContent('Bo Chen')
+  expect(picked).toEqual([{ id: 'bo1', name: 'Bo Chen' }])
 })

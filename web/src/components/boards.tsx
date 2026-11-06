@@ -170,7 +170,9 @@ interface PersonPickerProps {
   canCreate?: boolean
 }
 
-/** Finds a person by name; when nobody matches, a small form creates the record on the spot. */
+/** Finds a person by name; when nobody matches, a small form creates the record on the spot —
+ * after the record is looked up the way the API does it (an email or a unique name decides): a
+ * match is offered to use instead, so the boards never make a double. */
 export function PersonPicker({ value, onChange, canCreate = true }: PersonPickerProps) {
   const [q, setQ] = useState('')
   const [hits, setHits] = useState<PickedPerson[]>([])
@@ -178,6 +180,7 @@ export function PersonPicker({ value, onChange, canCreate = true }: PersonPicker
   const [creating, setCreating] = useState(false)
   const [form, setForm] = useState({ name: '', email: '', company: '', role: '', tier: 'plus_two' as Tier })
   const [error, setError] = useState<string | null>(null)
+  const [existing, setExisting] = useState<PickedPerson[]>([])
   const [busy, setBusy] = useState(false)
   const timer = useRef<number | undefined>(undefined)
 
@@ -220,9 +223,22 @@ export function PersonPicker({ value, onChange, canCreate = true }: PersonPicker
     }
     setBusy(true)
     setError(null)
+    setExisting([])
     try {
       const fields: Record<string, unknown> = { name: form.name.trim() }
       for (const k of ['email', 'company', 'role'] as const) if (form[k].trim()) fields[k] = form[k].trim()
+      const match = await api.findPeople({ name: form.name.trim(), email: form.email.trim() || undefined })
+      if (match.decision === 'matched' && match.person_id) {
+        const hit = match.candidates.find((c) => c.person_id === match.person_id)
+        setExisting([{ id: match.person_id, name: hit?.name ?? form.name.trim() }])
+        setError(`Already in glo-people (matched by ${match.keys.join(', ') || 'name'}). Use that record instead of creating a double.`)
+        return
+      }
+      if (match.decision === 'ambiguous') {
+        setExisting(match.candidates.map((c) => ({ id: c.person_id, name: c.name })))
+        setError('Several people could be this record. Pick the right one, or add an email to tell them apart.')
+        return
+      }
       const created = await api.createPerson(form.tier, fields)
       onChange({ id: created.id, name: created.name })
     } catch (e) {
@@ -288,6 +304,17 @@ export function PersonPicker({ value, onChange, canCreate = true }: PersonPicker
             <p role="alert" className="text-sm text-red-700">
               {error}
             </p>
+          )}
+          {existing.length > 0 && (
+            <ul className="flex flex-wrap gap-2" data-testid="existing-people">
+              {existing.map((p) => (
+                <li key={p.id}>
+                  <button type="button" className="btn-secondary" onClick={() => onChange(p)}>
+                    Use {p.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
           )}
           <div className="flex gap-2">
             <button type="button" className="btn-primary" disabled={busy} onClick={() => void create()}>

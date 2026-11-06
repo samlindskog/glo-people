@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-migrate prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-boards-link prod-migrate prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -96,6 +96,9 @@ prod-import:
 
 prod-embed:
 	ssh -t $(PROD_SSH) sudo docker exec glo-people-api-1 python -m app.cli embed
+
+prod-boards-link:   ## refresh the people the boards refer to; link talent entries by name (--create: make the rest)
+	ssh -t $(PROD_SSH) sudo docker exec -it glo-people-api-1 python -m app.cli boards-link $(ARGS)
 
 # The dev stack holds the primary copy of the people data (the live imports land there first).
 # prod-push-data replaces prod's `people` and `fields` collections with dev's — after taking a

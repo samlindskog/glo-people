@@ -66,6 +66,6 @@ def test_registration_is_shared_and_idempotent(monkeypatch):
     monkeypatch.setattr(wiring, "_registered", False)
     wiring.register_write_hooks()
     wiring.register_write_hooks()
-    from app import embeddings
+    from app import boards, embeddings
     from app.assistants import auto_review
-    assert people._hooks == [embeddings.sync_person, auto_review.after_write]
+    assert people._hooks == [embeddings.sync_person, boards.sync_person, auto_review.after_write]

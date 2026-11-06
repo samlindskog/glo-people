@@ -28,7 +28,7 @@ PEERS: dict[str, set[str]] = {
     "people": {"properties"},
     "embeddings": {"people", "properties"},
     "importer": {"people", "properties"},
-    "boards": {"people"},
+    "boards": {"people", "importer"},
     "tools": {"agents"},            # every tool may use the agent plumbing; agents use no tool
 }
 OPEN_LEVELS = {0, 3, 4}

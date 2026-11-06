@@ -563,12 +563,29 @@ export interface BoardTalent {
   boards?: BoardRef[]
 }
 
+/** A board that lists a job or a talent entry: `url` is the item's page on that board. */
 export interface BoardRef {
   id: string
   person_id: string
   person_name: string
   kind: BoardKind
   url: string
+  board_url: string
+}
+
+/** GET /api/boards/presence/:person_id — where a person is on glojobs.app. */
+export interface BoardPresence {
+  boards: Pick<Board, 'id' | 'kind' | 'title' | 'url' | 'enabled' | 'views' | 'last_viewed_at' | 'job_count' | 'talent_count'>[]
+  listed_on: { slug: string; name: string; status: 'active' | 'hidden'; boards: BoardRef[] }[]
+}
+
+/** GET /api/people/find — the deterministic match of a record. */
+export interface PersonMatch {
+  decision: 'matched' | 'ambiguous' | 'new'
+  person_id: string | null
+  tier: string | null
+  keys: string[]
+  candidates: { person_id: string; name: string; tier: string; keys: string[] }[]
 }
 
 export interface Board {
