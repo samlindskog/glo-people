@@ -2,7 +2,7 @@ DEV  = docker compose -f compose.yaml -f compose.dev.yaml
 PROD = docker compose -f compose.yaml -f compose.prod.yaml
 API  = $(DEV) exec api
 
-.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-boards-link prod-migrate ops-health ops-tunnel-key prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
+.PHONY: dev down logs ps test test-api test-web e2e sandbox-up sandbox-down e2e-sandbox lint create-user set-password import embed properties classify migrate psql mongosh prod-create-user prod-import prod-embed prod-boards-link prod-migrate ops-health ops-tunnel-key ops-tunnel-install prod-backup prod-push-data prod-env prod-status prod-aop-on prod-aop-off
 
 dev:            ## start the dev stack on http://localhost:8080 (live reload)
 	$(DEV) up -d --build
@@ -106,6 +106,10 @@ ops-tunnel-key:     ## make the laptop's WireGuard key pair for the ops tunnel (
 	@umask 077; test -f "$$HOME/.config/glo-people/ops-tunnel.key" || { mkdir -p "$$HOME/.config/glo-people"; wg genkey > "$$HOME/.config/glo-people/ops-tunnel.key"; }
 	@echo "laptop public key: $$(wg pubkey < "$$HOME/.config/glo-people/ops-tunnel.key")"
 	@echo "laptop private key is in ~/.config/glo-people/ops-tunnel.key (paste into WireGuard.app)"
+
+ops-tunnel-install: ## copy the tunnel script and firewall to glousfr1 and run it with the laptop's key (sudo asks for a password)
+	scp -q deploy/ops-tunnel.sh deploy/nftables.conf $(PROD_SSH):/tmp/
+	ssh -t $(PROD_SSH) "sudo bash /tmp/ops-tunnel.sh $$(wg pubkey < "$$HOME/.config/glo-people/ops-tunnel.key")"
 
 ops-health:         ## prod's build, uptime, schema and databases, over the ops tunnel
 	curl -s -m 5 http://10.89.0.1:8800/ops/health | python3 -m json.tool

@@ -5,14 +5,16 @@
 #   laptop:   WireGuard.app tunnel "glousfr1-ops", 10.89.0.2/24, endpoint <public ip>:51821,
 #             AllowedIPs 10.89.0.0/24 (only the tunnel subnet is routed through it)
 #
-# Run on glousfr1 as root, once, with the laptop's public key:
-#   sudo bash /opt/glo-people/deploy/ops-tunnel.sh <laptop-public-key>
+# From the laptop, with this file and nftables.conf copied next to each other on the server:
+#   scp deploy/ops-tunnel.sh deploy/nftables.conf glousfr1:/tmp/
+#   ssh -t glousfr1 'sudo bash /tmp/ops-tunnel.sh <laptop-public-key>'
 # It installs wireguard, creates the server key if there is none, writes /etc/wireguard/wg1.conf,
-# enables wg-quick@wg1, reloads nftables (deploy/nftables.conf already admits udp/51821 and the
-# ops port from the laptop) and prints the server's public key for the laptop's config. Idempotent:
-# run it again with a new laptop key to replace the peer.
+# enables wg-quick@wg1, installs the nftables.conf beside it (which admits udp/51821 and the ops
+# port from the laptop) and reloads the firewall, then prints the server's public key for the
+# laptop's config. Idempotent: run it again with a new laptop key to replace the peer.
 set -euo pipefail
 LAPTOP_PUBKEY="${1:-}"
+SRC=$(cd "$(dirname "$0")" && pwd)
 [[ "$LAPTOP_PUBKEY" =~ ^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$ ]] || {
   echo "usage: $0 <laptop-public-key>   (wg genkey | tee priv | wg pubkey, on the laptop)" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 2; }
@@ -42,6 +44,8 @@ CONF
 
 systemctl enable wg-quick@wg1 >/dev/null
 systemctl restart wg-quick@wg1
+[ -f "$SRC/nftables.conf" ] || { echo "nftables.conf is not next to this script; copy deploy/nftables.conf there" >&2; exit 2; }
+install -m 755 "$SRC/nftables.conf" /etc/nftables.conf
 nft -c -f /etc/nftables.conf && systemctl reload nftables
 
 echo "wg1 is up: $(ip -4 -brief addr show wg1 | awk '{print $3}')"
