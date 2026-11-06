@@ -16,11 +16,18 @@ test('API key works against /mcp and stops working once deleted', async ({ page,
       headers: { Authorization: `Bearer ${key}`, Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
       data: { jsonrpc: '2.0', id: 1, method, params },
     })
+  // The 2025 wire streams every reply as SSE (long calls need the keepalive pings): the JSON-RPC
+  // message is the last `data:` line.
+  const body = async (r: Awaited<ReturnType<typeof rpc>>) => {
+    const text = await r.text()
+    const data = text.split('\n').filter((l) => l.startsWith('data:'))
+    return JSON.parse(data.length ? data[data.length - 1].slice(5) : text)
+  }
   expect((await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } })).ok()).toBe(true)
-  const tools = await (await rpc('tools/list')).json()
+  const tools = await body(await rpc('tools/list'))
   const names = tools.result.tools.map((t: { name: string }) => t.name)
   expect(names).toEqual(expect.arrayContaining(['search_people', 'get_person', 'list_properties', 'create_person']))
-  const res = await (await rpc('tools/call', { name: 'search_people', arguments: { filters: [{ field: 'name', op: 'contains', value: 'a' }], limit: 1 } })).json()
+  const res = await body(await rpc('tools/call', { name: 'search_people', arguments: { filters: [{ field: 'name', op: 'contains', value: 'a' }], limit: 1 } }))
   expect(res.result.isError ?? false).toBe(false)
 
   const row = page.getByTestId('keys-table').getByRole('row', { name: new RegExp(name) })
