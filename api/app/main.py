@@ -106,13 +106,6 @@ async def health() -> dict:
     return {"ok": True, "fake_agents": get_settings().fake_agents}
 
 
-def _sub(scope: Scope, prefix: str) -> Scope:
-    sub = dict(scope)
-    sub["path"] = scope["path"][len(prefix):] or "/"
-    sub["raw_path"] = sub["path"].encode()
-    return sub
-
-
 def _route(scope: Scope) -> str:
     """The route template of a handled request: the path with each path parameter's value put
     back as its name, so rows group by endpoint."""
@@ -127,9 +120,9 @@ async def _dispatch(scope: Scope, receive: Receive, send: Send) -> None:
     to FastAPI."""
     path = scope["path"]
     if path == "/mcp" or path.startswith("/mcp/"):
-        await mcp_app(_sub(scope, "/mcp"), receive, send)
+        await mcp_app(ops.sub_scope(scope, "/mcp"), receive, send)
     elif path == "/ops" or path.startswith("/ops/"):
-        await ops_app(_sub(scope, "/ops"), receive, send)
+        await ops_app(ops.sub_scope(scope, "/ops"), receive, send)
     else:
         await api(scope, receive, send)
 

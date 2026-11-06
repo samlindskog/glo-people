@@ -8,13 +8,15 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from pydantic import Field
 from sqlalchemy import select
+from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app import agent_log, db, ops
 from app.assistants import runner
+from app.config import get_settings
 
 INSTRUCTIONS = """\
 glo-people operations, read-only: what the application recorded about its own running. Start
@@ -149,23 +151,31 @@ async def _health(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 def build_app() -> ASGIApp:
-    """`/ops/mcp` is the MCP, `/ops/health` the JSON status; anything else under /ops/ is 404."""
-    mcp_app = mcp.streamable_http_app(
-        streamable_http_path="/", stateless_http=True, json_response=False,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+    """`/ops/mcp` is the MCP, `/ops/health` the JSON status; anything else under /ops/ is 404.
+    Every request must carry one of `ops_hosts` as its Host (421 otherwise) and no foreign Origin
+    (403): the surface has no key, so a page in the operator's browser must not be able to reach
+    it by DNS rebinding while the tunnel is up."""
+    hosts = [h.strip() for h in get_settings().ops_hosts.split(",") if h.strip()]
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=True,
+                                         allowed_hosts=[*hosts, *(h + ":*" for h in hosts)])
+    gate = TransportSecurityMiddleware(security)
+    mcp_app = mcp.streamable_http_app(streamable_http_path="/", stateless_http=True,
+                                      json_response=False, transport_security=security)
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return
+        refused = await gate.validate_request(Request(scope))
+        if refused is not None:
+            await refused(scope, receive, send)
+            return
         path = scope["path"]
-        if scope["type"] == "http" and path in ("/health", "/health/"):
+        if path in ("/health", "/health/"):
             await _health(scope, receive, send)
-            return
-        if scope["type"] == "http" and (path == "/mcp" or path.startswith("/mcp/")):
-            sub = dict(scope)
-            sub["path"] = path[len("/mcp"):] or "/"
-            sub["raw_path"] = sub["path"].encode()
-            await mcp_app(sub, receive, send)
-            return
-        await send({"type": "http.response.start", "status": 404, "headers": []})
-        await send({"type": "http.response.body", "body": b"not found"})
+        elif path == "/mcp" or path.startswith("/mcp/"):
+            await mcp_app(ops.sub_scope(scope, "/mcp"), receive, send)
+        else:
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"not found"})
 
     return app

@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     git_sha: str = "dev"
     ops_retention_days: int = 30
     ops_syslog_port: int = 5140
+    # The Host values /ops/ answers to (any port): the tunnel address and localhost. Anything else
+    # is refused with 421, so a page in the operator's browser cannot reach it by DNS rebinding.
+    ops_hosts: str = "10.89.0.1,127.0.0.1,localhost"
 
     session_days: int = 14
     cookie_secure: bool = False

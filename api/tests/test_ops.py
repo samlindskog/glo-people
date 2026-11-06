@@ -3,6 +3,7 @@ log tied to its request, nginx's lines over syslog, the reads behind the ops MCP
 
 import json
 import logging
+import sys
 import uuid
 
 import pytest
@@ -10,6 +11,8 @@ from sqlalchemy import text
 
 from app import db, ops
 from tests.test_mcp import HEADERS, body
+
+OPS = {"host": "127.0.0.1"}            # one of ops_hosts; the test client's own Host is "test"
 
 
 @pytest.fixture(autouse=True)
@@ -112,15 +115,15 @@ async def test_status_summary_and_prune(reader):
 
 async def test_ops_mcp_reads_everything(reader, writer):
     """The ops MCP under /ops/mcp: no key, read-only; /ops/health answers JSON."""
-    h = (await reader.get("/ops/health")).json()
+    h = (await reader.get("/ops/health", headers=OPS)).json()
     assert h["postgres"] and h["git_sha"]
-    assert (await reader.get("/ops/nope")).status_code == 404
+    assert (await reader.get("/ops/nope", headers=OPS)).status_code == 404
 
     await writer.put("/api/boards/companies/acme", json={"name": "Acme"})
     await ops.flush()
 
     async def call(tool, args):
-        r = await reader.post("/ops/mcp", headers=HEADERS,
+        r = await reader.post("/ops/mcp", headers={**HEADERS, **OPS},
                               json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                                     "params": {"name": tool, "arguments": args}})
         assert r.status_code == 200, r.text
@@ -131,7 +134,8 @@ async def test_ops_mcp_reads_everything(reader, writer):
             return data.get("result", data) if isinstance(data, dict) and len(data) == 1 else data
         return json.loads(res["content"][0]["text"])
 
-    r = await reader.post("/ops/mcp", headers=HEADERS, json={"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}})
+    r = await reader.post("/ops/mcp", headers={**HEADERS, **OPS},
+                          json={"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}})
     tools = {t["name"] for t in body(r)["result"]["tools"]}
     assert {"ops_status", "ops_summary", "ops_requests", "ops_request", "ops_logs", "ops_errors",
             "ops_mcp_calls", "ops_activity", "ops_runs"} <= tools
@@ -147,3 +151,88 @@ async def test_ops_mcp_reads_everything(reader, writer):
     assert await call("ops_errors", {}) == []
     assert await call("ops_runs", {}) == {"live": []}
     assert isinstance(await call("ops_mcp_calls", {"minutes": 5}), list)
+
+
+async def test_ops_answers_only_to_its_own_hosts(reader):
+    """DNS rebinding: a page in the operator's browser that resolves its own name to the tunnel
+    address still sends that name as Host, and an Origin; /ops/ refuses both."""
+    listing = {"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}}
+    assert (await reader.get("/ops/health")).status_code == 421                   # Host: test
+    assert (await reader.post("/ops/mcp", headers=HEADERS, json=listing)).status_code == 421
+    r = await reader.get("/ops/health", headers={**OPS, "origin": "http://evil.example"})
+    assert r.status_code == 403
+    assert (await reader.get("/ops/health", headers={"host": "localhost:8000"})).status_code == 200
+    r = await reader.post("/ops/mcp", headers={**HEADERS, **OPS}, json=listing)
+    assert r.status_code == 200 and body(r)["result"]["tools"]
+
+
+def row(path: str, **over) -> dict:
+    base = {"source": "api", "host": "h", "method": "GET", "path": path, "route": path, "status": 200,
+            "duration_ms": 1, "client_ip": "1.1.1.1", "user_agent": "ua", "request_id": None, "attrs": {}}
+    return {**base, **over, "ts": over.get("ts") or ops.datetime.now(ops.UTC)}
+
+
+async def paths() -> list[str]:
+    async with db.engine().begin() as conn:
+        return list((await conn.execute(text("SELECT path FROM request_log ORDER BY path"))).scalars())
+
+
+async def test_a_refused_row_is_dropped_alone():
+    """One row Postgres refuses (a type it cannot bind) never holds the others back, and is
+    counted as dropped rather than retried forever."""
+    before = ops._dropped
+    ops._requests[:] = [row("/bad", status="x"), row("/good")]
+    await ops.flush()
+    assert ops._requests == [] and ops._dropped == before + 1
+    assert await paths() == ["/good"]
+
+
+def test_nul_bytes_are_cleaned_and_tracebacks_capped():
+    ops.record_request(**{**row("/a\x00b"), "ts": None})
+    assert ops._requests[-1]["path"] == "/ab"
+    try:
+        raise ValueError("x" * 100_000)
+    except ValueError:
+        rec = logging.LogRecord("t", logging.ERROR, __file__, 1, "boom\x00", (), sys.exc_info())
+    ops.record_log(rec)
+    entry = ops._logs[-1]
+    assert entry["message"] == "boom" and len(entry["traceback"]) == ops.TRACEBACK_CHARS
+    assert entry["traceback"].endswith("x" * 50)
+    ops._requests.clear()
+    ops._logs.clear()
+
+
+async def test_rows_wait_when_none_goes_in(monkeypatch):
+    """A database whose schema is behind the build refuses every row for a while (the app starts
+    before the migration runs): that is not the rows' fault, so they wait and none is dropped."""
+    before, calls = ops._dropped, []
+
+    async def behind(table, rows):
+        calls.append(len(rows))
+        raise RuntimeError("column does not exist")
+
+    monkeypatch.setattr(ops, "_insert", behind)
+    ops._requests[:] = [row("/a"), row("/b"), row("/c"), row("/d"), row("/e")]
+    await ops.flush()
+    assert [r["path"] for r in ops._requests] == ["/a", "/b", "/c", "/d", "/e"]
+    assert ops._dropped == before and calls == [5, 1, 1, 1]           # the batch, then three alone
+    ops._requests.clear()
+
+
+async def test_rows_wait_for_the_database_oldest_giving_way(monkeypatch):
+    """While the database is down the rows wait; past the queue's capacity the oldest give way to
+    the newest, and every row lost is counted."""
+    monkeypatch.setattr(ops, "MAX_QUEUE", 3)
+    ops._requests[:] = [row("/a"), row("/b"), row("/c")]
+    before = ops._dropped
+
+    class Down:
+        def begin(self):
+            if len(ops._requests) == 0:
+                ops._requests.append(row("/d"))               # arrives while the batch is in flight
+            raise ConnectionError("down")
+
+    monkeypatch.setattr(db, "engine", lambda: Down())
+    await ops.flush()
+    assert [r["path"] for r in ops._requests] == ["/b", "/c", "/d"] and ops._dropped == before + 1
+    ops._requests.clear()

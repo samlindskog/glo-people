@@ -11,7 +11,8 @@ a logging handler installed at startup. Pages and tools add facts to their reque
 `note(...)`. Rows older than `ops_retention_days` are pruned hourly.
 
 Writes never block a request: rows queue in memory and a background task flushes them in
-batches; if the database is down the rows wait, and if the queue fills they are dropped.
+batches; if the database is down the rows wait (the oldest giving way once the queue is full),
+and a row the database refuses is dropped on its own, never holding the rest back.
 Logfire stays for the agents (the pydantic-ai runs); everything here is ours."""
 
 import asyncio
@@ -32,6 +33,8 @@ log = logging.getLogger(__name__)
 
 STARTED_AT = datetime.now(UTC)
 MAX_QUEUE = 20_000                 # rows waiting for a flush, each log; beyond that, dropped
+TRACEBACK_CHARS = 20_000           # the end of a traceback is the part that matters
+PROBE_ROWS = 3                     # refused rows tried alone before a batch counts as not the rows' fault
 FLUSH_EVERY_S = 1.0
 PRUNE_EVERY_S = 3600.0
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -73,27 +76,40 @@ def notes() -> dict[str, Any]:
     return dict(_notes.get() or {})
 
 
+def sub_scope(scope: dict[str, Any], prefix: str) -> dict[str, Any]:
+    """The scope of a request handed on to an app mounted at `prefix`: the path without it."""
+    sub = dict(scope)
+    sub["path"] = scope["path"][len(prefix):] or "/"
+    sub["raw_path"] = sub["path"].encode()
+    return sub
+
+
+def _text(s: str, limit: int) -> str:
+    """Cut to `limit` and free of NUL, which Postgres refuses in text and json alike."""
+    return s.replace("\x00", "")[:limit]
+
+
 def record_request(*, source: str, host: str, method: str, path: str, route: str, status: int,
                    duration_ms: int, client_ip: str, user_agent: str, request_id: str | None,
                    attrs: dict[str, Any] | None = None, ts: datetime | None = None) -> None:
-    _enqueue(_requests, {"ts": ts or datetime.now(UTC), "source": source, "host": host[:200],
-                         "method": method[:8], "path": path[:2000], "route": route[:200],
-                         "status": status, "duration_ms": duration_ms, "client_ip": client_ip[:64],
-                         "user_agent": user_agent[:500], "request_id": request_id,
-                         "attrs": attrs or {}})
+    _enqueue(_requests, {"ts": ts or datetime.now(UTC), "source": source, "host": _text(host, 200),
+                         "method": _text(method, 8), "path": _text(path, 2000),
+                         "route": _text(route, 200), "status": status, "duration_ms": duration_ms,
+                         "client_ip": _text(client_ip, 64), "user_agent": _text(user_agent, 500),
+                         "request_id": request_id, "attrs": attrs or {}})
 
 
 def record_log(record: logging.LogRecord) -> None:
     tb = None
     if record.exc_info and record.exc_info[0] is not None:
-        tb = logging.Formatter().formatException(record.exc_info)
+        tb = logging.Formatter().formatException(record.exc_info).replace("\x00", "")[-TRACEBACK_CHARS:]
     try:
         message = record.getMessage()
     except (TypeError, ValueError, KeyError, IndexError):                 # a bad format string
         message = str(record.msg)
     _enqueue(_logs, {"ts": datetime.fromtimestamp(record.created, UTC), "level": record.levelname[:8],
-                     "logger": record.name[:200], "message": message[:4000], "traceback": tb,
-                     "request_id": _request_id.get()})
+                     "logger": _text(record.name, 200), "message": _text(message, 4000),
+                     "traceback": tb, "request_id": _request_id.get()})
 
 
 def _enqueue(queue: list[dict[str, Any]], row: dict[str, Any]) -> None:
@@ -190,19 +206,46 @@ async def stop() -> None:
 
 
 async def flush() -> None:
-    """Write everything queued now. Rows stay queued when the database refuses them."""
+    """Write everything queued now. When a batch is refused the rows go one by one: the ones
+    refused among others that go in are bad rows, dropped and counted; when none goes in (the
+    database is down, or its schema is behind this build) the rows wait in front of the queue,
+    the oldest giving way once it is full."""
+    global _dropped
     for table, queue in ((db.request_log, _requests), (db.app_log, _logs)):
         rows = list(queue)
         queue.clear()
         if not rows:
             continue
         try:
-            async with db.engine().begin() as conn:
-                await conn.execute(insert(table), rows)
+            await _insert(table, rows)
+            continue
         except Exception:
-            queue[:0] = rows                                      # back in front, newest kept
-            del queue[MAX_QUEUE:]
             log.debug("ops: flush of %d %s rows failed", len(rows), table.name, exc_info=True)
+        written, refused = 0, 0
+        for row in rows:
+            try:
+                await _insert(table, [row])
+                written += 1
+            except Exception:
+                refused += 1
+                if written == 0 and refused >= PROBE_ROWS:       # nothing goes in: not the rows' fault
+                    break
+                if written:
+                    log.warning("ops: a %s row was refused and dropped", table.name, exc_info=True)
+        if written == 0:
+            queue[:0] = rows                                      # back in front, the oldest give way
+            overflow = len(queue) - MAX_QUEUE
+            if overflow > 0:
+                del queue[:overflow]
+                _dropped += overflow
+        else:
+            _dropped += refused
+
+
+async def _insert(table: Any, rows: list[dict[str, Any]]) -> None:
+    async with db.engine().begin() as conn:
+        await conn.execute(insert(table), rows)
+
 
 
 async def _run() -> None:
