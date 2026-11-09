@@ -4,8 +4,9 @@ the WireGuard address alone; nothing public routes it). No key: the network is t
 every tool only reads. `/ops/health` answers JSON for a plain curl."""
 
 import json
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
@@ -27,7 +28,14 @@ ops_request(id) shows one request with the log lines written during it. ops_logs
 warnings and errors; ops_errors is the shortcut for tracebacks. ops_mcp_calls is the agent
 ledger (every public MCP tool call, who, how long, outcome), ops_activity the audit log of writes,
 ops_runs the assistant runs in flight. Logfire holds the agent runs themselves (the pydantic-ai
-traces); everything here is the application's own record."""
+traces); everything here is the application's own record.
+
+Answers are made to be read in one call: ops_requests returns compact rows (50 by default) and,
+with group_by, counts with p95 per route, path, host, status, client, tool or JSON-RPC method
+instead of rows; ops_mcp_calls leaves out the argument and result shapes unless shapes=true and
+labels each call with its conversation. On /mcp the claude.ai connector holds one POST open for
+minutes per connection (attrs.method names it, no tool inside): ops_summary lists it under
+mcp_other_posts, apart from the tools' own latency in mcp_tools."""
 
 mcp = MCPServer(name="glo-people-ops", instructions=INSTRUCTIONS)
 
@@ -45,8 +53,33 @@ async def ops_status() -> dict:
 @mcp.tool()
 async def ops_summary(minutes: Annotated[int, Field(ge=1, le=20160)] = 60) -> dict:
     """Tool: the last `minutes` at a glance: requests by source, host and status class, the ten
-    slowest routes (p95, max), warning and error counts, and what is queued."""
+    slowest routes (p95, max; the MCP route apart), `mcp_tools` (per public MCP tool: calls,
+    p95, max, failed), `mcp_other_posts` (the connector's handshake and held streams by JSON-RPC
+    method), warning and error counts, and what is queued."""
     return await ops.summary(minutes)
+
+
+UA_CHARS = 40
+
+
+def compact_request(row: dict[str, Any]) -> dict[str, Any]:
+    """A request row with what repeats or says nothing left out: the id, a route equal to the
+    path (or the MCP/ops mount), empty attrs, the microseconds, the user agent past 40 chars."""
+    out: dict[str, Any] = {"ts": str(row["ts"])[:19], "source": row["source"], "host": row["host"],
+                           "method": row["method"], "path": row["path"], "status": row["status"],
+                           "duration_ms": row["duration_ms"]}
+    route = row.get("route") or ""
+    if route and route != row["path"] and route not in ("/mcp", "/ops"):
+        out["route"] = route
+    if row.get("client_ip"):
+        out["client_ip"] = row["client_ip"]
+    if row.get("user_agent"):
+        out["user_agent"] = row["user_agent"][:UA_CHARS]
+    if row.get("request_id"):
+        out["request_id"] = row["request_id"]
+    if row.get("attrs"):
+        out["attrs"] = row["attrs"]
+    return out
 
 
 @mcp.tool()
@@ -57,13 +90,25 @@ async def ops_requests(
     path: Annotated[str | None, Field(description="Substring of the path")] = None,
     min_status: Annotated[int | None, Field(description="e.g. 400 for failures only")] = None,
     min_duration_ms: int | None = None,
-    limit: Annotated[int, Field(ge=1, le=1000)] = 100,
+    group_by: Annotated[Literal["route", "path", "host", "status", "client_ip", "user_agent",
+                                "tool", "method"] | None,
+                        Field(description="Counts per group (n, p95_ms, max_ms, failed) instead "
+                                          "of rows; `tool` and `method` read the API's notes")] = None,
+    compact: Annotated[bool, Field(description="Rows without what repeats or says nothing "
+                                               "(default); false for the full columns")] = True,
+    limit: Annotated[int, Field(ge=1, le=1000)] = 50,
 ) -> list[dict]:
-    """Tool: requests, newest first. API rows have the route template, the status, the
-    duration, the client, and `attrs` (a public page's outcome, the MCP tool called…); nginx
+    """Tool: requests, newest first — or, with group_by, the matching requests counted per
+    group. API rows have the route template, the status, the duration, the client, and `attrs`
+    (a public page's outcome, the MCP tool called, the JSON-RPC method of an MCP POST…); nginx
     rows have what reached nginx, including what never reached the app."""
-    return await ops.requests(minutes=minutes, source=source, host=host, path=path,
+    if group_by:
+        return await ops.request_groups(group_by, minutes=minutes, source=source, host=host, path=path,
+                                        min_status=min_status, min_duration_ms=min_duration_ms,
+                                        limit=limit)
+    rows = await ops.requests(minutes=minutes, source=source, host=host, path=path,
                               min_status=min_status, min_duration_ms=min_duration_ms, limit=limit)
+    return [compact_request(r) for r in rows] if compact else rows
 
 
 @mcp.tool()
@@ -97,17 +142,40 @@ async def ops_mcp_calls(
     minutes: Annotated[int, Field(ge=1, le=20160)] = 60,
     tool: Annotated[str | None, Field(description="Only this tool")] = None,
     failed_only: bool = False,
+    shapes: Annotated[bool, Field(description="Include the argument and result shapes "
+                                              "(about ten times the size)")] = False,
     limit: Annotated[int, Field(ge=1, le=1000)] = 100,
 ) -> list[dict]:
-    """Tool: the public MCP's ledger: every tool call with its key, session, argument shape,
-    duration and outcome, newest first."""
+    """Tool: the public MCP's ledger: every tool call with its key, conversation, duration and
+    outcome, newest first; with shapes, the argument and result shapes too. `conversation` is
+    the client's session header when it sends one, else the start time of the run of calls on
+    that key with no gap over 30 minutes (the claude.ai connector sends no header)."""
     rows = await agent_log.calls(datetime.now(UTC) - timedelta(minutes=minutes), limit=20_000)
+    by_key: dict[Any, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_key[r.get("api_key_id")].append(r)
+    conversation: dict[Any, str] = {}
+    for key_rows in by_key.values():
+        for s in agent_log.sessions(key_rows):
+            label = s["session"] or s["started_at"].strftime("%Y-%m-%dT%H:%M")
+            for c in s["calls"]:
+                conversation[c["id"]] = label
     if tool:
         rows = [r for r in rows if r.get("tool") == tool]
     if failed_only:
         rows = [r for r in rows if not r.get("ok")]
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
-    return [_jsonable(r) for r in rows[:limit]]
+    out = []
+    for r in rows[:limit]:
+        row = {**r, "conversation": conversation.get(r["id"])}
+        row.pop("session", None)
+        if not shapes:
+            row.pop("args", None)
+            row.pop("result", None)
+        if row.get("error") is None:
+            row.pop("error", None)
+        out.append(_jsonable(row))
+    return out
 
 
 @mcp.tool()

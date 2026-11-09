@@ -76,9 +76,15 @@ async def lifespan(_: FastAPI):
     logging.getLogger(__name__).info("started %s", get_settings().git_sha)
     async with mcp.session_manager.run(), ops_mcp.session_manager.run():
         yield
-    await ops.stop()
     await runner.stop_scheduler()
     await invoke.drain()
+    try:
+        await people_svc.flush_writes(timeout=get_settings().write_hooks_drain_s)
+    except TimeoutError:
+        logging.getLogger(__name__).warning("shutdown with %d write(s) whose hooks did not run; "
+                                            "`python -m app.cli embed` heals the vectors",
+                                            people_svc.pending_writes())
+    await ops.stop()
     await mongo.close()
     await db.dispose()
 

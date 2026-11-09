@@ -7,10 +7,14 @@ their normalised value (app.normalize) in the same write. Writes accept only pro
 compare-and-set on the document's `rev`, so concurrent writers never lose each other's entries.
 Other systems read through the helpers here (`fetch`, `find`, `count`, `find_ids`, `coverage`,
 `value_counts`) and react to value writes through `on_write` hooks that the composition root
-registers (e.g. embeddings).
+registers (e.g. embeddings). The hooks run after the write, off the writer's path: a commit queues
+its `WriteInfo` and returns; one worker per process runs the hooks in commit order, each in the
+context the write had, so an embedding call never holds a request. `flush_writes` waits for the
+queue; a process that writes awaits it before exiting.
 """
 
 import asyncio
+import contextvars
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -51,6 +55,9 @@ class WriteInfo:
 
 WriteHook = Callable[[WriteInfo], Awaitable[None]]
 _hooks: list[WriteHook] = []
+HOOKS_INLINE = False          # True: hooks run inside the write (tests, which read right after)
+_pending: asyncio.Queue[tuple[WriteInfo, contextvars.Context]] | None = None
+_worker: asyncio.Task | None = None
 
 
 class PersonError(ValueError):
@@ -942,6 +949,17 @@ async def delete(principal: Principal, person_id: str) -> bool:
 
 
 async def _after_write(info: WriteInfo) -> None:
+    """Report a committed write to the observers: inline when `HOOKS_INLINE`, else queued for the
+    process's hook worker, which runs them in order in a copy of the writer's context."""
+    if not _hooks:
+        return
+    if HOOKS_INLINE:
+        await _run_hooks(info)
+        return
+    _queue().put_nowait((info, contextvars.copy_context()))
+
+
+async def _run_hooks(info: WriteInfo) -> None:
     for hook in _hooks:
         try:
             await hook(info)
@@ -950,6 +968,50 @@ async def _after_write(info: WriteInfo) -> None:
             # the request. `python -m app.cli embed` heals any embedding gap.
             log.exception("write hook %s failed for person %s", getattr(hook, "__name__", hook),
                           info.person_id)
+
+
+def _queue() -> asyncio.Queue:
+    """The pending writes of this loop, with a worker draining them (started on first use, and
+    again on a new loop)."""
+    global _pending, _worker
+    loop = asyncio.get_running_loop()
+    if _pending is None or _worker is None or _worker.done() or _worker.get_loop() is not loop:
+        _pending = asyncio.Queue()
+        _worker = loop.create_task(_drain(_pending), name="write-hooks")
+    return _pending
+
+
+async def _drain(queue: asyncio.Queue) -> None:
+    while True:
+        info, ctx = await queue.get()
+        try:
+            await asyncio.create_task(_run_hooks(info), context=ctx)
+        except asyncio.CancelledError:
+            log.warning("write-hooks worker cancelled with %d write(s) unreported (person %s first); "
+                        "`python -m app.cli embed` heals the vectors", queue.qsize() + 1, info.person_id)
+            raise
+        except Exception:
+            log.exception("write hooks failed for person %s", info.person_id)
+        finally:
+            queue.task_done()
+
+
+def pending_writes() -> int:
+    """Writes whose hooks have not run yet (0 when nothing is queued)."""
+    return _pending.qsize() if _pending is not None else 0
+
+
+async def flush_writes(timeout: float | None = None) -> None:
+    """Wait until every write queued so far has been reported to the hooks (a process that
+    writes calls this before exiting; the API at shutdown). `timeout` bounds the wait."""
+    if _pending is None or _worker is None:
+        return
+    if _worker.done() or _worker.get_loop() is not asyncio.get_running_loop():
+        if _pending.qsize():
+            log.warning("%d write(s) queued for hooks that will not run (worker %s)",
+                        _pending.qsize(), "finished" if _worker.done() else "on another loop")
+        return
+    await asyncio.wait_for(_pending.join(), timeout)
 
 
 # --- migration --------------------------------------------------------------------------------------

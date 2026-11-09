@@ -220,3 +220,32 @@ async def test_eq_on_a_url_or_email_matches_every_spelling(writer, reader):
     assert await ids("email", "lin@ma.io") == [lin]
     assert await ids("name", "lin ma") == [lin]
     assert await ids("linkedin", "linkedin.com/in/someone-else") == []
+
+
+async def test_a_tier_list_and_the_counts_above_tighter_thresholds(reader, writer):
+    """`tier` takes several tiers in one call; a semantic result says how many hits reach each
+    of a few tighter thresholds, so a wide result is narrowed without another search."""
+    await import_people(writer, "Name,Bio\nEve,payments platform for merchants\n", "q.csv", "plus_one")
+    s = lambda body: reader.post("/api/search", json=body)
+    assert names(await s({"tier": "member", "filters": [{"field": "bio", "op": "contains", "value": "payments"}]})) == ["Ada", "Cy"]
+    assert names(await s({"tier": ["member", "plus_one"],
+                          "filters": [{"field": "bio", "op": "contains", "value": "payments"}]})) == ["Ada", "Cy", "Eve"]
+    r = await s({"tier": ["plus_one"], "semantic": {"query": "payments", "fields": ["bio"], "threshold": 0.1}})
+    assert names(r) == ["Eve"]
+    r = await s({"tier": ["member", "plus_one"], "semantic": {"query": "payments infrastructure for merchants",
+                                                            "fields": ["bio"], "threshold": 0.1}})
+    data = r.json()
+    assert set(names(r)) >= {"Ada", "Eve"}
+    counts = data["at_or_above"]
+    assert list(counts) == ["0.15", "0.2", "0.25", "0.3"]
+    assert counts["0.15"] <= data["total"]
+    assert all(counts[a] >= counts[b] for a, b in zip(list(counts), list(counts)[1:], strict=False))
+    assert counts["0.3"] >= 1                                            # Ada's bio is the passage itself
+    r = await s({"filters": [{"field": "bio", "op": "contains", "value": "payments"}]})
+    assert r.json()["at_or_above"] is None                                # literal searches have no scores
+    assert (await s({"tier": ["nope"]})).status_code == 422
+    assert (await s({"tier": []})).status_code == 422                     # not "every tier"
+
+    from app.tools.search import tighter_counts
+    assert tighter_counts([0.5, 0.61, 0.9], 0.4) == {"0.45": 3, "0.5": 3, "0.55": 2, "0.6": 2}
+    assert tighter_counts([0.99, 1.0], 0.9) == {"0.95": 2, "1": 1}        # steps stop at 1

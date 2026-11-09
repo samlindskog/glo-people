@@ -24,7 +24,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, insert, select, text
+from sqlalchemy import case, delete, func, insert, select, text
 
 from app import db, mongo
 from app.config import get_settings
@@ -283,23 +283,60 @@ def _since(minutes: int) -> datetime:
     return datetime.now(UTC) - timedelta(minutes=max(1, minutes))
 
 
+def _request_filter(stmt: Any, *, minutes: int, source: str | None, host: str | None,
+                    path: str | None, min_status: int | None, min_duration_ms: int | None) -> Any:
+    r = db.request_log.c
+    stmt = stmt.where(r.ts >= _since(minutes))
+    if source:
+        stmt = stmt.where(r.source == source)
+    if host:
+        stmt = stmt.where(r.host.ilike(f"%{host}%"))
+    if path:
+        stmt = stmt.where(r.path.ilike(f"%{path}%"))
+    if min_status:
+        stmt = stmt.where(r.status >= min_status)
+    if min_duration_ms:
+        stmt = stmt.where(r.duration_ms >= min_duration_ms)
+    return stmt
+
+
 async def requests(*, minutes: int = 60, source: str | None = None, host: str | None = None,
                    path: str | None = None, min_status: int | None = None,
                    min_duration_ms: int | None = None, limit: int = 100) -> list[dict]:
-    stmt = select(db.request_log).where(db.request_log.c.ts >= _since(minutes))
-    if source:
-        stmt = stmt.where(db.request_log.c.source == source)
-    if host:
-        stmt = stmt.where(db.request_log.c.host.ilike(f"%{host}%"))
-    if path:
-        stmt = stmt.where(db.request_log.c.path.ilike(f"%{path}%"))
-    if min_status:
-        stmt = stmt.where(db.request_log.c.status >= min_status)
-    if min_duration_ms:
-        stmt = stmt.where(db.request_log.c.duration_ms >= min_duration_ms)
+    stmt = _request_filter(select(db.request_log), minutes=minutes, source=source, host=host,
+                           path=path, min_status=min_status, min_duration_ms=min_duration_ms)
     stmt = stmt.order_by(db.request_log.c.ts.desc()).limit(min(max(1, limit), 1000))
     async with db.engine().connect() as conn:
         return [_row(r) for r in await conn.execute(stmt)]
+
+
+GROUP_BY = ("route", "path", "host", "status", "client_ip", "user_agent", "tool", "method")
+
+
+async def request_groups(by: str, *, minutes: int = 60, source: str | None = None,
+                         host: str | None = None, path: str | None = None,
+                         min_status: int | None = None, min_duration_ms: int | None = None,
+                         limit: int = 50) -> list[dict]:
+    """The matching requests counted per `by` (a column, or `tool` / `method` from the API's
+    notes), with p95 and max duration and the share of 4xx/5xx, most frequent first."""
+    r = db.request_log.c
+    if by not in GROUP_BY:
+        raise ValueError(f"group by one of {', '.join(GROUP_BY)}")
+    key = r.attrs[by].astext if by in ("tool", "method") else getattr(r, by)
+    key = key.label(by)
+    stmt = select(key, func.count().label("n"),
+                  func.percentile_cont(0.95).within_group(r.duration_ms).label("p95_ms"),
+                  func.max(r.duration_ms).label("max_ms"),
+                  func.sum(case((r.status >= 400, 1), else_=0)).label("failed"))
+    stmt = _request_filter(stmt, minutes=minutes, source=source, host=host, path=path,
+                           min_status=min_status, min_duration_ms=min_duration_ms)
+    if by in ("tool", "method"):
+        stmt = stmt.where(r.attrs.has_key(by))
+    # grouped by position: a repeated `attrs ->> :k` would bind a second parameter, and an alias
+    # can collide with a column (`method`)
+    stmt = stmt.group_by(text("1")).order_by(text("n DESC")).limit(min(max(1, limit), 1000))
+    async with db.engine().connect() as conn:
+        return [_row(r_) for r_ in await conn.execute(stmt)]
 
 
 async def request(request_id: str) -> dict[str, Any]:
@@ -338,17 +375,31 @@ async def summary(minutes: int = 60) -> dict[str, Any]:
             .where(db.request_log.c.ts >= since)
             .group_by(db.request_log.c.source, db.request_log.c.host, cls)
             .order_by(db.request_log.c.source, db.request_log.c.host, cls))]
-        slow = [_row(r) for r in await conn.execute(
-            select(db.request_log.c.route, func.count().label("n"),
-                   func.percentile_cont(0.95).within_group(db.request_log.c.duration_ms).label("p95_ms"),
-                   func.max(db.request_log.c.duration_ms).label("max_ms"))
-            .where(db.request_log.c.ts >= since, db.request_log.c.source == "api",
-                   db.request_log.c.route != "")
-            .group_by(db.request_log.c.route).order_by(text("p95_ms DESC")).limit(10))]
-        levels = {r.level: r.n for r in await conn.execute(
+        r = db.request_log.c
+        p95 = func.percentile_cont(0.95).within_group(r.duration_ms).label("p95_ms")
+        # The MCP route is split: a tool call is listed under its tool, and the connector's other
+        # POSTs (the handshake, and the stream it holds open for minutes) under their JSON-RPC
+        # method, so a held stream never reads as a slow tool.
+        slow = [_row(x) for x in await conn.execute(
+            select(r.route, func.count().label("n"), p95, func.max(r.duration_ms).label("max_ms"))
+            .where(r.ts >= since, r.source == "api", r.route != "", r.route != "/mcp")
+            .group_by(r.route).order_by(text("p95_ms DESC")).limit(10))]
+        tools = [_row(x) for x in await conn.execute(
+            select(r.attrs["tool"].astext.label("tool"), func.count().label("n"), p95,
+                   func.max(r.duration_ms).label("max_ms"),
+                   func.sum(case((r.attrs["ok"].astext == "false", 1), else_=0)).label("failed"))
+            .where(r.ts >= since, r.source == "api", r.route == "/mcp", r.attrs.has_key("tool"))
+            .group_by(text("1")).order_by(text("n DESC")))]
+        other = [_row(x) for x in await conn.execute(
+            select(func.coalesce(r.attrs["method"].astext, "?").label("method"),
+                   func.count().label("n"), p95, func.max(r.duration_ms).label("max_ms"))
+            .where(r.ts >= since, r.source == "api", r.route == "/mcp", ~r.attrs.has_key("tool"))
+            .group_by(text("1")).order_by(text("n DESC")))]
+        levels = {x.level: x.n for x in await conn.execute(
             select(db.app_log.c.level, func.count().label("n")).where(db.app_log.c.ts >= since)
             .group_by(db.app_log.c.level))}
-    return {"minutes": minutes, "requests": by_host, "slowest_routes": slow, "log_levels": levels,
+    return {"minutes": minutes, "requests": by_host, "slowest_routes": slow,
+            "mcp_tools": tools, "mcp_other_posts": other, "log_levels": levels,
             "queued": {"requests": len(_requests), "logs": len(_logs), "dropped": _dropped}}
 
 

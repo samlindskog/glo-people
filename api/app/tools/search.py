@@ -112,7 +112,8 @@ class SortSpec(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    tier: fields.Tier | None = Field(None, description="Restrict to one tier")
+    tier: fields.Tier | list[fields.Tier] | None = Field(
+        None, description="Restrict to one tier, or to any of several; default: every tier")
     filters: list[FieldFilter] = Field(default_factory=list,
                                        description="Literal filters, combined with AND")
     semantic: SemanticQuery | None = None
@@ -121,6 +122,13 @@ class SearchRequest(BaseModel):
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 25
     page: Annotated[int, Field(ge=1)] = 1
 
+    @field_validator("tier")
+    @classmethod
+    def _some_tier(cls, v: Any) -> Any:
+        if isinstance(v, list) and not v:
+            raise ValueError("tier: give one tier or several, or leave it out for every tier")
+        return v
+
     @field_validator("filters")
     @classmethod
     def _filter_fields(cls, v: list[FieldFilter]) -> list[FieldFilter]:
@@ -128,6 +136,12 @@ class SearchRequest(BaseModel):
             if f.field not in ("name",) and not fields.valid_key(f.field):
                 raise ValueError(f"invalid field key {f.field!r}")
         return v
+
+    def tiers(self) -> list[str]:
+        """The tiers searched, in request order; empty means every tier."""
+        if self.tier is None:
+            return []
+        return list(dict.fromkeys(self.tier if isinstance(self.tier, list) else [self.tier]))
 
 
 class SearchHit(BaseModel):
@@ -144,6 +158,10 @@ class SearchResponse(BaseModel):
     limit: int
     results: list[SearchHit]
     search_id: int | None = None
+    at_or_above: dict[str, int] | None = Field(
+        None, description="Semantic searches: how many of the `total` score at or above a few "
+                          "tighter thresholds ({'0.45': 120, '0.5': 40, ...}), so a wide result "
+                          "can be narrowed without searching again")
 
 
 # --- literal filters → Mongo ------------------------------------------------------------------
@@ -229,8 +247,11 @@ async def mongo_query(req: SearchRequest) -> dict:
         if f.field not in cat:
             raise ValueError(f"unknown property {f.field!r} in filters (see the catalog)")
         clauses.append(filter_to_mongo(f, cat[f.field], await _lookup(cat[f.field])))
-    if req.tier:
-        clauses.append({"tier": req.tier})
+    tiers = req.tiers()
+    if len(tiers) == 1:
+        clauses.append({"tier": tiers[0]})
+    elif tiers:
+        clauses.append({"tier": {"$in": tiers}})
     return {"$and": clauses} if clauses else {}
 
 
@@ -268,7 +289,7 @@ ORDER BY score DESC, mongo_id
 """
 
 
-async def semantic_scores(sem: SemanticQuery, tier: str | None,
+async def semantic_scores(sem: SemanticQuery, tiers: list[str] | None,
                           ids: list[str] | None) -> list[tuple[str, float, dict]]:
     pairs = sem.passages()
     vectors = await embeddings.embed_queries([p for _, p in pairs])
@@ -280,12 +301,12 @@ async def semantic_scores(sem: SemanticQuery, tier: str | None,
     sql = _SCORE_SQL.format(
         values=", ".join(values),
         agg="avg" if sem.mode == "avg" else "max",
-        tier_clause="AND fe.tier = :tier" if tier else "",
+        tier_clause="AND fe.tier = ANY(:tiers)" if tiers else "",
         ids_clause="AND fe.mongo_id = ANY(:ids)" if ids is not None else "",
         all_clause="AND count(*) = :nfields" if sem.require_all_fields else "",
     )
-    if tier:
-        params["tier"] = tier
+    if tiers:
+        params["tiers"] = list(tiers)
     if ids is not None:
         params["ids"] = ids
     if sem.require_all_fields:
@@ -337,9 +358,10 @@ async def run_search(req: SearchRequest) -> SearchResponse:
     if req.filters:
         ids = await people.find_ids(query)
     sem = req.semantic.expanded(k for k, p in cat.items() if p.embeddable)
-    scored = await semantic_scores(sem, req.tier, ids)
+    scored = await semantic_scores(sem, req.tiers() or None, ids)
     by_id = {mid: (score, fs) for mid, score, fs in scored}
     total = len(scored)
+    at_or_above = tighter_counts([score for _, score, _ in scored], sem.threshold)
 
     if req.sort == "score":
         page_ids = [mid for mid, _, _ in scored[skip:skip + req.limit]]
@@ -357,7 +379,25 @@ async def run_search(req: SearchRequest) -> SearchResponse:
         score, fs = by_id[str(d["_id"])]
         results.append(SearchHit(id=str(d["_id"]), tier=d.get("tier", ""), score=round(score, 4),
                                  field_scores=fs, person=people.public(d)))
-    return SearchResponse(total=total, page=req.page, limit=req.limit, results=results)
+    return SearchResponse(total=total, page=req.page, limit=req.limit, results=results,
+                          at_or_above=at_or_above)
+
+
+TIGHTER_STEPS = 4          # thresholds reported above the one asked for
+TIGHTER_STEP = 0.05
+
+
+def tighter_counts(scores: list[float], threshold: float) -> dict[str, int]:
+    """How many scores reach each of a few thresholds above `threshold` (steps of
+    TIGHTER_STEP, up to 1), e.g. {'0.45': 120, '0.5': 40, '0.55': 9, '0.6': 2}: the caller
+    sees how a wide result narrows without running the search again."""
+    out: dict[str, int] = {}
+    for k in range(1, TIGHTER_STEPS + 1):
+        t = round(threshold + k * TIGHTER_STEP, 2)
+        if t > 1:
+            break
+        out[f"{t:g}"] = sum(1 for s in scores if s >= t - 1e-9)
+    return out
 
 
 async def record_search(principal: Principal, req: SearchRequest, resp: SearchResponse,
@@ -377,7 +417,7 @@ def describe(req: SearchRequest) -> dict:
     """Compact summary of a search for the activity log."""
     out: dict[str, Any] = {}
     if req.tier:
-        out["tier"] = req.tier
+        out["tier"] = req.tier if isinstance(req.tier, str) else ",".join(req.tier)
     if req.filters:
         out["filters"] = [f"{f.field} {f.op} {f.value!r}" for f in req.filters]
     if req.semantic:

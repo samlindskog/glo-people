@@ -21,11 +21,12 @@ import pytest
 from pydantic_ai import models as ai_models
 from sqlalchemy import text
 
-from app import auth, db, mongo, properties
+from app import auth, db, mongo, people, properties
 from app.assistants import runner
 from app.main import api, app, lifespan
 
 ai_models.ALLOW_MODEL_REQUESTS = False   # no accidental LLM calls from tests
+people.HOOKS_INLINE = True               # a test reads right after it writes; the deferred path has its own tests
 
 PASSWORD = "correct-horse-battery"
 

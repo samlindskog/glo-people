@@ -67,6 +67,26 @@ async def test_pages_tools_and_warnings_land_on_the_request(writer, client_facto
     await ops.flush()
     row = (await ops.request(r.headers["x-request-id"]))["requests"][0]
     assert row["route"] == "/mcp" and row["attrs"]["tool"] == "get_person" and row["attrs"]["ok"] is False
+    assert row["attrs"]["method"] == "tools/call"
+
+    # every MCP POST notes its JSON-RPC method, so a handshake or a held stream is named too
+    r = await anon.post("/mcp", headers={**HEADERS, "Authorization": f"Bearer {key}"},
+                        json={"jsonrpc": "2.0", "id": 2, "method": "initialize",
+                              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                         "clientInfo": {"name": "t", "version": "0"}}})
+    assert r.status_code == 200
+    await ops.flush()
+    assert (await ops.request(r.headers["x-request-id"]))["requests"][0]["attrs"] == {"method": "initialize"}
+    summary = await ops.summary(5)
+    assert [(t["tool"], t["n"], t["failed"]) for t in summary["mcp_tools"]] == [("get_person", 1, 1)]
+    assert {(o["method"], o["n"]) for o in summary["mcp_other_posts"]} == {("initialize", 1)}
+    assert all(s["route"] != "/mcp" for s in summary["slowest_routes"])
+    groups = await ops.request_groups("tool", minutes=5)
+    assert [(g["tool"], g["n"], g["failed"]) for g in groups] == [("get_person", 1, 0)]
+    by_status = {g["status"]: g["n"] for g in await ops.request_groups("status", minutes=5, path="/mcp")}
+    assert by_status == {200: 2}
+    with pytest.raises(ValueError):
+        await ops.request_groups("attrs", minutes=5)
 
     # a warning logged during a request carries the request id; errors carry the traceback
     ops.begin("req-abc")
@@ -150,7 +170,30 @@ async def test_ops_mcp_reads_everything(reader, writer):
     assert acts[0]["action"] == "board_company.put" and acts[0]["target"] == "acme"
     assert await call("ops_errors", {}) == []
     assert await call("ops_runs", {}) == {"live": []}
-    assert isinstance(await call("ops_mcp_calls", {"minutes": 5}), list)
+
+    # compact rows leave out what repeats; the full columns on request; groups instead of rows
+    assert set(reqs[0]) <= {"ts", "source", "host", "method", "path", "route", "status", "duration_ms",
+                            "client_ip", "user_agent", "request_id", "attrs"}
+    assert "id" not in reqs[0] and "attrs" not in reqs[0] and len(reqs[0]["ts"]) == 19
+    full = await call("ops_requests", {"minutes": 5, "path": "companies", "compact": False})
+    assert "id" in full[0] and full[0]["attrs"] == {}
+    groups = await call("ops_requests", {"minutes": 5, "group_by": "route", "source": "api"})
+    assert any(g["route"] == "/api/boards/companies/{slug}" and g["n"] == 1 for g in groups)
+    assert {"n", "p95_ms", "max_ms", "failed"} <= set(groups[0])
+
+    # the ledger without shapes, each call labelled with its conversation
+    key = (await writer.post("/api/api-keys", json={"name": "k"})).json()["key"]
+    for _ in range(2):
+        r = await reader.post("/mcp", headers={**HEADERS, "Authorization": f"Bearer {key}"},
+                              json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                    "params": {"name": "list_properties", "arguments": {}}})
+        assert r.status_code == 200
+    calls = await call("ops_mcp_calls", {"minutes": 5})
+    assert [c["tool"] for c in calls] == ["list_properties", "list_properties"]
+    assert "args" not in calls[0] and "result" not in calls[0] and "error" not in calls[0]
+    assert calls[0]["conversation"] == calls[1]["conversation"] and calls[0]["conversation"][:2] == "20"
+    calls = await call("ops_mcp_calls", {"minutes": 5, "shapes": True, "limit": 1})
+    assert len(calls) == 1 and calls[0]["args"] == {} and calls[0]["result"] is not None
 
 
 async def test_ops_answers_only_to_its_own_hosts(reader):

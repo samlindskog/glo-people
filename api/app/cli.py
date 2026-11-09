@@ -596,6 +596,7 @@ def main() -> None:
                     await list_providers(args.alexandria, args.category or ["people"],
                                          args.provider, args.limit)
         finally:
+            await people.flush_writes()        # the hooks of this process's writes run here
             await mongo.close()
             await db.dispose()
 

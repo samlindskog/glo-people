@@ -147,4 +147,5 @@ async def test_mcp_follow_up_after_an_upload(writer, client_factory):
     err, res = await call(c, key, "search_people", {
         "filters": [{"field": "stage", "op": "eq", "value": "Seed"}], "fields": ["stage"]})
     assert not err and len(res["results"]) == 1
-    assert set(res["results"][0]) <= {"id", "tier", "name", "score", "field_scores", "stage"}
+    assert set(res["results"][0]) <= {"id", "tier", "score", "field_scores", "person"}
+    assert set(res["results"][0]["person"]) == {"id", "tier", "name", "stage"}     # trimmed to what was asked

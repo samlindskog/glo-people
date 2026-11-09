@@ -165,3 +165,24 @@ async def test_no_call_blocks_past_the_wait_cap(client_factory, keys):
         "key": "normalize", "where": [{"field": "name", "op": "exists", "value": True}],
         "options": {"enrich": False}, "wait_seconds": 120})
     assert err and "50" in str(data)
+
+
+async def test_get_people_reads_several_at_once(client_factory, keys):
+    w, _ = keys
+    c = await client_factory()
+    await init(c, w)
+    err, hits = await call(c, w, "search_people", {"tier": ["member", "plus_one"], "fields": ["name"]})
+    assert not err and len(hits["results"]) == 2
+    assert all(set(h["person"]) == {"id", "tier", "name"} for h in hits["results"])   # trimmed, not dropped
+    ids = [h["id"] for h in hits["results"]]
+    names = [h["person"]["name"] for h in hits["results"]]
+    err, got = await call(c, w, "get_people", {"ids": [ids[1], ids[0], "000000000000000000000000", ids[0]],
+                                                "fields": ["bio"]})
+    assert not err, got
+    assert [p["name"] for p in got["people"]] == [names[1], names[0]]
+    assert set(got["people"][0]) == {"id", "tier", "name", "bio"} and "history" not in got["people"][0]
+    assert got["missing"] == ["000000000000000000000000"]
+    err, got = await call(c, w, "get_people", {"ids": [ids[0]], "include_history": True})
+    assert not err and "history" in got["people"][0]
+    err, _ = await call(c, w, "get_people", {"ids": []})
+    assert err

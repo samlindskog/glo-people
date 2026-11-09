@@ -62,9 +62,13 @@ Playbook
   embeddable properties (cosine; default threshold 0.4, 0.35-0.5 is the useful range): long
   texts (bio, about, company_description, enrichment_passage = the whole provider profile) and
   short values most people have (role, company, industry, location); fields ["*"] with mode
-  max compares one passage with all of them. plan_search writes such a request from a question. Call
-  list_properties once to see the properties, their types and canonical values. get_person reads one
-  record; pass include_history=false unless you need the entries.
+  max compares one passage with all of them. `tier` takes one tier or a list, so one call covers
+  members and plus-ones together; a semantic result carries `at_or_above`, how many of the hits
+  reach a few tighter thresholds, so a wide result is narrowed by raising the threshold once rather
+  than by paging. plan_search writes such a request from a question. Call list_properties once to
+  see the properties, their types and canonical values. get_person reads one record; pass
+  include_history=false unless you need the entries. get_people reads several records (up to 50
+  ids) in one call: after a search, read the people you want to look at with it, not one by one.
 - Adding information: one record → merge_person (matches a person by identifier or unique name, else
   creates one; known values are written as entered, long prose and unknown keys go to the storage
   agent; use dry_run first when unsure); several records → start_assistant("merge", records=[…]).
@@ -199,8 +203,9 @@ async def list_properties(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def search_people(
     ctx: Context,
-    tier: Annotated[fields.Tier | None,
-                    Field(description="Restrict to one tier")] = None,
+    tier: Annotated[fields.Tier | list[fields.Tier] | None,
+                    Field(description="Restrict to one tier, or to any of several "
+                                      "(e.g. ['member', 'plus_one']); default: every tier")] = None,
     filters: Annotated[list[FieldFilter] | None,
                        Field(description="Literal per-field filters, ANDed")] = None,
     semantic: Annotated[SemanticQuery | None,
@@ -210,8 +215,9 @@ async def search_people(
     limit: Annotated[int, Field(ge=1, le=MAX_LIMIT)] = 25,
     page: Annotated[int, Field(ge=1)] = 1,
     fields: Annotated[list[str] | None,
-                      Field(description="Only these properties in each result (id, tier, name and "
-                                        "the scores always come); default: every current value")] = None,
+                      Field(description="Only these properties in each hit's `person` (id, tier "
+                                        "and name always come, the scores too); default: every "
+                                        "current value")] = None,
 ) -> dict:
     """Tool: search people. Same parameters as the web UI and POST /api/search.
 
@@ -225,7 +231,10 @@ async def search_people(
     Short values (role, company, industry, location) and the whole provider profile
     (enrichment_passage) are embeddable too; "*" compares a passage with every embeddable property.
     Each result has id, tier, score (semantic only), field_scores and the person's properties
-    (plus `norm`, the normalised values of typed properties).
+    (plus `norm`, the normalised values of typed properties). A semantic response also carries
+    `at_or_above`: how many of `total` reach each of a few tighter thresholds, so when `total`
+    is far above `limit`, raise `threshold` to the step that leaves what you can read instead
+    of paging.
     """
     principal = await _principal(ctx, "people:read")
     try:
@@ -237,8 +246,11 @@ async def search_people(
     resp.search_id = await record_search(principal, req, resp, "mcp")
     out = json.loads(resp.model_dump_json())
     if fields:
-        keep = {"id", "tier", "name", "score", "field_scores", *fields}
-        out["results"] = [{k: v for k, v in r.items() if k in keep} for r in out["results"]]
+        # the properties live under each hit's `person`; the hit's own keys (id, tier, score,
+        # field_scores) stay as they are
+        keep = {"id", "tier", "name", *fields}
+        for hit in out["results"]:
+            hit["person"] = {k: v for k, v in hit["person"].items() if k in keep}
     return out
 
 
@@ -259,6 +271,40 @@ async def get_person(ctx: Context, id: Annotated[str, Field(description="Person 
     if not person:
         raise ToolError("person not found")
     return {**person, "glojobs": await boards.presence(person["id"])}
+
+
+MAX_GET_PEOPLE = 50
+
+
+@mcp.tool()
+async def get_people(ctx: Context,
+                     ids: Annotated[list[str], Field(min_length=1, max_length=MAX_GET_PEOPLE,
+                                                     description="Person ids, up to 50")],
+                     include_history: Annotated[bool, Field(description="Also return every "
+                                                                        "property's entries")] = False,
+                     fields: Annotated[list[str] | None,
+                                       Field(description="Only these properties per person (id, tier "
+                                                         "and name always come); default: every "
+                                                         "current value")] = None,
+                     ) -> dict:
+    """Fetch several people by id in one call: `people` in the order asked (the same record as
+    get_person, without `glojobs`), `missing` for ids nobody has. Use it after a search instead of
+    one get_person per hit."""
+    await _principal(ctx, "people:read")
+    wanted = list(dict.fromkeys(ids))
+    try:
+        docs = await people_svc.fetch(wanted)
+    except people_svc.PersonError as e:
+        raise ToolError(str(e)) from e
+    found = {str(d["_id"]): people_svc.public(d, include_history=include_history) for d in docs}
+    keep = {"id", "tier", "name", *(fields or [])} if fields else None
+    out = []
+    for pid in wanted:
+        person = found.get(pid)
+        if person is None:
+            continue
+        out.append({k: v for k, v in person.items() if k in keep} if keep else person)
+    return {"people": out, "missing": [pid for pid in wanted if pid not in found]}
 
 
 @mcp.tool()
@@ -1074,7 +1120,46 @@ class APIKeyAuth:
             await send({"type": "http.response.body", "body": body})
             return
         scope.setdefault("state", {})["principal"] = principal
+        if scope.get("method") == "POST":
+            receive = await _noting_method(receive)
         await self.app(scope, receive, send)
+
+
+MAX_PEEK_BYTES = 1 << 20
+
+
+async def _noting_method(receive: Receive) -> Receive:
+    """Read the request body, put its JSON-RPC method on the request's ops row (`attrs.method`:
+    initialize, tools/list, tools/call, ping…), and hand the body back unread. Without this the
+    request log knows a tool call from a handshake but nothing else about what the client sends,
+    e.g. the POST the claude.ai connector holds open for minutes."""
+    messages: list[dict] = []
+    body = b""
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message["type"] != "http.request":
+            break
+        body += message.get("body", b"")
+        if not message.get("more_body") or len(body) > MAX_PEEK_BYTES:
+            break
+    try:
+        parsed = json.loads(body) if body else None
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if isinstance(parsed, list):
+        methods = [m.get("method") for m in parsed if isinstance(m, dict) and m.get("method")]
+        if methods:
+            ops.note(method=methods[0] if len(methods) == 1 else ",".join(methods))
+
+    async def replay() -> dict:
+        if messages:
+            return messages.pop(0)
+        return await receive()
+
+    return replay
 
 
 def build_app() -> ASGIApp:

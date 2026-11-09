@@ -69,3 +69,63 @@ def test_registration_is_shared_and_idempotent(monkeypatch):
     from app import boards, embeddings
     from app.assistants import auto_review
     assert people._hooks == [embeddings.sync_person, boards.sync_person, auto_review.after_write]
+
+
+async def test_hooks_run_after_the_write_in_order_in_the_writers_context(monkeypatch, writer):
+    """Off the test suite's inline mode a commit queues its hooks: the request returns before
+    they run, one worker runs them in commit order in a copy of the writer's context, a failing
+    hook costs the others nothing, and `flush_writes` waits for the queue."""
+    import asyncio
+
+    from app.assistants import runner
+
+    monkeypatch.setattr(people, "HOOKS_INLINE", False)
+    monkeypatch.setattr(people, "_pending", None)
+    monkeypatch.setattr(people, "_worker", None)
+    seen: list[tuple[str, object]] = []
+    gate = asyncio.Event()
+
+    async def slow(info):
+        await gate.wait()
+        seen.append(("slow", info.keys))
+
+    async def broken(info):
+        raise RuntimeError("vector store down")
+
+    async def spy(info):
+        seen.append(("spy", runner.CURRENT_ITEM.get()))
+
+    monkeypatch.setattr(people, "_hooks", [slow, broken, spy])
+    r = await writer.post("/api/people", json={"tier": "member", "fields": {"name": "Zed", "bio": "a"}})
+    pid = r.json()["id"]
+    assert (await writer.patch(f"/api/people/{pid}", json={"fields": {"bio": "b"}})).status_code == 200
+    assert seen == [] and people.pending_writes() >= 1          # the requests came back first
+    with pytest.raises(TimeoutError):
+        await people.flush_writes(timeout=0.05)
+    token = runner.CURRENT_ITEM.set("item-7")                   # an assistant's item writing
+    try:
+        await people._after_write(people.WriteInfo(pid, None, ("notes",)))
+    finally:
+        runner.CURRENT_ITEM.reset(token)
+    gate.set()
+    await people.flush_writes(timeout=5)
+    assert seen == [("slow", ("bio", "name")), ("spy", None), ("slow", ("bio",)), ("spy", None),
+                    ("slow", ("notes",)), ("spy", "item-7")]    # commit order; the item's context kept
+    assert people.pending_writes() == 0
+    await people.flush_writes()                                 # nothing queued: returns at once
+
+    # a worker that died (cancelled at shutdown) does not make flush wait, or pass in silence
+    gate.clear()
+    await people._after_write(people.WriteInfo(pid, None, ("bio",)))
+    await people._after_write(people.WriteInfo(pid, None, ("about",)))
+    await asyncio.sleep(0)
+    people._worker.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await people._worker
+    assert people.pending_writes() == 1
+    await people.flush_writes(timeout=1)                        # returns, warns, does not hang
+    seen.clear()
+    await people._after_write(people.WriteInfo(pid, None, ("role",)))   # a new worker takes over
+    gate.set()
+    await people.flush_writes(timeout=5)
+    assert [k for _, k in seen if _ == "slow"] == [("role",)]

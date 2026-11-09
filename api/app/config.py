@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     # the API over syslog/UDP on ops_syslog_port (0 switches the listener off).
     git_sha: str = "dev"
     ops_retention_days: int = 30
+    write_hooks_drain_s: float = 60.0    # at shutdown, how long the API waits for queued write hooks
     ops_syslog_port: int = 5140
     # The Host values /ops/ answers to (any port): the tunnel address and localhost. Anything else
     # is refused with 421, so a page in the operator's browser cannot reach it by DNS rebinding.
